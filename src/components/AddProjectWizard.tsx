@@ -269,20 +269,22 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
                       </div>
                       <div className="flex-1 min-w-0 space-y-1">
                         <p className="text-xs font-medium text-slate-200">ChatGPT Planner</p>
-                        <input
-                          type="text"
-                          value={plannerUrl || ''}
-                          onChange={(e) => setPlannerUrl(e.target.value || undefined)}
-                          placeholder="Paste ChatGPT project URL or enter project/session ID..."
-                          className="w-full text-[11px] px-2 py-1 rounded bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-blue-500 font-mono truncate"
-                        />
-                        <button
-                          type="button"
-                          onClick={handleParsePlannerUrl}
-                          className="text-[10px] px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white font-medium transition-colors"
-                        >
-                          Parse URL
-                        </button>
+                        <div className="flex gap-1.5">
+                          <input
+                            type="text"
+                            value={plannerUrl || ''}
+                            onChange={(e) => setPlannerUrl(e.target.value || undefined)}
+                            placeholder="Paste ChatGPT project URL or enter project/session ID..."
+                            className="flex-1 min-w-0 text-[11px] px-2 py-1 rounded bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-blue-500 font-mono truncate"
+                          />
+                          <button
+                            type="button"
+                            onClick={handleParsePlannerUrl}
+                            className="text-[10px] px-2 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white font-medium transition-colors shrink-0"
+                          >
+                            Parse URL
+                          </button>
+                        </div>
                         {multiplePlanners ? (
                           <p className="text-[10px] text-amber-500 font-medium">Ambiguous: {multiplePlanners.length} matches found</p>
                         ) : null}
