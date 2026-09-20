@@ -923,8 +923,9 @@ export function buildChatGPTEnterSearchJavaScript(targetProjectName: string): st
  *   1. command + K for search
  *   2. paste project name copied from folder name
  *   3. 7 tabs then enter to go to project section and enter
- *   4. 2 tabs goes to target project then enter - loads the project
- *   5. then copy the url (read tab URL from Chrome)
+ *   4. PAUSE 1.2s to let project filter results load
+ *   5. 2 tabs goes to target project then enter - loads the project
+ *   6. then copy the url (read tab URL from Chrome)
  */
 export function buildChatGPTKeyboardProjectNavigationAppleScript(projectName: string): string {
   const escapedName = escapeAppleScriptStringLiteral(projectName);
@@ -945,20 +946,45 @@ export function buildChatGPTKeyboardProjectNavigationAppleScript(projectName: st
       -- 3. 7 tabs then enter to go to project section and enter
       repeat 7 times
         key code 48
-        delay 0.05
+        delay 0.08
       end repeat
-      delay 0.1
+      delay 0.15
       key code 36
-      delay 0.6
+
+      -- Essential pause: allow ChatGPT to load and render the filtered project results
+      delay 1.2
 
       -- 4. 2 tabs goes to target project then enter - loads the project
       repeat 2 times
         key code 48
-        delay 0.05
+        delay 0.15
       end repeat
-      delay 0.1
+      delay 0.2
       key code 36
-      delay 1.5
+      delay 2.0
+    end tell
+  `;
+}
+
+/**
+ * Builds the native AppleScript that advances 2 tabs into the filtered project list
+ * and hits Enter to load the project when the user is already on the Projects filter tab.
+ */
+export function buildChatGPTTwoTabsEnterAppleScript(): string {
+  return `
+    tell application "Google Chrome" to activate
+    delay 0.2
+    tell application "System Events"
+      -- Wait briefly for list to be interactive
+      delay 0.3
+      -- 2 tabs to target project then enter
+      repeat 2 times
+        key code 48
+        delay 0.15
+      end repeat
+      delay 0.2
+      key code 36
+      delay 2.0
     end tell
   `;
 }
@@ -1511,6 +1537,9 @@ export class ChatGPTProvider extends BaseMacOSProvider {
     }
     diag.searchValue = searchValue;
 
+    // Essential 1.2s pause: allow ChatGPT to filter and render project results after switching tab
+    await this.sleep(1200);
+
     // E. Inspect the filtered results and classify exact matches.
     const inspected = await this.inspectProjectResults(normalizedTarget, diag);
     if (!inspected) {
@@ -1521,6 +1550,48 @@ export class ChatGPTProvider extends BaseMacOSProvider {
     diag.exactMatchCount = inspected.exactMatchCount ?? 0;
 
     if (inspected.status === 'NONE') {
+      // If candidates were found in the UI but none was an exact match,
+      // do not blindly select an unrelated project.
+      if (
+        (inspected.projectResultCount && inspected.projectResultCount > 0) ||
+        (inspected.candidates && inspected.candidates.length > 0)
+      ) {
+        diag.selectedProject = undefined;
+        diag.discoveryError = 'Project not found';
+        return { success: false, error: 'Project not found', diagnostics: diag };
+      }
+
+      // If 0 results were found in DOM (e.g. DOM selector mismatch or rendering delay),
+      // try 2 tabs + Enter directly since the 7 tabs + Enter already switched to Projects tab
+      const twoTabNav = await this.executeTwoTabsEnterNavigation(diag);
+      if (twoTabNav.success && twoTabNav.url) {
+        diag.selectedProject = name.trim();
+        diag.finalUrl = twoTabNav.url;
+        diag.searchValue = name.trim();
+        return {
+          success: true,
+          projectName: name.trim(),
+          finalUrl: twoTabNav.url,
+          projectUrl: twoTabNav.url,
+          diagnostics: diag,
+        };
+      }
+
+      // 2. Try the full keyboard workflow (Cmd+K -> paste -> 7 tabs -> 1.2s pause -> 2 tabs -> Enter)
+      const kbNav = await this.executeKeyboardProjectNavigation(name, diag);
+      if (kbNav.success && kbNav.url) {
+        diag.selectedProject = name.trim();
+        diag.finalUrl = kbNav.url;
+        diag.searchValue = name.trim();
+        return {
+          success: true,
+          projectName: name.trim(),
+          finalUrl: kbNav.url,
+          projectUrl: kbNav.url,
+          diagnostics: diag,
+        };
+      }
+
       diag.selectedProject = undefined;
       diag.discoveryError = 'Project not found';
       return { success: false, error: 'Project not found', diagnostics: diag };
@@ -1598,12 +1669,46 @@ export class ChatGPTProvider extends BaseMacOSProvider {
   }
 
   /**
+   * Executes 2 tabs then Enter to select the project item in the filtered list,
+   * then waits and captures the URL from Chrome.
+   */
+  public async executeTwoTabsEnterNavigation(
+    diag?: any,
+  ): Promise<{ success: boolean; url?: string; error?: string }> {
+    if (typeof process === 'undefined' || process.platform !== 'darwin') {
+      return { success: false, error: 'macOS automation required' };
+    }
+
+    const script = buildChatGPTTwoTabsEnterAppleScript();
+    const res = this.runAppleScript(script, 8000);
+    if (!res.success) {
+      if (diag) diag.twoTabsError = res.error;
+      return { success: false, error: res.error };
+    }
+
+    // Poll for the URL to change to the project URL (up to 5 seconds)
+    for (let poll = 0; poll < 10; poll++) {
+      await this.sleep(500);
+      const url = await this.readTabUrl();
+      if (url && (url.includes('/g/g-p-') || url.includes('/projects') || url.includes('/p/'))) {
+        if (diag) {
+          diag.finalUrl = url;
+          diag.twoTabsSuccess = true;
+        }
+        return { success: true, url };
+      }
+    }
+    return { success: false, error: 'URL did not navigate to a project after 2 tabs + enter' };
+  }
+
+  /**
    * Executes the exact keyboard-driven ChatGPT project search sequence:
    * 1. command + K for search
    * 2. paste project name copied from folder name
    * 3. 7 tabs then enter to go to project section and enter
-   * 4. 2 tabs goes to target project then enter - loads the project
-   * 5. then copy / read the URL from the active Chrome tab
+   * 4. pause 1.2s to let project filter results load
+   * 5. 2 tabs goes to target project then enter - loads the project
+   * 6. then copy / read the URL from the active Chrome tab
    */
   public async executeKeyboardProjectNavigation(
     projectName: string,
@@ -1614,23 +1719,25 @@ export class ChatGPTProvider extends BaseMacOSProvider {
     }
 
     const script = buildChatGPTKeyboardProjectNavigationAppleScript(projectName);
-    const res = this.runAppleScript(script, 10000);
+    const res = this.runAppleScript(script, 12000);
     if (!res.success) {
       if (diag) diag.keyboardNavError = res.error;
       return { success: false, error: res.error };
     }
 
-    // 5. Copy / read the loaded URL from Chrome
-    await this.sleep(1000);
-    const url = await this.readTabUrl();
-    if (url && (url.includes('/g/g-p-') || url.includes('/projects') || url.includes('/p/'))) {
-      if (diag) {
-        diag.finalUrl = url;
-        diag.keyboardNavSuccess = true;
+    // Poll for the URL to change to the project URL (up to 6 seconds)
+    for (let poll = 0; poll < 12; poll++) {
+      await this.sleep(500);
+      const url = await this.readTabUrl();
+      if (url && (url.includes('/g/g-p-') || url.includes('/projects') || url.includes('/p/'))) {
+        if (diag) {
+          diag.finalUrl = url;
+          diag.keyboardNavSuccess = true;
+        }
+        return { success: true, url };
       }
-      return { success: true, url };
     }
-    return { success: false, url: url || undefined, error: 'URL did not navigate to a project after keyboard navigation' };
+    return { success: false, error: 'URL did not navigate to a project after keyboard navigation' };
   }
 
   private sleep(ms: number): Promise<void> {
