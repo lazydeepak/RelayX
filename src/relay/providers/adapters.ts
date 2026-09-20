@@ -620,16 +620,65 @@ export class ChatGPTProvider extends BaseMacOSProvider {
   }
 
   /**
+   * Helper to extract stable ChatGPT project ID (g-p-...) from URL.
+   * Centralized parsing rules:
+   * - Supports project root: https://chatgpt.com/g/g-p-xxxxx-slug/project or https://chatgpt.com/g/g-p-xxxxx-slug
+   * - Supports conversation inside project: https://chatgpt.com/g/g-p-xxxxx-slug/c/conv-id
+   * - Rejects unrelated /g/ URLs (e.g. custom GPTs or standard chat) and malformed URLs.
+   */
+  public extractChatGPTProjectId(url: string): string | null {
+    if (!url || typeof url !== 'string') return null;
+    try {
+      const parsed = new URL(url);
+      if (!parsed.hostname.endsWith('chatgpt.com')) return null;
+      const match = parsed.pathname.match(/\/g\/(g-p-[^/]+)(?:\/|$)/);
+      return match?.[1] ?? null;
+    } catch {
+      const match = url.match(/\/g\/(g-p-[^/]+)(?:\/|$)/);
+      return match?.[1] ?? null;
+    }
+  }
+
+  /**
+   * Canonicalizes a ChatGPT project URL to its standard project root form.
+   * e.g. https://chatgpt.com/g/g-p-123-abc/c/999 -> https://chatgpt.com/g/g-p-123-abc/project
+   */
+  public canonicalizeChatGPTProjectUrl(url: string): string | null {
+    const projectId = this.extractChatGPTProjectId(url);
+    if (!projectId) return null;
+    try {
+      const parsed = new URL(url);
+      const parts = parsed.pathname.split('/');
+      const gIndex = parts.indexOf('g');
+      if (gIndex !== -1 && parts[gIndex + 1]) {
+        const segment = parts[gIndex + 1];
+        if (segment.startsWith('g-p-')) {
+          return `${parsed.protocol}//${parsed.host}/g/${segment}/project`;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    const match = url.match(/\/g\/(g-p-[^/]+)/);
+    if (match) {
+      const segment = match[1];
+      return `https://chatgpt.com/g/${segment}/project`;
+    }
+    return null;
+  }
+
+  /**
    * macOS Automation: Resolves a ChatGPT project in Google Chrome.
    * Procedure: 
    * 1. Find/Activate ChatGPT tab in Chrome.
-   * 2. Inject JS to open Search, filter by Projects, and search for 'name'.
-   * 3. Identify and select the matching project.
-   * 4. Extract resulting URL.
+   * 2. Current-tab short-circuit: if already inside a ChatGPT Project or project conversation, parse projectId & canonicalUrl directly.
+   * 3. Otherwise use navigation search UI / project navigation aid to find project by display name.
+   * 4. Click matching project link, wait for navigation, and extract projectId/projectUrl.
    */
   public async resolveChatGPTProject(name: string): Promise<{ 
     success: boolean; 
     projectUrl?: string; 
+    projectId?: string;
     error?: string;
     foundMultiple?: Array<{ name: string; url: string }>;
     diagnostics?: any;
@@ -638,15 +687,15 @@ export class ChatGPTProvider extends BaseMacOSProvider {
       targetName: name,
       normalizedTargetName: name.toLowerCase().trim(),
       currentTabUrl: undefined,
+      shortCircuited: false,
       tabOpenedNew: false,
       jsSuccess: false,
-      searchBtnFound: false,
-      filterFound: false,
-      searchInputFound: false,
       totalAnchorsFound: 0,
       anchors: [],
       matchDetails: [],
       rawJsStatus: undefined,
+      finalUrl: undefined,
+      extractedProjectId: undefined,
       appleScriptError: undefined,
       timedOut: false,
     };
@@ -686,85 +735,116 @@ export class ChatGPTProvider extends BaseMacOSProvider {
         end if
 
         set currentUrl to URL of foundTab
+        return currentUrl & "|||" & (tabOpenedNew as string)
+      end tell
+    `;
+
+    const initialRes = this.runAppleScript(searchScript, 5000);
+    if (initialRes.success) {
+      const parts = initialRes.output.split('|||');
+      const currentUrl = parts[0];
+      diag.currentTabUrl = currentUrl;
+      diag.tabOpenedNew = parts[1] === 'true';
+
+      // Current-tab short-circuit check in Node
+      const existingProjectId = this.extractChatGPTProjectId(currentUrl);
+      if (existingProjectId) {
+        diag.shortCircuited = true;
+        diag.extractedProjectId = existingProjectId;
+        const canonicalUrl = this.canonicalizeChatGPTProjectUrl(currentUrl) || currentUrl;
+        return {
+          success: true,
+          projectUrl: canonicalUrl,
+          projectId: existingProjectId,
+          diagnostics: diag,
+        };
+      }
+    }
+
+    // If not short-circuited, proceed with navigation and search UI / anchor fallback
+    const navigationScript = `
+      tell application "Google Chrome"
+        set foundTab to missing value
+        repeat with w in windows
+          repeat with t in tabs of w
+            if URL of t contains "chatgpt.com" then
+              set foundTab to t
+              set active tab index of w to (index of t)
+              set index of w to 1
+              exit repeat
+            end if
+          end repeat
+          if foundTab is not missing value then exit repeat
+        end repeat
+
+        if foundTab is missing value then
+          tell window 1 to make new tab with properties {URL:"https://chatgpt.com"}
+          delay 3
+          set foundTab to active tab of window 1
+        end if
+
+        set currentUrl to URL of foundTab
 
         set jsResult to execute foundTab javascript "
-          (async () => {
+          (() => {
             let resObj = {
-              searchBtnFound: false,
-              filterFound: false,
-              searchInputFound: false,
               totalAnchorsFound: 0,
               anchors: [],
               matchDetails: [],
               status: ''
             };
             try {
-              let searchBtn = document.querySelector('button[aria-label*=\"Search\"], [data-testid*=\"search-button\"]');
-              resObj.searchBtnFound = !!searchBtn;
-              if (searchBtn) searchBtn.click();
-              await new Promise(r => setTimeout(r, 800));
-
-              let filters = Array.from(document.querySelectorAll('button, span')).filter(el => el.textContent === 'Projects');
-              resObj.filterFound = filters.length > 0;
-              if (filters.length > 0) filters[0].click();
-              await new Promise(r => setTimeout(r, 400));
-
-              let input = document.querySelector('input[placeholder*=\"Search\"], input[type=\"search\"]');
-              resObj.searchInputFound = !!input;
-              if (!input) {
-                resObj.status = 'error::Search input not found';
-                return JSON.stringify(resObj);
-              }
+              const target = ${JSON.stringify(name.toLowerCase().trim())};
+              const links = [...document.querySelectorAll('a[href]')];
               
-              input.value = '${name}';
-              input.dispatchEvent(new Event('input', { bubbles: true }));
-              input.dispatchEvent(new Event('change', { bubbles: true }));
-              await new Promise(r => setTimeout(r, 1200));
+              const projectLinks = links.filter(a => {
+                const href = a.getAttribute('href') || '';
+                return href.includes('/g/g-p-') || href.includes('/p/');
+              });
 
-              let allAnchors = Array.from(document.querySelectorAll('a[href*=\"/p/\"]'));
-              resObj.totalAnchorsFound = allAnchors.length;
-              resObj.anchors = allAnchors.map(a => ({ title: a.textContent.trim(), href: a.href }));
+              resObj.totalAnchorsFound = projectLinks.length;
+              resObj.anchors = projectLinks.map(a => ({ title: (a.innerText || a.textContent || '').trim(), href: a.href }));
 
-              const lowerTarget = '${name.toLowerCase().trim()}';
-              let matching = [];
-              for (const a of allAnchors) {
-                const titleText = a.textContent.trim();
-                const matched = titleText.toLowerCase().includes(lowerTarget);
+              const matches = projectLinks.filter(a => {
+                const text = (a.innerText || a.textContent || a.title || '').trim().toLowerCase();
+                const matched = text === target || text.includes(target);
                 resObj.matchDetails.push({
-                  title: titleText,
+                  title: text,
                   href: a.href,
                   matched,
-                  reason: matched ? 'Matched target name' : 'Title did not include target name'
+                  reason: matched ? 'Matched target project name' : 'Title did not match target'
                 });
-                if (matched) matching.push(a);
-              }
+                return matched;
+              });
 
-              if (matching.length > 1) {
-                resObj.status = 'multiple::' + matching.map(r => r.textContent.trim() + '::' + r.href).join('|');
+              if (matches.length === 0) {
+                resObj.status = 'NOT_FOUND';
                 return JSON.stringify(resObj);
               }
 
-              if (matching.length === 1) {
-                let targetUrl = matching[0].href;
-                matching[0].click();
-                resObj.status = 'success::' + targetUrl;
+              if (matches.length > 1) {
+                resObj.status = 'MULTIPLE::' + matches.map(a => (a.innerText || a.textContent || 'project').trim() + '::' + a.href).join('|');
                 return JSON.stringify(resObj);
               }
 
-              resObj.status = 'not_found';
+              matches[0].click();
+              resObj.status = 'OPENED::' + matches[0].href;
               return JSON.stringify(resObj);
             } catch (e) {
-              resObj.status = 'error::' + e.message;
+              resObj.status = 'ERROR::' + e.message;
               return JSON.stringify(resObj);
             }
-          })()
+          })();
         "
 
-        return currentUrl & "|||" & (tabOpenedNew as string) & "|||" & jsResult
+        delay 2
+        set finalUrl to URL of foundTab
+
+        return currentUrl & "|||" & finalUrl & "|||" & jsResult
       end tell
     `;
 
-    const res = this.runAppleScript(searchScript, 10000);
+    const res = this.runAppleScript(navigationScript, 12000);
     if (!res.success) {
       diag.appleScriptError = res.error;
       diag.timedOut = res.error?.includes('timed out') || false;
@@ -773,14 +853,11 @@ export class ChatGPTProvider extends BaseMacOSProvider {
 
     const parts = res.output.split('|||');
     diag.currentTabUrl = parts[0];
-    diag.tabOpenedNew = parts[1] === 'true';
+    diag.finalUrl = parts[1];
     const jsonStr = parts.slice(2).join('|||');
 
     try {
       const parsed = JSON.parse(jsonStr);
-      diag.searchBtnFound = parsed.searchBtnFound;
-      diag.filterFound = parsed.filterFound;
-      diag.searchInputFound = parsed.searchInputFound;
       diag.totalAnchorsFound = parsed.totalAnchorsFound;
       diag.anchors = parsed.anchors;
       diag.matchDetails = parsed.matchDetails;
@@ -788,18 +865,30 @@ export class ChatGPTProvider extends BaseMacOSProvider {
       diag.jsSuccess = true;
 
       const output = parsed.status;
-      if (output.startsWith('success::')) {
-        return { success: true, projectUrl: output.split('success::')[1], diagnostics: diag };
-      } else if (output.startsWith('multiple::')) {
-        const matches = output.split('multiple::')[1].split('|').map((m: string) => {
+      if (output.startsWith('MULTIPLE::')) {
+        const matches = output.split('MULTIPLE::')[1].split('|').map((m: string) => {
           const [mName, mUrl] = m.split('::');
           return { name: mName, url: mUrl };
         });
         return { success: false, error: 'Multiple projects found', foundMultiple: matches as any, diagnostics: diag };
-      } else if (output.startsWith('error::')) {
-        return { success: false, error: output.split('error::')[1], diagnostics: diag };
+      } else if (output.startsWith('NOT_FOUND')) {
+        return { success: false, error: 'Project not found through navigation aid', diagnostics: diag };
+      } else if (output.startsWith('ERROR::')) {
+        return { success: false, error: output.split('ERROR::')[1], diagnostics: diag };
+      } else if (output.startsWith('OPENED::') || (diag.finalUrl && this.extractChatGPTProjectId(diag.finalUrl))) {
+        const rawUrl = (diag.finalUrl && this.extractChatGPTProjectId(diag.finalUrl)) ? diag.finalUrl : output.split('OPENED::')[1];
+        const projectId = this.extractChatGPTProjectId(rawUrl);
+        const canonicalUrl = this.canonicalizeChatGPTProjectUrl(rawUrl) || rawUrl;
+        diag.extractedProjectId = projectId;
+
+        return { 
+          success: true, 
+          projectUrl: canonicalUrl, 
+          projectId: projectId || undefined,
+          diagnostics: diag 
+        };
       }
-      return { success: false, error: 'Project not found through search', diagnostics: diag };
+      return { success: false, error: 'Project not found through navigation aid', diagnostics: diag };
     } catch (parseErr: any) {
       diag.rawJsStatus = jsonStr;
       diag.appleScriptError = `JSON parse error: ${parseErr.message}`;
