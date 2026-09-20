@@ -2,7 +2,7 @@ import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert';
 import { SqliteRelayDatabase } from '../src/relay/persistence/sqlite/SqliteDatabase.ts';
 import { RelayEngine } from '../src/relay/application/RelayEngine.ts';
-import { MockProvider } from '../src/relay/providers/MockProvider.ts';
+import { MockProvider } from './MockProvider.ts';
 import { AmbiguousDeliveryResendError } from '../src/relay/domain/errors.ts';
 
 describe('Relay Engine Application Lifecycle & Supervision', () => {
