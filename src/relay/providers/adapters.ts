@@ -992,13 +992,18 @@ export function buildChatGPTTwoTabsEnterAppleScript(): string {
 /**
  * Builds the JS that inspects the filtered results: isolates PROJECT results
  * only (project-type hrefs), computes exact case-insensitive matches against the
- * normalized target, and reports counts/candidates for diagnostics.
+ * normalized target (treating spaces, hyphens, and underscores as equivalent),
+ * and reports counts/candidates for diagnostics.
  */
 export function buildChatGPTInspectResultsJavaScript(targetProjectName: string): string {
   const targetLiteral = JSON.stringify(targetProjectName);
   return `(() => {
   const STAGE = "__relay_stage_inspect_results__";
   const target = ${targetLiteral};
+  const normalize = function (str) {
+    return (str || '').toLowerCase().trim().replace(/[-_\\s]+/g, ' ');
+  };
+  const normTarget = normalize(target);
   const isProjectHref = function (href) {
     return href.indexOf('/projects/') !== -1 || href.indexOf('/p/') === 0 || href.indexOf('/g/g-p-') !== -1;
   };
@@ -1009,7 +1014,10 @@ export function buildChatGPTInspectResultsJavaScript(targetProjectName: string):
   const candidates = projectAnchors.map(function (a) {
     return { name: (a.innerText || a.textContent || '').trim(), href: a.href };
   }).filter(function (c) { return c.name.length > 0; });
-  const exact = candidates.filter(function (c) { return c.name.trim().toLowerCase() === target; });
+  const exact = candidates.filter(function (c) {
+    const normCand = normalize(c.name);
+    return normCand === normTarget || c.name.trim().toLowerCase() === target;
+  });
   return JSON.stringify({
     resultCount: projectAnchors.length,
     projectResultCount: candidates.length,
@@ -1031,6 +1039,10 @@ export function buildChatGPTClickExactJavaScript(targetProjectName: string): str
   return `(() => {
   const STAGE = "__relay_stage_click_exact__";
   const target = ${targetLiteral};
+  const normalize = function (str) {
+    return (str || '').toLowerCase().trim().replace(/[-_\\s]+/g, ' ');
+  };
+  const normTarget = normalize(target);
   const isProjectHref = function (href) {
     return href.indexOf('/projects/') !== -1 || href.indexOf('/p/') === 0 || href.indexOf('/g/g-p-') !== -1;
   };
@@ -1039,7 +1051,8 @@ export function buildChatGPTClickExactJavaScript(targetProjectName: string): str
     return isProjectHref(href);
   });
   const exact = projectAnchors.filter(function (a) {
-    return (a.innerText || a.textContent || '').trim().toLowerCase() === target;
+    const name = (a.innerText || a.textContent || '').trim();
+    return normalize(name) === normTarget || name.toLowerCase() === target;
   });
   if (exact.length !== 1) {
     return JSON.stringify({ clicked: false, exactCount: exact.length, url: location.href });

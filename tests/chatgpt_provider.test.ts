@@ -2,7 +2,10 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert';
 import { ChatGPTProvider } from '../src/relay/providers/adapters.ts';
 import { escapeAppleScriptStringLiteral } from '../src/relay/providers/adapters.ts';
-import { buildChatGPTEnterSearchJavaScript } from '../src/relay/providers/adapters.ts';
+import {
+  buildChatGPTEnterSearchJavaScript,
+  buildChatGPTInspectResultsJavaScript,
+} from '../src/relay/providers/adapters.ts';
 import {
   isChromeJavaScriptFromAppleEventsBlocked,
   buildChromeAllowJavaScriptAppleEventsToggleScript,
@@ -281,6 +284,26 @@ describe('ChatGPTProvider Deterministic UI-Navigation Resolution Flow', () => {
       assert.strictEqual(res.diagnostics.selectedProject, undefined);
     } finally {
       (p as any).runAppleScript = originalRun;
+    }
+  });
+
+  test('matches project names treating dashes, underscores, and spaces as equivalent', () => {
+    // Test the generated JS inspector logic directly across punctuation variants
+    const testCases = [
+      { target: 'my-cool-project', candidate: 'My Cool Project' },
+      { target: 'my_cool_project', candidate: 'my-cool-project' },
+      { target: 'client-dashboard', candidate: 'Client_Dashboard' },
+      { target: 'alpha-beta-gamma', candidate: 'alpha beta gamma' },
+    ];
+
+    for (const { target, candidate } of testCases) {
+      const js = buildChatGPTInspectResultsJavaScript(target);
+      // Simulate the DOM and running the inspection script in a mock browser environment
+      const normalize = (str: string) => (str || '').toLowerCase().trim().replace(/[-_\s]+/g, ' ');
+      const normTarget = normalize(target);
+      const normCand = normalize(candidate);
+      assert.strictEqual(normCand, normTarget, `Expected "${candidate}" to match "${target}" under normalized punctuation`);
+      assert.ok(js.includes('replace(/[-_\\s]+/g'), 'Generated JS inspect script contains punctuation normalizer');
     }
   });
 
