@@ -652,18 +652,18 @@ export function buildChatGPTReadyCheckJavaScript(): string {
 
 /**
  * Builds the JS that opens the ChatGPT project/search navigation UI
- * (the sidebar "Projects" entry, sidebar "Search chats", or search modal)
+ * (the sidebar "Search chats", "Projects" entry, or search modal)
  * in the discovery tab.
  */
 export function buildChatGPTProjectsOpenJavaScript(): string {
   return `(() => {
   const STAGE = "__relay_stage_open_projects__";
 
-  // 1. If search input or project route is already open, succeed immediately
+  // 1. If search input or project index route is already open, succeed immediately
   const existingSearchInput = document.querySelector(
-    'input[placeholder*="Search" i], input[aria-label*="search" i], input[type="search"], [role="searchbox"], [role="combobox"][placeholder*="Search" i]'
+    '[role="dialog"] input, [role="dialog"] [role="searchbox"], input[placeholder*="Search" i], input[aria-label*="search" i], input[type="search"], [role="searchbox"], [role="combobox"][placeholder*="Search" i]'
   );
-  if (existingSearchInput || location.pathname.startsWith('/projects') || location.pathname.startsWith('/p/')) {
+  if (existingSearchInput || location.pathname === '/projects' || location.pathname.startsWith('/projects/')) {
     return JSON.stringify({
       clicked: true,
       alreadyOpen: true,
@@ -674,7 +674,7 @@ export function buildChatGPTProjectsOpenJavaScript(): string {
 
   // 2. If sidebar is collapsed, expand it first
   const sidebarToggle = document.querySelector(
-    'button[aria-label*="Open sidebar" i], button[data-testid*="open-sidebar" i], button[aria-label*="sidebar" i]'
+    'button[aria-label*="Open sidebar" i], button[data-testid*="open-sidebar" i]'
   );
   if (sidebarToggle && !document.querySelector('nav, [data-testid*="sidebar" i]')) {
     sidebarToggle.click();
@@ -682,80 +682,36 @@ export function buildChatGPTProjectsOpenJavaScript(): string {
 
   let clickedInfo = null;
 
-  // 3. Look for explicit projects links or buttons
-  const projectSels = [
-    'a[href*="/projects"]',
-    'a[href^="/p/"]',
-    'a[href*="/g/"]',
-    '[aria-label*="Projects" i]',
-    '[aria-label*="project" i]',
-    '[data-testid*="project" i]'
+  // 3. Search / Search chats button in sidebar (opens command palette / search dialog)
+  const searchSels = [
+    'button[data-testid*="search" i]',
+    '[data-testid="search-button"]',
+    'button[aria-label*="Search" i]',
+    '[aria-label*="Search chats" i]',
+    'a[href*="/search"]'
   ];
-  for (let i = 0; i < projectSels.length; i++) {
-    const el = document.querySelector(projectSels[i]);
+  for (let i = 0; i < searchSels.length; i++) {
+    const el = document.querySelector(searchSels[i]);
     if (el) {
       clickedInfo = {
-        selector: projectSels[i],
+        selector: searchSels[i],
         text: (el.innerText || el.textContent || '').trim(),
-        href: (el.getAttribute && el.getAttribute('href')) || null
+        href: null
       };
       el.click();
       break;
     }
   }
 
-  // 4. Look for text matching "Projects" across clickable / nav elements
-  if (!clickedInfo) {
-    const candidates = [...document.querySelectorAll('a, button, [role="button"], [role="tab"], [role="menuitem"], li')];
-    for (let i = 0; i < candidates.length; i++) {
-      const e = candidates[i];
-      const t = (e.innerText || e.textContent || '').trim().toLowerCase();
-      if (t === 'projects' || t.startsWith('projects\\n') || t.startsWith('projects ') || /\\bprojects\\b/i.test(t)) {
-        if (t.length < 50) {
-          clickedInfo = {
-            selector: 'text:Projects',
-            text: (e.innerText || e.textContent || '').trim(),
-            href: (e.getAttribute && e.getAttribute('href')) || null
-          };
-          e.click();
-          break;
-        }
-      }
-    }
-  }
-
-  // 5. Look for Search / Search chats button (which opens project & chat search dialog)
-  if (!clickedInfo) {
-    const searchSels = [
-      'button[data-testid*="search" i]',
-      '[data-testid="search-button"]',
-      'button[aria-label*="Search" i]',
-      '[aria-label*="Search chats" i]',
-      'a[href*="/search"]'
-    ];
-    for (let i = 0; i < searchSels.length; i++) {
-      const el = document.querySelector(searchSels[i]);
-      if (el) {
-        clickedInfo = {
-          selector: searchSels[i],
-          text: (el.innerText || el.textContent || '').trim(),
-          href: null
-        };
-        el.click();
-        break;
-      }
-    }
-  }
-
-  // 6. Look for clickable element with "search chats" or "search" text
+  // 4. Look for clickable element with "search chats" or "search" text
   if (!clickedInfo) {
     const clickables = [...document.querySelectorAll('a, button, [role="button"]')];
     for (let i = 0; i < clickables.length; i++) {
       const e = clickables[i];
       const t = (e.innerText || e.textContent || '').trim().toLowerCase();
-      if (t === 'search chats' || t === 'search' || (t.includes('search chats') && t.length < 40)) {
+      if (t === 'search chats' || t === 'search') {
         clickedInfo = {
-          selector: 'text:SearchChats',
+          selector: 'text:' + t,
           text: (e.innerText || e.textContent || '').trim(),
           href: null
         };
@@ -765,19 +721,43 @@ export function buildChatGPTProjectsOpenJavaScript(): string {
     }
   }
 
-  // 7. Fallback: try keyboard shortcut Cmd+K / Ctrl+K
+  // 5. Look for explicit "Projects" section link or button (NOT individual project links)
   if (!clickedInfo) {
-    try {
-      const ev = new KeyboardEvent('keydown', { key: 'k', code: 'KeyK', keyCode: 75, which: 75, metaKey: true, bubbles: true });
-      document.dispatchEvent(ev);
-      window.dispatchEvent(ev);
-      clickedInfo = {
-        selector: 'shortcut:Cmd+K',
-        text: 'Cmd+K',
-        href: null
-      };
-    } catch {
-      // ignore
+    const projectSels = [
+      'a[href="/projects"]',
+      'a[href*="/projects"]',
+      '[aria-label="Projects"]',
+      '[aria-label="Projects" i]'
+    ];
+    for (let i = 0; i < projectSels.length; i++) {
+      const el = document.querySelector(projectSels[i]);
+      if (el) {
+        clickedInfo = {
+          selector: projectSels[i],
+          text: (el.innerText || el.textContent || '').trim(),
+          href: (el.getAttribute && el.getAttribute('href')) || null
+        };
+        el.click();
+        break;
+      }
+    }
+  }
+
+  // 6. Exact text match for "Projects" (never substring/regex to avoid clicking individual projects)
+  if (!clickedInfo) {
+    const candidates = [...document.querySelectorAll('a, button, [role="button"], [role="tab"], [role="menuitem"]')];
+    for (let i = 0; i < candidates.length; i++) {
+      const e = candidates[i];
+      const t = (e.innerText || e.textContent || '').trim().toLowerCase();
+      if (t === 'projects') {
+        clickedInfo = {
+          selector: 'text:Projects',
+          text: (e.innerText || e.textContent || '').trim(),
+          href: (e.getAttribute && e.getAttribute('href')) || null
+        };
+        e.click();
+        break;
+      }
     }
   }
 
@@ -794,16 +774,23 @@ export function buildChatGPTProjectsVisibleCheckJavaScript(): string {
   const STAGE = "__relay_stage_projects_visible__";
   const path = location.pathname;
   const hasSearchInput = !!document.querySelector(
-    'input[placeholder*="Search" i], input[aria-label*="search" i], input[type="search"], [role="searchbox"], input[data-testid*="search" i], [role="dialog"] input, [role="combobox"][placeholder*="Search" i]'
+    '[role="dialog"] input, [role="dialog"] [role="searchbox"], input[placeholder*="Search" i], input[aria-label*="search" i], input[type="search"], [role="searchbox"], input[data-testid*="search" i], [role="combobox"][placeholder*="Search" i]'
   );
+  const activeEl = document.activeElement;
+  const isActiveSearch = !!(activeEl && (
+    activeEl.tagName === 'INPUT' ||
+    activeEl.getAttribute('role') === 'searchbox' ||
+    activeEl.getAttribute('role') === 'combobox'
+  ) && !activeEl.closest('form[class*="composer" i]'));
+
   const hasProjectList = !!document.querySelector(
-    'a[href*="/projects/"], a[href*="/projects"], a[href^="/p/"], a[href*="/g/g-p-"], [data-testid*="project-list" i], [data-testid*="project" i]'
+    'a[href*="/projects/"], [data-testid*="project-list" i]'
   );
-  const isProjectPath = path.indexOf('/projects') === 0 || path.indexOf('/g/g-p-') === 0 || path.indexOf('/p/') === 0;
+  const isProjectsRoute = path === '/projects' || path.startsWith('/projects/');
 
   // If search modal is open, attempt to select "Projects" tab/pill if available
-  if (hasSearchInput) {
-    const pills = [...document.querySelectorAll('button, [role="tab"], [role="radio"]')];
+  if (hasSearchInput || isActiveSearch) {
+    const pills = [...document.querySelectorAll('[role="dialog"] button, [role="dialog"] [role="tab"], [role="dialog"] [role="radio"], button, [role="tab"]')];
     for (let i = 0; i < pills.length; i++) {
       const t = (pills[i].innerText || pills[i].textContent || '').trim().toLowerCase();
       if (t === 'projects') {
@@ -819,9 +806,9 @@ export function buildChatGPTProjectsVisibleCheckJavaScript(): string {
   }
 
   return JSON.stringify({
-    visible: isProjectPath || hasSearchInput || hasProjectList,
+    visible: isProjectsRoute || hasSearchInput || isActiveSearch || hasProjectList,
     path: path,
-    hasSearchInput: hasSearchInput,
+    hasSearchInput: hasSearchInput || isActiveSearch,
     hasProjectList: hasProjectList
   });
 })();`;
@@ -839,22 +826,63 @@ export function buildChatGPTEnterSearchJavaScript(targetProjectName: string): st
   const STAGE = "__relay_stage_enter_search__";
   const target = ${targetLiteral};
   const sels = [
+    '[role="dialog"] input',
+    '[role="dialog"] [role="searchbox"]',
+    '[role="dialog"] [role="combobox"] input',
+    '[role="dialog"] [role="combobox"]',
     'input[placeholder*="Search" i]',
     'input[aria-label*="search" i]',
     'input[type="search"]',
     'input[data-testid*="search" i]',
-    '[role="dialog"] input',
     '[role="searchbox"]',
-    '[role="combobox"][placeholder*="Search" i]'
+    '[role="combobox"][placeholder*="Search" i]',
+    'input#search',
+    'input[name*="search" i]',
+    '[role="dialog"] [contenteditable="true"]'
   ];
+
   let input = null;
-  for (let i = 0; i < sels.length; i++) {
-    const el = document.querySelector(sels[i]);
-    if (el) { input = el; break; }
+
+  // 1. Check if activeElement is an input/searchbox (e.g. focused by Cmd+K)
+  const active = document.activeElement;
+  if (active && (active.tagName === 'INPUT' || active.getAttribute('role') === 'searchbox' || active.getAttribute('role') === 'combobox')) {
+    if (!active.closest('form[class*="composer" i], [data-testid*="composer" i]')) {
+      input = active;
+    }
   }
+
+  // 2. Query candidates and pick the first visible element
+  if (!input) {
+    for (let i = 0; i < sels.length; i++) {
+      const els = document.querySelectorAll(sels[i]);
+      for (let j = 0; j < els.length; j++) {
+        const el = els[j];
+        if (el && (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0)) {
+          if (el.tagName === 'TEXTAREA' && !el.closest('[role="dialog"]')) continue;
+          input = el;
+          break;
+        }
+      }
+      if (input) break;
+    }
+  }
+
+  // 3. Fallback: any visible input inside a dialog
+  if (!input) {
+    const dialogInputs = document.querySelectorAll('[role="dialog"] input, div[data-state="open"] input');
+    for (let k = 0; k < dialogInputs.length; k++) {
+      const el = dialogInputs[k];
+      if (el && (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0)) {
+        input = el;
+        break;
+      }
+    }
+  }
+
   if (!input) {
     return JSON.stringify({ found: false, value: null, url: location.href });
   }
+
   input.focus();
   const proto = (window.HTMLTextAreaElement && input instanceof window.HTMLTextAreaElement)
     ? window.HTMLTextAreaElement.prototype
@@ -868,8 +896,71 @@ export function buildChatGPTEnterSearchJavaScript(targetProjectName: string): st
   }
   input.dispatchEvent(new Event('input', { bubbles: true }));
   input.dispatchEvent(new Event('change', { bubbles: true }));
-  return JSON.stringify({ found: true, value: input.value, url: location.href });
+  input.dispatchEvent(new KeyboardEvent('input', { bubbles: true }));
+
+  // Step 3 (DOM equivalent of 7 tabs + Enter): switch to "Projects" section
+  const pills = [...document.querySelectorAll('[role="dialog"] button, [role="dialog"] [role="tab"], [role="dialog"] [role="radio"]')];
+  for (let i = 0; i < pills.length; i++) {
+    const t = (pills[i].innerText || pills[i].textContent || '').trim().toLowerCase();
+    if (t === 'projects') {
+      const isSelected = pills[i].getAttribute('aria-selected') === 'true' ||
+                         pills[i].getAttribute('data-state') === 'active' ||
+                         pills[i].getAttribute('aria-checked') === 'true';
+      if (!isSelected) {
+        pills[i].click();
+      }
+      break;
+    }
+  }
+
+  return JSON.stringify({ found: true, value: input.value || target, url: location.href });
 })();`;
+}
+
+/**
+ * Builds the native macOS AppleScript that performs the user's exact keyboard-driven
+ * ChatGPT project search flow:
+ *   1. command + K for search
+ *   2. paste project name copied from folder name
+ *   3. 7 tabs then enter to go to project section and enter
+ *   4. 2 tabs goes to target project then enter - loads the project
+ *   5. then copy the url (read tab URL from Chrome)
+ */
+export function buildChatGPTKeyboardProjectNavigationAppleScript(projectName: string): string {
+  const escapedName = escapeAppleScriptStringLiteral(projectName);
+  return `
+    tell application "Google Chrome" to activate
+    delay 0.3
+    tell application "System Events"
+      -- 1. Command + K for search
+      keystroke "k" using command down
+      delay 0.5
+
+      -- 2. Paste project name copied from folder name
+      set the clipboard to "${escapedName}"
+      delay 0.1
+      keystroke "v" using command down
+      delay 0.6
+
+      -- 3. 7 tabs then enter to go to project section and enter
+      repeat 7 times
+        key code 48
+        delay 0.05
+      end repeat
+      delay 0.1
+      key code 36
+      delay 0.6
+
+      -- 4. 2 tabs goes to target project then enter - loads the project
+      repeat 2 times
+        key code 48
+        delay 0.05
+      end repeat
+      delay 0.1
+      key code 36
+      delay 1.5
+    end tell
+  `;
 }
 
 /**
@@ -1401,6 +1492,20 @@ export class ChatGPTProvider extends BaseMacOSProvider {
     // D. Enter the project name into the search input.
     const searchValue = await this.enterProjectSearch(normalizedTarget, diag);
     if (searchValue === null) {
+      // Fallback: execute user's exact keyboard workflow (Cmd+K -> Paste -> 7 tabs + Enter -> 2 tabs + Enter)
+      const kbNav = await this.executeKeyboardProjectNavigation(name, diag);
+      if (kbNav.success && kbNav.url) {
+        diag.selectedProject = name.trim();
+        diag.finalUrl = kbNav.url;
+        diag.searchValue = name.trim();
+        return {
+          success: true,
+          projectName: name.trim(),
+          finalUrl: kbNav.url,
+          projectUrl: kbNav.url,
+          diagnostics: diag,
+        };
+      }
       diag.discoveryError = 'ChatGPT projects search input not found';
       return { success: false, error: diag.discoveryError, diagnostics: diag };
     }
@@ -1437,6 +1542,19 @@ export class ChatGPTProvider extends BaseMacOSProvider {
     // F. Open the single exact match.
     const clicked = await this.clickProjectExact(normalizedTarget, diag);
     if (!clicked.clicked) {
+      // Fallback: execute keyboard selection
+      const kbNav = await this.executeKeyboardProjectNavigation(name, diag);
+      if (kbNav.success && kbNav.url) {
+        diag.selectedProject = name.trim();
+        diag.finalUrl = kbNav.url;
+        return {
+          success: true,
+          projectName: name.trim(),
+          finalUrl: kbNav.url,
+          projectUrl: kbNav.url,
+          diagnostics: diag,
+        };
+      }
       diag.discoveryError = `Exact match click failed (count=${clicked.exactCount})`;
       return { success: false, error: diag.discoveryError, diagnostics: diag };
     }
@@ -1477,6 +1595,42 @@ export class ChatGPTProvider extends BaseMacOSProvider {
       projectUrl: finalUrl,
       diagnostics: diag,
     };
+  }
+
+  /**
+   * Executes the exact keyboard-driven ChatGPT project search sequence:
+   * 1. command + K for search
+   * 2. paste project name copied from folder name
+   * 3. 7 tabs then enter to go to project section and enter
+   * 4. 2 tabs goes to target project then enter - loads the project
+   * 5. then copy / read the URL from the active Chrome tab
+   */
+  public async executeKeyboardProjectNavigation(
+    projectName: string,
+    diag?: any,
+  ): Promise<{ success: boolean; url?: string; error?: string }> {
+    if (typeof process === 'undefined' || process.platform !== 'darwin') {
+      return { success: false, error: 'macOS automation required' };
+    }
+
+    const script = buildChatGPTKeyboardProjectNavigationAppleScript(projectName);
+    const res = this.runAppleScript(script, 10000);
+    if (!res.success) {
+      if (diag) diag.keyboardNavError = res.error;
+      return { success: false, error: res.error };
+    }
+
+    // 5. Copy / read the loaded URL from Chrome
+    await this.sleep(1000);
+    const url = await this.readTabUrl();
+    if (url && (url.includes('/g/g-p-') || url.includes('/projects') || url.includes('/p/'))) {
+      if (diag) {
+        diag.finalUrl = url;
+        diag.keyboardNavSuccess = true;
+      }
+      return { success: true, url };
+    }
+    return { success: false, url: url || undefined, error: 'URL did not navigate to a project after keyboard navigation' };
   }
 
   private sleep(ms: number): Promise<void> {
@@ -1671,6 +1825,21 @@ export class ChatGPTProvider extends BaseMacOSProvider {
       }
     }
 
+    // Also trigger native macOS Command+K shortcut via System Events
+    // (This is the universal ChatGPT shortcut to open Search Chats & Projects modal)
+    try {
+      this.runAppleScript(`
+        tell application "Google Chrome" to activate
+        tell application "System Events"
+          try
+            keystroke "k" using command down
+          end try
+        end tell
+      `, 1500);
+    } catch {
+      // ignore
+    }
+
     const maxAttempts = 12;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const vres = this.executeTabJavaScript(buildChatGPTProjectsVisibleCheckJavaScript(), 2500);
@@ -1683,8 +1852,18 @@ export class ChatGPTProvider extends BaseMacOSProvider {
           // retry
         }
       }
-      // If still not visible after 2 or 5 attempts, re-run open script (e.g. sidebar toggle just finished animating)
+      // If still not visible after 2 or 5 attempts, re-run open script & retry native Cmd+K
       if (attempt === 2 || attempt === 5) {
+        try {
+          this.runAppleScript(`
+            tell application "Google Chrome" to activate
+            tell application "System Events"
+              try
+                keystroke "k" using command down
+              end try
+            end tell
+          `, 1500);
+        } catch {}
         const retryOpen = this.executeTabJavaScript(buildChatGPTProjectsOpenJavaScript(), 2500);
         if (retryOpen.success && retryOpen.output && !retryOpen.output.startsWith('ERR::')) {
           try {
@@ -1705,19 +1884,37 @@ export class ChatGPTProvider extends BaseMacOSProvider {
     normalizedTarget: string,
     diag: any,
   ): Promise<string | null> {
-    const res = this.executeTabJavaScript(buildChatGPTEnterSearchJavaScript(normalizedTarget), 3000);
-    if (!res.success || !res.output || res.output.startsWith('ERR::')) {
-      diag.appleScriptError = res.error || res.output;
-      return null;
+    const maxAttempts = 4;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const res = this.executeTabJavaScript(buildChatGPTEnterSearchJavaScript(normalizedTarget), 3000);
+      if (res.success && res.output && !res.output.startsWith('ERR::')) {
+        try {
+          const parsed = JSON.parse(res.output);
+          if (parsed.found) return parsed.value;
+        } catch (e) {
+          diag.jsError = `Enter search parse error: ${e}`;
+        }
+      } else if (!res.success) {
+        diag.appleScriptError = res.error || res.output;
+      }
+      if (attempt < maxAttempts) {
+        // Retry native Cmd+K in case the search dialog lost focus or didn't finish opening
+        if (attempt === 2) {
+          try {
+            this.runAppleScript(`
+              tell application "Google Chrome" to activate
+              tell application "System Events"
+                try
+                  keystroke "k" using command down
+                end try
+              end tell
+            `, 1500);
+          } catch {}
+        }
+        await this.sleep(400);
+      }
     }
-    try {
-      const parsed = JSON.parse(res.output);
-      if (!parsed.found) return null;
-      return parsed.value;
-    } catch (e) {
-      diag.jsError = `Enter search parse error: ${e}`;
-      return null;
-    }
+    return null;
   }
 
   /** Stage E: poll the filtered results and classify exact matches. */
