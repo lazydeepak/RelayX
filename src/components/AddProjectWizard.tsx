@@ -74,9 +74,9 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
       setProjectName(res.basename!);
       setGitRoot(res.gitRoot);
       
-      // Move to discovery
-      setStep('discovery');
-      performDiscovery(res.basename!, res.path!, res.gitRoot);
+      // Go to confirmation step; autodetect is manual/action-based, not automatic
+      setStep('confirmation');
+      setIsProcessing(false);
     } catch (err: any) {
       setError(err.message);
       setIsProcessing(false);
