@@ -111,6 +111,7 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
   };
 
   const performDiscovery = async (name: string, path: string, root?: string) => {
+    setStep('discovery');
     setIsProcessing(true);
     try {
       // 1. Resolve ChatGPT via active search procedure
