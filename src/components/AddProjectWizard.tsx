@@ -240,15 +240,18 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
                       <div className="w-8 h-8 rounded bg-slate-800 flex items-center justify-center shrink-0">
                         <Chrome className={`w-4 h-4 ${plannerUrl ? 'text-blue-400' : multiplePlanners ? 'text-amber-400' : 'text-slate-600'}`} />
                       </div>
-                      <div className="flex-1 min-w-0">
+                      <div className="flex-1 min-w-0 space-y-1">
                         <p className="text-xs font-medium text-slate-200">ChatGPT Planner</p>
+                        <input
+                          type="text"
+                          value={plannerUrl || ''}
+                          onChange={(e) => setPlannerUrl(e.target.value || undefined)}
+                          placeholder="Paste ChatGPT project URL or enter project/session ID..."
+                          className="w-full text-[11px] px-2 py-1 rounded bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-blue-500 font-mono truncate"
+                        />
                         {multiplePlanners ? (
                           <p className="text-[10px] text-amber-500 font-medium">Ambiguous: {multiplePlanners.length} matches found</p>
-                        ) : (
-                          <p className="text-[10px] text-slate-500 truncate">
-                            {plannerUrl ? plannerUrl : 'No matching project found'}
-                          </p>
-                        )}
+                        ) : null}
                       </div>
                       {plannerUrl ? (
                         <CheckCircle2 className="w-4 h-4 text-emerald-500" />
@@ -280,7 +283,7 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
                     <div className="w-8 h-8 rounded bg-slate-800 flex items-center justify-center shrink-0">
                       <Cpu className={`w-4 h-4 ${workerSessionId ? 'text-blue-400' : 'text-slate-600'}`} />
                     </div>
-                    <div className="flex-1 min-w-0">
+                    <div className="flex-1 min-w-0 space-y-1">
                       <div className="flex items-center gap-2">
                         <p className="text-xs font-medium text-slate-200">OpenCode Worker</p>
                         {workerMatchVia && (
@@ -289,9 +292,20 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
                           </span>
                         )}
                       </div>
-                      <p className="text-[10px] text-slate-500 truncate">
-                        {workerWindowTitle ? workerWindowTitle : 'No matching session found'}
-                      </p>
+                      <input
+                        type="text"
+                        value={workerWindowTitle || ''}
+                        onChange={(e) => setWorkerWindowTitle(e.target.value || undefined)}
+                        placeholder="Session / window title (editable)..."
+                        className="w-full text-[11px] px-2 py-1 rounded bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-blue-500 font-mono truncate"
+                      />
+                      <input
+                        type="text"
+                        value={workerSessionId || ''}
+                        onChange={(e) => setWorkerSessionId(e.target.value || undefined)}
+                        placeholder="Session / project ID (editable)..."
+                        className="w-full text-[11px] px-2 py-1 rounded bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-blue-500 font-mono truncate"
+                      />
                     </div>
                     {workerSessionId ? (
                       <CheckCircle2 className="w-4 h-4 text-emerald-500" />
