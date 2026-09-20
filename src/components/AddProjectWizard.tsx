@@ -53,6 +53,33 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
 
   if (!isOpen) return null;
 
+  const parseChatGPTUrl = (url: string): { projectUrl?: string; sessionId?: string; name?: string } => {
+    try {
+      const u = new URL(url);
+      const path = u.pathname;
+      // Extract project/session identifiers from common ChatGPT URL patterns
+      const projectIdMatch = url.match(/project[s\/\-]([a-zA-Z0-9\-]+)/i);
+      const sessionIdMatch = url.match(/session[s\/\-]([a-zA-Z0-9\-]+)/i);
+      const idMatch = url.match(/\/([a-f0-9]{24,})/);
+      return {
+        projectUrl: url,
+        sessionId: sessionIdMatch?.[1] || idMatch?.[1] || undefined,
+        name: path.split('/').pop() || undefined,
+      };
+    } catch {
+      return { projectUrl: url, sessionId: undefined };
+    }
+  };
+
+  const handleParsePlannerUrl = () => {
+    if (!plannerUrl) return;
+    const parsed = parseChatGPTUrl(plannerUrl);
+    setPlannerUrl(parsed.projectUrl);
+    if (parsed.sessionId && !workerSessionId) {
+      setWorkerSessionId(parsed.sessionId);
+    }
+  };
+
   const handlePickFolder = async () => {
     setIsProcessing(true);
     setError(null);
@@ -249,6 +276,13 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
                           placeholder="Paste ChatGPT project URL or enter project/session ID..."
                           className="w-full text-[11px] px-2 py-1 rounded bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-blue-500 font-mono truncate"
                         />
+                        <button
+                          type="button"
+                          onClick={handleParsePlannerUrl}
+                          className="text-[10px] px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white font-medium transition-colors"
+                        >
+                          Parse URL
+                        </button>
                         {multiplePlanners ? (
                           <p className="text-[10px] text-amber-500 font-medium">Ambiguous: {multiplePlanners.length} matches found</p>
                         ) : null}
