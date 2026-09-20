@@ -34,17 +34,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   return (
     <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col select-none">
-      {/* macOS Traffic Lights Window Header */}
-      <div className="h-12 px-4 flex items-center gap-2 border-b border-slate-800/80">
-        <div className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded-full bg-red-500/90 inline-block"></span>
-          <span className="w-3 h-3 rounded-full bg-amber-500/90 inline-block"></span>
-          <span className="w-3 h-3 rounded-full bg-emerald-500/90 inline-block"></span>
-        </div>
-        <span className="ml-3 text-xs font-semibold tracking-wider text-slate-300 uppercase">
-          Relay Control Plane
-        </span>
-      </div>
+      {/* Blank header space for mac controls */}
+      <div className="h-12 border-b border-slate-800/80"></div>
 
       {/* Navigation */}
       <nav className="p-3 flex-1 space-y-1">
