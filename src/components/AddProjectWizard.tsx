@@ -301,7 +301,16 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
                   </div>
                 </div>
 
-                <div className="pt-1">
+                <div className="pt-1 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => performDiscovery(projectName, projectPath, gitRoot)}
+                    disabled={isProcessing}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium shadow-md transition-colors disabled:opacity-50 flex items-center gap-1.5"
+                  >
+                    <Search className="w-3.5 h-3.5" />
+                    <span>Autodetect</span>
+                  </button>
                   <button
                     type="button"
                     onClick={() => setShowDiagnostics(!showDiagnostics)}
