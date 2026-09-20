@@ -29,10 +29,10 @@ class RelayService {
     this.db = new MemoryRelayDatabase();
     this.engine = new RelayEngine(this.db);
 
-    // Setup providers with controllable mock implementations for macOS runtime simulation
-    this.chatgptProvider = { providerType: 'chatgpt', integrationStatus: 'mock', windowTitle: 'ChatGPT - Desktop Planner', applicationPid: 52140 };
-    this.opencodeProvider = { providerType: 'opencode', integrationStatus: 'mock', windowTitle: 'OpenCode Session [backend-core]', applicationPid: 52141 };
-    this.vscodeProvider = { providerType: 'vscode', integrationStatus: 'mock', windowTitle: 'Visual Studio Code — relay-macos', applicationPid: 52142 };
+    // Setup providers for macOS runtime simulation
+    this.chatgptProvider = { providerType: 'chatgpt', integrationStatus: 'partial', windowTitle: 'ChatGPT - Desktop Planner', applicationPid: 52140 };
+    this.opencodeProvider = { providerType: 'opencode', integrationStatus: 'partial', windowTitle: 'OpenCode Session [backend-core]', applicationPid: 52141 };
+    this.vscodeProvider = { providerType: 'vscode', integrationStatus: 'partial', windowTitle: 'Visual Studio Code — relay-macos', applicationPid: 52142 };
 
     this.engine.registerProvider(this.chatgptProvider);
     this.engine.registerProvider(this.opencodeProvider);
