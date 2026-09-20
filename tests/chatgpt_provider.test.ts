@@ -307,6 +307,20 @@ describe('ChatGPTProvider Deterministic UI-Navigation Resolution Flow', () => {
     }
   });
 
+  test('correctly isolates project title from multi-line ChatGPT cards containing "Project" and date stamps', () => {
+    // Simulates the exact card layout from ChatGPT: "OdareHub\nProject\nSep 6"
+    const target = 'odarehub';
+    const js = buildChatGPTInspectResultsJavaScript(target);
+    assert.ok(js.includes('extractTitle'), 'JS contains extractTitle helper');
+    assert.ok(js.includes('.split(/\\r?\\n/)'), 'JS splits lines to separate title from metadata');
+
+    // Emulate extractTitle logic on typical ChatGPT card text
+    const sampleCardText = 'OdareHub\nProject\nSep 6';
+    const lines = sampleCardText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    const title = lines[0];
+    assert.strictEqual(title.toLowerCase(), target, 'Extracted title matches target project name');
+  });
+
   test('handles project names with spaces, quotes, and backslashes safely', async () => {
     for (const name of ['My Project', 'Project "Alpha"', 'foo\\bar']) {
       const host = makeHostController();

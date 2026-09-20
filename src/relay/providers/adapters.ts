@@ -1007,19 +1007,62 @@ export function buildChatGPTInspectResultsJavaScript(targetProjectName: string):
   const isProjectHref = function (href) {
     return href.indexOf('/projects/') !== -1 || href.indexOf('/p/') === 0 || href.indexOf('/g/g-p-') !== -1;
   };
-  const projectAnchors = [...document.querySelectorAll('a[href]')].filter(function (a) {
+
+  // Helper to extract clean project title from a card item.
+  // In ChatGPT search results, a card often contains:
+  // "OdareHub\\nProject\\nSep 6"
+  // We extract the primary title line and filter out metadata.
+  const extractTitle = function (el) {
+    // 1. Check for dedicated heading/title elements inside the card
+    const titleEl = el.querySelector('h1, h2, h3, h4, [class*="title"], [class*="name"], div:first-child');
+    let raw = '';
+    if (titleEl && (titleEl.innerText || titleEl.textContent || '').trim()) {
+      raw = (titleEl.innerText || titleEl.textContent || '').trim();
+    } else {
+      raw = (el.innerText || el.textContent || '').trim();
+    }
+    // Take the first non-empty line
+    const lines = raw.split(/\\r?\\n/).map(function (s) { return s.trim(); }).filter(Boolean);
+    if (lines.length > 0) {
+      // If line 1 is literally "Project" (sometimes a badge precedes the title), check next line
+      if (lines[0].toLowerCase() === 'project' && lines.length > 1) {
+        return lines[1];
+      }
+      return lines[0];
+    }
+    return raw;
+  };
+
+  // 1. Find all project links or search result option cards
+  let items = [...document.querySelectorAll('a[href]')].filter(function (a) {
     const href = a.getAttribute('href') || '';
     return isProjectHref(href);
   });
-  const candidates = projectAnchors.map(function (a) {
-    return { name: (a.innerText || a.textContent || '').trim(), href: a.href };
+
+  // If no <a> hrefs found (e.g. ChatGPT modal using div/button items in search palette)
+  if (items.length === 0) {
+    const modalItems = [...document.querySelectorAll('[role="option"], [role="button"], li')].filter(function (el) {
+      const txt = (el.innerText || el.textContent || '').toLowerCase();
+      return txt.includes('project') || txt.includes(normTarget);
+    });
+    if (modalItems.length > 0) {
+      items = modalItems;
+    }
+  }
+
+  const candidates = items.map(function (el) {
+    const title = extractTitle(el);
+    const href = el.getAttribute('href') || el.href || '';
+    return { name: title, href: href };
   }).filter(function (c) { return c.name.length > 0; });
+
   const exact = candidates.filter(function (c) {
     const normCand = normalize(c.name);
     return normCand === normTarget || c.name.trim().toLowerCase() === target;
   });
+
   return JSON.stringify({
-    resultCount: projectAnchors.length,
+    resultCount: items.length,
     projectResultCount: candidates.length,
     exactMatchCount: exact.length,
     exactMatches: exact.map(function (c) { return c.name; }),
@@ -1046,19 +1089,52 @@ export function buildChatGPTClickExactJavaScript(targetProjectName: string): str
   const isProjectHref = function (href) {
     return href.indexOf('/projects/') !== -1 || href.indexOf('/p/') === 0 || href.indexOf('/g/g-p-') !== -1;
   };
-  const projectAnchors = [...document.querySelectorAll('a[href]')].filter(function (a) {
+
+  const extractTitle = function (el) {
+    const titleEl = el.querySelector('h1, h2, h3, h4, [class*="title"], [class*="name"], div:first-child');
+    let raw = '';
+    if (titleEl && (titleEl.innerText || titleEl.textContent || '').trim()) {
+      raw = (titleEl.innerText || titleEl.textContent || '').trim();
+    } else {
+      raw = (el.innerText || el.textContent || '').trim();
+    }
+    const lines = raw.split(/\\r?\\n/).map(function (s) { return s.trim(); }).filter(Boolean);
+    if (lines.length > 0) {
+      if (lines[0].toLowerCase() === 'project' && lines.length > 1) {
+        return lines[1];
+      }
+      return lines[0];
+    }
+    return raw;
+  };
+
+  let items = [...document.querySelectorAll('a[href]')].filter(function (a) {
     const href = a.getAttribute('href') || '';
     return isProjectHref(href);
   });
-  const exact = projectAnchors.filter(function (a) {
-    const name = (a.innerText || a.textContent || '').trim();
-    return normalize(name) === normTarget || name.toLowerCase() === target;
+
+  if (items.length === 0) {
+    const modalItems = [...document.querySelectorAll('[role="option"], [role="button"], li')].filter(function (el) {
+      const txt = (el.innerText || el.textContent || '').toLowerCase();
+      return txt.includes('project') || txt.includes(normTarget);
+    });
+    if (modalItems.length > 0) {
+      items = modalItems;
+    }
+  }
+
+  const exact = items.filter(function (el) {
+    const title = extractTitle(el);
+    return normalize(title) === normTarget || title.toLowerCase() === target;
   });
+
   if (exact.length !== 1) {
     return JSON.stringify({ clicked: false, exactCount: exact.length, url: location.href });
   }
-  const clickedHref = exact[0].href;
-  exact[0].click();
+
+  const targetEl = exact[0];
+  const clickedHref = targetEl.getAttribute('href') || targetEl.href || '';
+  targetEl.click();
   return JSON.stringify({ clicked: true, clickedHref: clickedHref, urlBeforeClick: location.href });
 })();`;
 }
