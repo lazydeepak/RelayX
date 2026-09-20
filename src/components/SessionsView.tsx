@@ -59,12 +59,6 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
             macOS Window Probe
           </span>
         );
-      case 'mock':
-        return (
-          <span className="text-[10px] px-2 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20 font-medium">
-            Mock Simulation
-          </span>
-        );
       case 'unsupported':
       default:
         return (

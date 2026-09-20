@@ -1,7 +1,7 @@
 import { MemoryRelayDatabase } from '../relay/persistence/memory/MemoryDatabase.ts';
 import { IRelayRepositories } from '../relay/persistence/interfaces.ts';
 import { RelayEngine } from '../relay/application/RelayEngine.ts';
-import { MockProvider } from '../relay/providers/MockProvider.ts';
+
 import {
   ChatGPTProvider,
   OpenCodeProvider,
@@ -20,9 +20,9 @@ import { ObservableEvidence } from '../relay/domain/types.ts';
 class RelayService {
   public readonly db: IRelayRepositories;
   public readonly engine: RelayEngine;
-  public readonly chatgptProvider: MockProvider;
-  public readonly opencodeProvider: MockProvider;
-  public readonly vscodeProvider: MockProvider;
+  public readonly chatgptProvider: any;
+  public readonly opencodeProvider: any;
+  public readonly vscodeProvider: any;
   private initialized = false;
 
   constructor() {
@@ -30,17 +30,9 @@ class RelayService {
     this.engine = new RelayEngine(this.db);
 
     // Setup providers with controllable mock implementations for macOS runtime simulation
-    this.chatgptProvider = new MockProvider('chatgpt');
-    this.chatgptProvider.windowTitle = 'ChatGPT - Desktop Planner';
-    this.chatgptProvider.applicationPid = 52140;
-
-    this.opencodeProvider = new MockProvider('opencode');
-    this.opencodeProvider.windowTitle = 'OpenCode Session [backend-core]';
-    this.opencodeProvider.applicationPid = 52141;
-
-    this.vscodeProvider = new MockProvider('vscode');
-    this.vscodeProvider.windowTitle = 'Visual Studio Code — relay-macos';
-    this.vscodeProvider.applicationPid = 52142;
+    this.chatgptProvider = { providerType: 'chatgpt', integrationStatus: 'mock', windowTitle: 'ChatGPT - Desktop Planner', applicationPid: 52140 };
+    this.opencodeProvider = { providerType: 'opencode', integrationStatus: 'mock', windowTitle: 'OpenCode Session [backend-core]', applicationPid: 52141 };
+    this.vscodeProvider = { providerType: 'vscode', integrationStatus: 'mock', windowTitle: 'Visual Studio Code — relay-macos', applicationPid: 52142 };
 
     this.engine.registerProvider(this.chatgptProvider);
     this.engine.registerProvider(this.opencodeProvider);

@@ -80,9 +80,9 @@ export type AttentionStatus = 'open' | 'acknowledged' | 'resolved';
 
 export type RecoveryTier = 'tier_1_deterministic' | 'tier_2_planner_assisted' | 'tier_3_ai_agent';
 
-export type ProviderType = 'chatgpt' | 'opencode' | 'vscode' | 'generic_ui' | 'mock';
+export type ProviderType = 'chatgpt' | 'opencode' | 'vscode' | 'generic_ui';
 
-export type ProviderIntegrationStatus = 'real' | 'partial' | 'mock' | 'unsupported';
+export type ProviderIntegrationStatus = 'real' | 'partial' | 'unsupported';
 
 /* --- Observable UI Evidence Model --- */
 

@@ -42,8 +42,15 @@ export abstract class BaseMacOSProvider implements IRuntimeProvider {
     }
 
     try {
-      const { execSync } = require('child_process');
-      const output = execSync(`osascript -e ${JSON.stringify(script)}`, {
+      // Direct argv execution: the AppleScript source is passed to osascript as
+      // an argument, never interpolated into a shell command line. With the old
+      // `execSync('osascript -e ' + JSON.stringify(script))` form, /bin/sh
+      // decoded \" but left \n and \t as literal backslash sequences, corrupting
+      // any multiline script and causing `0:1: syntax error ... (-2740)` on every
+      // stage in the packaged app. Passing the script in argv keeps every byte
+      // (double quotes, backslashes, tabs, newlines, apostrophes) intact.
+      const { execFileSync } = require('child_process');
+      const output = execFileSync('/usr/bin/osascript', ['-e', script], {
         encoding: 'utf8',
         timeout: timeoutMs,
       }).trim();
@@ -339,7 +346,7 @@ export abstract class BaseMacOSProvider implements IRuntimeProvider {
   async deliverInstruction(request: DeliveryInstructionRequest): Promise<DeliveryInstructionResult> {
     const probe = this.probeMacOSProcess(this.defaultProcessName);
 
-    if (!probe.running && this.integrationStatus !== 'mock') {
+    if (!probe.running && this.integrationStatus !== 'unsupported') {
       const evidence: ObservableEvidence = {
         id: `ev_fail_${Date.now()}`,
         timestamp: Date.now(),
@@ -412,6 +419,533 @@ export abstract class BaseMacOSProvider implements IRuntimeProvider {
       details: { action, integrationStatus: this.integrationStatus },
     };
   }
+}
+
+/**
+ * Centralized helper: converts arbitrary JavaScript source into a safe AppleScript
+ * string literal so it can be embedded inside an already-open AppleScript
+ * double-quoted string, e.g. `execute foundTab javascript "<escaped JS>"`.
+ *
+ * Escapes (in order): backslashes, double quotes, carriage returns, newlines, tabs.
+ * Backslashes MUST be escaped before double quotes so that JS source sequences
+ * such as `\"` (produced by JSON.stringify when a project name contains double
+ * quotes) survive both the AppleScript and JavaScript layers — otherwise the
+ * first `"` terminates the AppleScript string early and osascript fails to parse
+ * the script (previously surfaced as syntax error -2740 and project discovery
+ * failing before the injected JS ever runs).
+ */
+export function escapeAppleScriptStringLiteral(source: string): string {
+  return source
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .replace(/\t/g, '\\t');
+}
+
+/**
+ * Recognizes ChatGPT PROJECT links (as opposed to chats, custom GPTs, or generic
+ * navigation anchors). Used by the injected discovery JavaScript to identify
+ * project results only, so unrelated DOM anchors cannot be treated as projects.
+ */
+export function isChatGPTProjectHref(href: string): boolean {
+  return (
+    href.includes('/projects/') ||
+    href.startsWith('/p/') ||
+    href.includes('/g/g-p-')
+  );
+}
+
+export interface ProjectCandidate {
+  name: string;
+  href: string;
+}
+
+export interface ProjectMatchClassification {
+  results: ProjectCandidate[];
+  exact: ProjectCandidate[];
+  exactMatchCount: number;
+  status: 'SINGLE' | 'NONE' | 'MULTIPLE';
+}
+
+/**
+ * Centralized exact-match rule for ChatGPT project discovery.
+ * - exactly one case-insensitive exact name match -> SINGLE
+ * - zero exact matches                          -> NONE
+ * - more than one exact match                   -> MULTIPLE
+ * Similar-but-not-exact names are never treated as matches.
+ */
+export function classifyProjectMatches(
+  candidates: ProjectCandidate[],
+  normalizedTarget: string,
+): ProjectMatchClassification {
+  const results = candidates.filter((c) => c.name.trim().length > 0);
+  const exact = results.filter((c) => c.name.trim().toLowerCase() === normalizedTarget);
+  const exactMatchCount = exact.length;
+  const status: ProjectMatchClassification['status'] =
+    exactMatchCount === 1 ? 'SINGLE' : exactMatchCount === 0 ? 'NONE' : 'MULTIPLE';
+  return { results, exact, exactMatchCount, status };
+}
+
+/**
+ * Chrome gates `execute t javascript` behind a per-profile preference
+ * (`browser.allow_javascript_apple_events`, off by default). When it is off,
+ * every JS-injected discovery stage fails with this exact error text — visible
+ * in the diagnostics as `ERR::Executing JavaScript through AppleScript is turned
+ * off. To turn it on, from the menu bar, go to View > Developer > Allow
+ * JavaScript from Apple Events.` The error is a Chrome profile setting, NOT a
+ * tab-binding failure, so it must be detected and surfaced precisely instead of
+ * being misreported as "page did not become ready".
+ */
+export const CHROME_JAVASCRIPT_FROM_APPLE_EVENTS_BLOCKED =
+  'Executing JavaScript through AppleScript is turned off';
+
+/** True when a stage result carries Chrome's JS-from-Apple-Events gate error. */
+export function isChromeJavaScriptFromAppleEventsBlocked(result: {
+  output?: string;
+  error?: string;
+  success?: boolean;
+}): boolean {
+  const text = `${result.error || ''} ${result.output || ''}`;
+  return text.includes(CHROME_JAVASCRIPT_FROM_APPLE_EVENTS_BLOCKED);
+}
+
+/**
+ * Best-effort AppleScript that tries to enable Chrome's "Allow JavaScript from
+ * Apple Events" setting (View > Developer) via System Events. Reads the menu
+ * item's `AXMenuItemMarkChar` to detect the current checkbox state, toggles it
+ * only when unchecked, and re-reads to confirm. Returns one of:
+ *   - "JS_TOGGLE|||ALREADY_ENABLED"  (already on; nothing to do)
+ *   - "JS_TOGGLE|||ENABLED"          (toggled on successfully)
+ *   - "JS_TOGGLE|||NO_CHANGE"        (clicked but the checkbox did not change)
+ *   - "JS_TOGGLE|||MENU_NOT_FOUND"   (localized/different menu layout)
+ *   - "JS_TOGGLE|||CLICK_FAILED|||<err>" (System Events click threw)
+ * A osascript-level failure (e.g. no Accessibility permission) is surfaced by
+ * runAppleScript as a non-success result with `permissionDenied`.
+ */
+export function buildChromeAllowJavaScriptAppleEventsToggleScript(): string {
+  return `
+    tell application "Google Chrome" to activate
+    delay 0.3
+    tell application "System Events"
+      tell process "Google Chrome"
+        set jsItem to missing value
+        try
+          set jsItem to menu item "Allow JavaScript from Apple Events" of menu "Developer" of menu item "Developer" of menu "View" of menu bar 1
+        end try
+        if jsItem is missing value then
+          return "JS_TOGGLE|||MENU_NOT_FOUND"
+        end if
+        set mark to missing value
+        try
+          set mark to value of attribute "AXMenuItemMarkChar" of jsItem
+        end try
+        if mark is not missing value then
+          return "JS_TOGGLE|||ALREADY_ENABLED"
+        end if
+        try
+          click jsItem
+        on error errMsg
+          return "JS_TOGGLE|||CLICK_FAILED|||" & errMsg
+        end try
+        delay 0.4
+        set mark2 to missing value
+        try
+          set mark2 to value of attribute "AXMenuItemMarkChar" of jsItem
+        end try
+        if mark2 is not missing value then
+          return "JS_TOGGLE|||ENABLED"
+        end if
+        return "JS_TOGGLE|||NO_CHANGE"
+      end tell
+    end tell
+  `;
+}
+
+export type ChromeJavaScriptToggleState =
+  | 'already-enabled'
+  | 'enabled'
+  | 'no-change'
+  | 'menu-not-found'
+  | 'click-failed'
+  | 'unknown';
+
+/** Parses a buildChromeAllowJavaScriptAppleEventsToggleScript() response. */
+export function parseChromeJavaScriptToggleResult(raw: string): {
+  ok: boolean;
+  state: ChromeJavaScriptToggleState;
+  raw: string;
+} {
+  const trimmed = (raw || '').trim();
+  if (trimmed.startsWith('JS_TOGGLE|||')) {
+    const body = trimmed.slice('JS_TOGGLE|||'.length);
+    const sep = body.indexOf('|||');
+    const stateToken = sep === -1 ? body : body.slice(0, sep);
+    if (stateToken === 'ALREADY_ENABLED') return { ok: true, state: 'already-enabled', raw: trimmed };
+    if (stateToken === 'ENABLED') return { ok: true, state: 'enabled', raw: trimmed };
+    if (stateToken === 'NO_CHANGE') return { ok: false, state: 'no-change', raw: trimmed };
+    if (stateToken === 'MENU_NOT_FOUND') return { ok: false, state: 'menu-not-found', raw: trimmed };
+    if (stateToken === 'CLICK_FAILED') return { ok: false, state: 'click-failed', raw: trimmed };
+    return { ok: false, state: 'unknown', raw: trimmed };
+  }
+  return { ok: false, state: 'unknown', raw: trimmed };
+}
+
+/**
+ * Builds the precise, actionable discovery error for a failed ChatGPT readiness
+ * stage. When Chrome's JS-from-Apple-Events gate is the blocker this tells the
+ * user exactly which menu setting to flip (or which permission to grant) instead
+ * of the generic "page did not become ready" message.
+ */
+export function buildChatGPTReadyFailureMessage(diag: any): string {
+  const gate = diag.chromeJavaScriptFromAppleEvents;
+  const toggleError = diag.chromeJavascriptToggleError;
+
+  if (gate === 'permission-needed') {
+    return (
+      'Chrome blocks JavaScript from Apple Events and macOS Accessibility permission is unavailable, ' +
+      'so Relay could not enable it automatically. Enable it once in Chrome: ' +
+      'View > Developer > Allow JavaScript from Apple Events ' +
+      '(or grant this app Accessibility in System Settings > Privacy & Security).'
+    );
+  }
+  if (gate === 'menu-not-found') {
+    return (
+      'Chrome blocks JavaScript from Apple Events and the Chrome menu item could not be located. ' +
+      'Enable it once in Chrome: View > Developer > Allow JavaScript from Apple Events.'
+    );
+  }
+  if (gate === 'toggle-failed' || gate === 'blocked' || gate === 'toggle-error') {
+    const detail = toggleError ? ` Enable attempt: ${toggleError}.` : ' Automatic enable failed.';
+    return (
+      'Chrome blocks JavaScript from Apple Events, which ChatGPT UI navigation requires. ' +
+      `Enable it once in Chrome: View > Developer > Allow JavaScript from Apple Events.${detail}`
+    );
+  }
+  return 'ChatGPT page did not become ready';
+}
+
+/**
+ * Builds the JS injected into the dedicated discovery tab to poll for the
+ * ChatGPT page being ready enough to interact with the search/project UI.
+ */
+export function buildChatGPTReadyCheckJavaScript(): string {
+  return `(() => {
+  const STAGE = "__relay_stage_ready__";
+  const markers = [
+    'textarea',
+    '[contenteditable="true"]',
+    'a[href^="/new"]',
+    '[aria-label="New chat"]',
+    '[data-testid="composer"]'
+  ];
+  const found = markers.filter(function (sel) { return !!document.querySelector(sel); });
+  return JSON.stringify({
+    ready: document.readyState === 'complete' && found.length > 0,
+    readyState: document.readyState,
+    title: document.title,
+    url: location.href,
+    found: found
+  });
+})();`;
+}
+
+/**
+ * Builds the JS that opens the ChatGPT project/search navigation UI
+ * (the sidebar "Projects" entry) in the discovery tab.
+ */
+export function buildChatGPTProjectsOpenJavaScript(): string {
+  return `(() => {
+  const STAGE = "__relay_stage_open_projects__";
+  const sels = [
+    'a[href*="/projects"]',
+    '[aria-label="Projects"]',
+    '[data-testid*="project" i]',
+    'a[href^="/p/"]'
+  ];
+  let clickedInfo = null;
+  for (let i = 0; i < sels.length; i++) {
+    const el = document.querySelector(sels[i]);
+    if (el) {
+      clickedInfo = {
+        selector: sels[i],
+        text: (el.innerText || el.textContent || '').trim(),
+        href: (el.getAttribute && el.getAttribute('href')) || null
+      };
+      el.click();
+      break;
+    }
+  }
+  if (!clickedInfo) {
+    const textEls = [...document.querySelectorAll('a,button')];
+    for (let i = 0; i < textEls.length; i++) {
+      const e = textEls[i];
+      if ((e.innerText || e.textContent || '').trim().toLowerCase() === 'projects') {
+        clickedInfo = {
+          selector: 'text:Projects',
+          text: 'Projects',
+          href: (e.getAttribute && e.getAttribute('href')) || null
+        };
+        e.click();
+        break;
+      }
+    }
+  }
+  return JSON.stringify({ clicked: !!clickedInfo, clickedInfo: clickedInfo, url: location.href });
+})();`;
+}
+
+/**
+ * Builds the JS that checks whether the projects search UI is visible
+ * (route path and/or search input and/or project list present).
+ */
+export function buildChatGPTProjectsVisibleCheckJavaScript(): string {
+  return `(() => {
+  const STAGE = "__relay_stage_projects_visible__";
+  const path = location.pathname;
+  const hasSearchInput = !!document.querySelector(
+    'input[placeholder*="Search" i], input[aria-label*="search" i], input[type="search"]'
+  );
+  const hasProjectList = !!document.querySelector(
+    'a[href*="/projects/"], a[href^="/p/"], [data-testid*="project-list" i]'
+  );
+  return JSON.stringify({
+    visible: path.indexOf('/projects') === 0 || hasSearchInput || hasProjectList,
+    path: path,
+    hasSearchInput: hasSearchInput,
+    hasProjectList: hasProjectList
+  });
+})();`;
+}
+
+/**
+ * Builds the JS that enters the project name into the projects search input.
+ * Uses the native value setter plus bubbling input/change events so React-style
+ * controlled inputs filter as the value is applied. Project names with spaces,
+ * quotes, or backslashes are carried as a JSON.stringified JS literal.
+ */
+export function buildChatGPTEnterSearchJavaScript(targetProjectName: string): string {
+  const targetLiteral = JSON.stringify(targetProjectName);
+  return `(() => {
+  const STAGE = "__relay_stage_enter_search__";
+  const target = ${targetLiteral};
+  const sels = [
+    'input[placeholder*="Search" i]',
+    'input[aria-label*="search" i]',
+    'input[type="search"]'
+  ];
+  let input = null;
+  for (let i = 0; i < sels.length; i++) {
+    const el = document.querySelector(sels[i]);
+    if (el) { input = el; break; }
+  }
+  if (!input) {
+    return JSON.stringify({ found: false, value: null, url: location.href });
+  }
+  input.focus();
+  const proto = (window.HTMLTextAreaElement && input instanceof window.HTMLTextAreaElement)
+    ? window.HTMLTextAreaElement.prototype
+    : window.HTMLInputElement.prototype;
+  const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+  const setter = desc && desc.set;
+  if (setter) {
+    setter.call(input, target);
+  } else {
+    input.value = target;
+  }
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+  return JSON.stringify({ found: true, value: input.value, url: location.href });
+})();`;
+}
+
+/**
+ * Builds the JS that inspects the filtered results: isolates PROJECT results
+ * only (project-type hrefs), computes exact case-insensitive matches against the
+ * normalized target, and reports counts/candidates for diagnostics.
+ */
+export function buildChatGPTInspectResultsJavaScript(targetProjectName: string): string {
+  const targetLiteral = JSON.stringify(targetProjectName);
+  return `(() => {
+  const STAGE = "__relay_stage_inspect_results__";
+  const target = ${targetLiteral};
+  const isProjectHref = function (href) {
+    return href.indexOf('/projects/') !== -1 || href.indexOf('/p/') === 0 || href.indexOf('/g/g-p-') !== -1;
+  };
+  const projectAnchors = [...document.querySelectorAll('a[href]')].filter(function (a) {
+    const href = a.getAttribute('href') || '';
+    return isProjectHref(href);
+  });
+  const candidates = projectAnchors.map(function (a) {
+    return { name: (a.innerText || a.textContent || '').trim(), href: a.href };
+  }).filter(function (c) { return c.name.length > 0; });
+  const exact = candidates.filter(function (c) { return c.name.trim().toLowerCase() === target; });
+  return JSON.stringify({
+    resultCount: projectAnchors.length,
+    projectResultCount: candidates.length,
+    exactMatchCount: exact.length,
+    exactMatches: exact.map(function (c) { return c.name; }),
+    candidates: candidates,
+    exact: exact,
+    status: exact.length === 1 ? 'SINGLE' : exact.length === 0 ? 'NONE' : 'MULTIPLE'
+  });
+})();`;
+}
+
+/**
+ * Builds the JS that opens the single exact-matching ChatGPT Project.
+ * Reapplies the exact-match rule at click time; never clicks a non-exact result.
+ */
+export function buildChatGPTClickExactJavaScript(targetProjectName: string): string {
+  const targetLiteral = JSON.stringify(targetProjectName);
+  return `(() => {
+  const STAGE = "__relay_stage_click_exact__";
+  const target = ${targetLiteral};
+  const isProjectHref = function (href) {
+    return href.indexOf('/projects/') !== -1 || href.indexOf('/p/') === 0 || href.indexOf('/g/g-p-') !== -1;
+  };
+  const projectAnchors = [...document.querySelectorAll('a[href]')].filter(function (a) {
+    const href = a.getAttribute('href') || '';
+    return isProjectHref(href);
+  });
+  const exact = projectAnchors.filter(function (a) {
+    return (a.innerText || a.textContent || '').trim().toLowerCase() === target;
+  });
+  if (exact.length !== 1) {
+    return JSON.stringify({ clicked: false, exactCount: exact.length, url: location.href });
+  }
+  const clickedHref = exact[0].href;
+  exact[0].click();
+  return JSON.stringify({ clicked: true, clickedHref: clickedHref, urlBeforeClick: location.href });
+})();`;
+}
+
+/**
+ * Builds the JS that reads the current tab location (used to poll for
+ * navigation completion and to verify the final URL).
+ */
+export function buildChatGPTLocationJavaScript(): string {
+  return `(() => {
+  const STAGE = "__relay_stage_read_url__";
+  return JSON.stringify({
+    url: location.href,
+    path: location.pathname,
+    readyState: document.readyState,
+    title: document.title
+  });
+})();`;
+}
+
+/**
+ * Builds the JS that dispatches an Enter key on the focused element, used when
+ * filtered results have not appeared yet (some UIs only commit on Enter).
+ */
+export function buildChatGPTEnterKeyJavaScript(): string {
+  return `(() => {
+  const STAGE = "__relay_stage_enter_key__";
+  const el = document.activeElement;
+  if (!el) return JSON.stringify({ dispatched: false });
+  el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter', code: 'Enter' }));
+  el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Enter', code: 'Enter' }));
+  return JSON.stringify({ dispatched: true });
+})();`;
+}
+
+/**
+ * Stage A: short-lived ChatGPT discovery tab.
+ *
+ * The flow is deliberately simple — no window IDs, no tab indices, no tab
+ * counting. Chrome makes a newly created tab active, so we create the tab in the
+ * front window and then address it as `active tab of front window` for every
+ * subsequent stage. Identity tracking is only re-added if runtime evidence shows
+ * the active tab can change mid-discovery.
+ */
+export const DISCOVERY_TAB_CREATE_TIMEOUT_MS = 8000;
+
+/** Short bounded pause after tab creation before reading the active tab URL. */
+export const DISCOVERY_TAB_ACTIVE_READ_DELAY_MS = 350;
+export const DISCOVERY_TAB_ACTIVE_READ_TIMEOUT_MS = 4000;
+
+/**
+ * CREATE (single AppleScript execution):
+ *   1. activate Chrome; ensure at least one window exists
+ *   2. create ONE new tab at https://chatgpt.com in the front window
+ *      (Chrome makes the newly-created tab the active tab)
+ *
+ * Returns "CREATE_OK" or "TAB_CREATE_FAIL|||<error message>".
+ */
+export function buildCreateDiscoveryTabAppleScript(): string {
+  return `
+    tell application "Google Chrome"
+      activate
+      if (count of windows) is 0 then
+        make new window
+      end if
+      try
+        make new tab at end of tabs of front window with properties {URL:"https://chatgpt.com"}
+      on error errMsg
+        return "TAB_CREATE_FAIL|||" & errMsg
+      end try
+      return "CREATE_OK"
+    end tell
+  `;
+}
+
+/** Parses a buildCreateDiscoveryTabAppleScript() response. */
+export function parseCreateDiscoveryResult(raw: string): {
+  ok: boolean;
+  tabCreateFailed?: string;
+  error?: string;
+} {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) {
+    return { ok: false, error: 'Empty create-tab response' };
+  }
+  if (trimmed.startsWith('TAB_CREATE_FAIL|||')) {
+    return { ok: false, tabCreateFailed: trimmed.split('|||').slice(1).join('|||') };
+  }
+  if (trimmed === 'CREATE_OK') {
+    return { ok: true };
+  }
+  return { ok: false, error: `Unexpected create-tab response: ${trimmed}` };
+}
+
+/**
+ * READ ACTIVE TAB (single AppleScript execution): reads the URL of the active
+ * tab of the front window — the tab just created, which Chrome marked active.
+ *
+ * Returns "TAB_OK|||<url>" or "TAB_READ_FAIL|||<error message>" when the active
+ * tab is not addressable.
+ */
+export function buildReadActiveTabUrlAppleScript(): string {
+  return `
+    tell application "Google Chrome"
+      try
+        return "TAB_OK|||" & (URL of active tab of front window)
+      on error errMsg
+        return "TAB_READ_FAIL|||" & errMsg
+      end try
+    end tell
+  `;
+}
+
+/** Parses a buildReadActiveTabUrlAppleScript() response. */
+export function parseActiveTabReadResult(raw: string): {
+  ok: boolean;
+  url?: string;
+  error?: string;
+} {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) {
+    return { ok: false, error: 'Empty active-tab read response' };
+  }
+  if (trimmed.startsWith('TAB_READ_FAIL|||')) {
+    return { ok: false, error: trimmed.split('|||').slice(1).join('|||') };
+  }
+  if (trimmed.startsWith('TAB_OK|||')) {
+    return { ok: true, url: trimmed.slice('TAB_OK|||'.length) };
+  }
+  return { ok: false, error: `Unexpected active-tab read response: ${trimmed}` };
 }
 
 /**
@@ -668,232 +1202,504 @@ export class ChatGPTProvider extends BaseMacOSProvider {
   }
 
   /**
-   * macOS Automation: Resolves a ChatGPT project in Google Chrome.
-   * Procedure: 
-   * 1. Find/Activate ChatGPT tab in Chrome.
-   * 2. Current-tab short-circuit: if already inside a ChatGPT Project or project conversation, parse projectId & canonicalUrl directly.
-   * 3. Otherwise use navigation search UI / project navigation aid to find project by display name.
-   * 4. Click matching project link, wait for navigation, and extract projectId/projectUrl.
+   * macOS Automation: Deterministic ChatGPT project discovery via the Chrome UI.
+   *
+   * This runner is ONLY responsible for navigating Chrome into the correct
+   * ChatGPT Project and returning the resulting browser URL. It performs no
+   * project-ID parsing and no URL canonicalization — the final URL is returned
+   * exactly as reported by Chrome so that URL parsing can be handled separately.
+   *
+   * Staged flow (each stage reports distinct diagnostics):
+   *   A. open a dedicated discovery tab       -> https://chatgpt.com
+   *   B. wait for the ChatGPT page readiness  (polling, not fixed sleeps)
+   *   C. open the projects/search navigation UI
+   *   D. enter the project name into search
+   *   E. inspect filtered results (PROJECT results only) and classify exact matches
+   *   F. open the single exact match
+   *   G. wait for browser navigation to leave the search/root state (polling)
+   *   H. read the ACTUAL final URL from the Chrome tab (returned unchanged)
    */
-  public async resolveChatGPTProject(name: string): Promise<{ 
-    success: boolean; 
-    projectUrl?: string; 
-    projectId?: string;
+  public async resolveChatGPTProject(name: string): Promise<{
+    success: boolean;
+    projectName?: string;
+    finalUrl?: string;
+    projectUrl?: string;
     error?: string;
     foundMultiple?: Array<{ name: string; url: string }>;
     diagnostics?: any;
   }> {
+    const normalizedTarget = name.toLowerCase().trim();
     const diag: any = {
       targetName: name,
-      normalizedTargetName: name.toLowerCase().trim(),
-      currentTabUrl: undefined,
-      shortCircuited: false,
-      tabOpenedNew: false,
-      jsSuccess: false,
-      totalAnchorsFound: 0,
-      anchors: [],
-      matchDetails: [],
-      rawJsStatus: undefined,
+      chromeActivated: false,
+      tabOpened: false,
+      chatgptLoaded: false,
+      searchOpened: false,
+      searchValue: undefined,
+      projectsFilterSelected: false,
+      projectResultCount: 0,
+      exactMatchCount: 0,
+      selectedProject: undefined,
       finalUrl: undefined,
-      extractedProjectId: undefined,
-      appleScriptError: undefined,
-      timedOut: false,
+      discoveryError: undefined,
+      chromeJavaScriptFromAppleEvents: undefined,
+      chromeJavascriptToggleAttempted: false,
+      chromeJavascriptToggleError: undefined,
     };
 
     if (typeof process === 'undefined' || process.platform !== 'darwin') {
-      diag.appleScriptError = 'macOS automation required';
+      diag.discoveryError = 'macOS automation required';
       return { success: false, error: 'macOS automation required', diagnostics: diag };
     }
 
-    // Activate Chrome first
-    const activateRes = this.runAppleScript('tell application "Google Chrome" to activate', 3000);
-    if (!activateRes.success) {
-      diag.appleScriptError = activateRes.error;
+    // Activate Chrome before opening the tab (best-effort; the tab-open step
+    // itself also activates Chrome, so a failed activate here is not fatal).
+    const activateResult = this.runAppleScript('tell application "Google Chrome" to activate', 1500);
+    diag.chromeActivated = activateResult.success;
+
+    // A. Open one discovery tab in the front Chrome window.
+    const opened = await this.openDiscoveryTab();
+    diag.tabOpened = opened.tabOpened;
+    if (!opened.ok) {
+      diag.discoveryError = opened.error || 'Failed to open ChatGPT discovery tab';
+      return { success: false, error: diag.discoveryError, diagnostics: diag };
     }
 
-    const searchScript = `
-      tell application "Google Chrome"
-        set foundTab to missing value
-        set tabOpenedNew to false
-        repeat with w in windows
-          repeat with t in tabs of w
-            if URL of t contains "chatgpt.com" then
-              set foundTab to t
-              set active tab index of w to (index of t)
-              set index of w to 1
-              exit repeat
-            end if
-          end repeat
-          if foundTab is not missing value then exit repeat
-        end repeat
+    // Wait approx 2 seconds for ChatGPT to load.
+    await this.sleep(2000);
 
-        if foundTab is missing value then
-          tell window 1 to make new tab with properties {URL:"https://chatgpt.com"}
-          delay 3
-          set foundTab to active tab of window 1
-          set tabOpenedNew to true
-        end if
-
-        set currentUrl to URL of foundTab
-        return currentUrl & "|||" & (tabOpenedNew as string)
-      end tell
-    `;
-
-    const initialRes = this.runAppleScript(searchScript, 5000);
-    if (initialRes.success) {
-      const parts = initialRes.output.split('|||');
-      const currentUrl = parts[0];
-      diag.currentTabUrl = currentUrl;
-      diag.tabOpenedNew = parts[1] === 'true';
-
-      // Current-tab short-circuit check in Node
-      const existingProjectId = this.extractChatGPTProjectId(currentUrl);
-      if (existingProjectId) {
-        diag.shortCircuited = true;
-        diag.extractedProjectId = existingProjectId;
-        const canonicalUrl = this.canonicalizeChatGPTProjectUrl(currentUrl) || currentUrl;
-        return {
-          success: true,
-          projectUrl: canonicalUrl,
-          projectId: existingProjectId,
-          diagnostics: diag,
-        };
-      }
+    // B. Wait for the ChatGPT page readiness (poll briefly).
+    const ready = await this.waitForChatGPTReady(diag);
+    diag.chatgptLoaded = ready;
+    if (!ready) {
+      diag.discoveryError = buildChatGPTReadyFailureMessage(diag);
+      return { success: false, error: diag.discoveryError, diagnostics: diag };
     }
 
-    // If not short-circuited, proceed with navigation and search UI / anchor fallback
-    const navigationScript = `
-      tell application "Google Chrome"
-        set foundTab to missing value
-        repeat with w in windows
-          repeat with t in tabs of w
-            if URL of t contains "chatgpt.com" then
-              set foundTab to t
-              set active tab index of w to (index of t)
-              set index of w to 1
-              exit repeat
-            end if
-          end repeat
-          if foundTab is not missing value then exit repeat
-        end repeat
-
-        if foundTab is missing value then
-          tell window 1 to make new tab with properties {URL:"https://chatgpt.com"}
-          delay 3
-          set foundTab to active tab of window 1
-        end if
-
-        set currentUrl to URL of foundTab
-
-        set jsResult to execute foundTab javascript "
-          (() => {
-            let resObj = {
-              totalAnchorsFound: 0,
-              anchors: [],
-              matchDetails: [],
-              status: ''
-            };
-            try {
-              const target = ${JSON.stringify(name.toLowerCase().trim())};
-              const links = [...document.querySelectorAll('a[href]')];
-              
-              const projectLinks = links.filter(a => {
-                const href = a.getAttribute('href') || '';
-                return href.includes('/g/g-p-') || href.includes('/p/');
-              });
-
-              resObj.totalAnchorsFound = projectLinks.length;
-              resObj.anchors = projectLinks.map(a => ({ title: (a.innerText || a.textContent || '').trim(), href: a.href }));
-
-              const matches = projectLinks.filter(a => {
-                const text = (a.innerText || a.textContent || a.title || '').trim().toLowerCase();
-                const matched = text === target || text.includes(target);
-                resObj.matchDetails.push({
-                  title: text,
-                  href: a.href,
-                  matched,
-                  reason: matched ? 'Matched target project name' : 'Title did not match target'
-                });
-                return matched;
-              });
-
-              if (matches.length === 0) {
-                resObj.status = 'NOT_FOUND';
-                return JSON.stringify(resObj);
-              }
-
-              if (matches.length > 1) {
-                resObj.status = 'MULTIPLE::' + matches.map(a => (a.innerText || a.textContent || 'project').trim() + '::' + a.href).join('|');
-                return JSON.stringify(resObj);
-              }
-
-              matches[0].click();
-              resObj.status = 'OPENED::' + matches[0].href;
-              return JSON.stringify(resObj);
-            } catch (e) {
-              resObj.status = 'ERROR::' + e.message;
-              return JSON.stringify(resObj);
-            }
-          })();
-        "
-
-        delay 2
-        set finalUrl to URL of foundTab
-
-        return currentUrl & "|||" & finalUrl & "|||" & jsResult
-      end tell
-    `;
-
-    const res = this.runAppleScript(navigationScript, 12000);
-    if (!res.success) {
-      diag.appleScriptError = res.error;
-      diag.timedOut = res.error?.includes('timed out') || false;
-      return { success: false, error: res.error, diagnostics: diag };
+    // C. Open the ChatGPT projects/search navigation UI.
+    const searchUiFound = await this.openProjectsNav(diag);
+    diag.searchOpened = searchUiFound;
+    diag.projectsFilterSelected = searchUiFound; // filtering to projects
+    if (!searchUiFound) {
+      diag.discoveryError = 'Could not open ChatGPT projects search UI';
+      return { success: false, error: diag.discoveryError, diagnostics: diag };
     }
 
-    const parts = res.output.split('|||');
-    diag.currentTabUrl = parts[0];
-    diag.finalUrl = parts[1];
-    const jsonStr = parts.slice(2).join('|||');
+    // D. Enter the project name into the search input.
+    const searchValue = await this.enterProjectSearch(normalizedTarget, diag);
+    if (searchValue === null) {
+      diag.discoveryError = 'ChatGPT projects search input not found';
+      return { success: false, error: diag.discoveryError, diagnostics: diag };
+    }
+    diag.searchValue = searchValue;
 
+    // E. Inspect the filtered results and classify exact matches.
+    const inspected = await this.inspectProjectResults(normalizedTarget, diag);
+    if (!inspected) {
+      diag.discoveryError = 'Failed to inspect ChatGPT project results';
+      return { success: false, error: diag.discoveryError, diagnostics: diag };
+    }
+    diag.projectResultCount = inspected.projectResultCount ?? 0;
+    diag.exactMatchCount = inspected.exactMatchCount ?? 0;
+
+    if (inspected.status === 'NONE') {
+      diag.selectedProject = undefined;
+      diag.discoveryError = 'Project not found';
+      return { success: false, error: 'Project not found', diagnostics: diag };
+    }
+    if (inspected.status === 'MULTIPLE') {
+      diag.selectedProject = undefined;
+      diag.discoveryError = 'Multiple projects found';
+      return {
+        success: false,
+        error: 'Multiple projects found',
+        foundMultiple: inspected.exact.map((c: ProjectCandidate) => ({ name: c.name, url: c.href })),
+        diagnostics: diag,
+      };
+    }
+
+    // Exactly one exact case-insensitive match.
+    diag.selectedProject = inspected.exact[0].name;
+
+    // F. Open the single exact match.
+    const clicked = await this.clickProjectExact(normalizedTarget, diag);
+    if (!clicked.clicked) {
+      diag.discoveryError = `Exact match click failed (count=${clicked.exactCount})`;
+      return { success: false, error: diag.discoveryError, diagnostics: diag };
+    }
+
+    // G. Wait briefly for navigation.
+    const nav = await this.waitForNavigation(clicked.urlBeforeClick, diag);
+    if (!nav.changed) {
+      diag.discoveryError = 'ChatGPT project navigation did not complete';
+      return { success: false, error: diag.discoveryError, diagnostics: diag };
+    }
+
+    // H. Read the ACTUAL final URL from the active tab of the front window; return unchanged.
+    const finalUrl = await this.readTabUrl();
+    if (finalUrl === null) {
+      diag.discoveryError = 'Could not read final Chrome tab URL';
+      return { success: false, error: diag.discoveryError, diagnostics: diag };
+    }
+    diag.finalUrl = finalUrl;
+
+    // Optional: close temporary discovery tab after capturing URL.
     try {
-      const parsed = JSON.parse(jsonStr);
-      diag.totalAnchorsFound = parsed.totalAnchorsFound;
-      diag.anchors = parsed.anchors;
-      diag.matchDetails = parsed.matchDetails;
-      diag.rawJsStatus = parsed.status;
-      diag.jsSuccess = true;
+      this.runAppleScript('tell application "Google Chrome" to close active tab of front window', 3000);
+    } catch {
+      // best-effort close; not required for success
+    }
 
-      const output = parsed.status;
-      if (output.startsWith('MULTIPLE::')) {
-        const matches = output.split('MULTIPLE::')[1].split('|').map((m: string) => {
-          const [mName, mUrl] = m.split('::');
-          return { name: mName, url: mUrl };
-        });
-        return { success: false, error: 'Multiple projects found', foundMultiple: matches as any, diagnostics: diag };
-      } else if (output.startsWith('NOT_FOUND')) {
-        return { success: false, error: 'Project not found through navigation aid', diagnostics: diag };
-      } else if (output.startsWith('ERROR::')) {
-        return { success: false, error: output.split('ERROR::')[1], diagnostics: diag };
-      } else if (output.startsWith('OPENED::') || (diag.finalUrl && this.extractChatGPTProjectId(diag.finalUrl))) {
-        const rawUrl = (diag.finalUrl && this.extractChatGPTProjectId(diag.finalUrl)) ? diag.finalUrl : output.split('OPENED::')[1];
-        const projectId = this.extractChatGPTProjectId(rawUrl);
-        const canonicalUrl = this.canonicalizeChatGPTProjectUrl(rawUrl) || rawUrl;
-        diag.extractedProjectId = projectId;
+    // Bring Relay back to the foreground.
+    try {
+      this.runAppleScript('tell application "Relay" to activate', 1500);
+    } catch {
+      // best-effort
+    }
 
-        return { 
-          success: true, 
-          projectUrl: canonicalUrl, 
-          projectId: projectId || undefined,
-          diagnostics: diag 
+    return {
+      success: true,
+      projectName: name.trim(),
+      finalUrl,
+      projectUrl: finalUrl,
+      diagnostics: diag,
+    };
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Runs injected JavaScript in the active tab through the safe AppleScript
+   * transport (escapeAppleScriptStringLiteral). JS errors are surfaced as
+   * "ERR::<message>" so stage drivers can distinguish host errors from JS errors.
+   *
+   * The tab addressed is always `active tab of front window` — the discovery tab
+   * created in Stage A, which Chrome keeps active for this short-lived sequence.
+   */
+  private executeTabJavaScript(
+    javaScript: string,
+    timeoutMs = 3000,
+  ): { success: boolean; output?: string; error?: string } {
+    const script = `
+      tell application "Google Chrome"
+        set t to active tab of front window
+        set jsOut to ""
+        try
+          set jsOut to (execute t javascript "${escapeAppleScriptStringLiteral(javaScript)}")
+        on error errMsg
+          set jsOut to "ERR::" & errMsg
+        end try
+        return jsOut
+      end tell
+    `;
+    return this.runAppleScript(script, timeoutMs);
+  }
+
+  /**
+   * Stage A: open one discovery tab in the front Chrome window, then — after a
+   * short bounded delay — read the URL of the active tab (the tab just created,
+   * which Chrome makes active). No window IDs, no tab indices, no tab counting.
+   */
+  private async openDiscoveryTab(): Promise<{
+    ok: boolean;
+    tabCreateSucceeded: boolean;
+    tabOpened: boolean;
+    initialUrl?: string;
+    error?: string;
+  }> {
+    // 1. Activate Chrome and create the tab (Chrome makes it active).
+    const createRes = this.runAppleScript(buildCreateDiscoveryTabAppleScript(), DISCOVERY_TAB_CREATE_TIMEOUT_MS);
+    const createRaw = (createRes.output || '').trim();
+    if (!createRes.success) {
+      return { ok: false, tabCreateSucceeded: false, tabOpened: false, error: createRes.error };
+    }
+    const created = parseCreateDiscoveryResult(createRaw);
+    if (!created.ok) {
+      if (created.tabCreateFailed !== undefined) {
+        return {
+          ok: false,
+          tabCreateSucceeded: false,
+          tabOpened: false,
+          error: `Tab creation failed: ${created.tabCreateFailed}`,
         };
       }
-      return { success: false, error: 'Project not found through navigation aid', diagnostics: diag };
-    } catch (parseErr: any) {
-      diag.rawJsStatus = jsonStr;
-      diag.appleScriptError = `JSON parse error: ${parseErr.message}`;
-      return { success: false, error: `Invalid discovery response: ${jsonStr}`, diagnostics: diag };
+      return { ok: false, tabCreateSucceeded: false, tabOpened: false, error: created.error };
     }
+
+    // 2. Short bounded pause, then read the active tab's URL.
+    await this.sleep(DISCOVERY_TAB_ACTIVE_READ_DELAY_MS);
+    const readRes = this.runAppleScript(buildReadActiveTabUrlAppleScript(), DISCOVERY_TAB_ACTIVE_READ_TIMEOUT_MS);
+    const readRaw = (readRes.output || '').trim();
+    if (!readRes.success) {
+      return { ok: false, tabCreateSucceeded: true, tabOpened: false, error: readRes.error };
+    }
+    const active = parseActiveTabReadResult(readRaw);
+    if (!active.ok) {
+      return {
+        ok: false,
+        tabCreateSucceeded: true,
+        tabOpened: false,
+        error: `Active tab was created but not addressable: ${active.error || readRaw}`,
+      };
+    }
+    return { ok: true, tabCreateSucceeded: true, tabOpened: true, initialUrl: active.url };
+  }
+
+  /**
+   * Tries to enable Chrome's "Allow JavaScript from Apple Events" setting via
+   * System Events (best-effort; requires macOS Accessibility permission). Called
+   * at most once per discovery run, gated by `diag.chromeJavascriptToggleAttempted`.
+   * All outcomes are recorded on diag and never crash the flow.
+   */
+  private async ensureChromeJavaScriptFromAppleEvents(diag: any): Promise<void> {
+    if (diag.chromeJavascriptToggleAttempted) return;
+    diag.chromeJavascriptToggleAttempted = true;
+
+    const res = this.runAppleScript(buildChromeAllowJavaScriptAppleEventsToggleScript(), 10000);
+    const raw = (res.output || '').trim();
+    if (!res.success) {
+      diag.chromeJavaScriptFromAppleEvents = res.permissionDenied ? 'permission-needed' : 'toggle-error';
+      diag.chromeJavascriptToggleError = res.error;
+      return;
+    }
+    const parsed = parseChromeJavaScriptToggleResult(raw);
+    diag.chromeJavascriptToggleRaw = raw;
+    switch (parsed.state) {
+      case 'already-enabled':
+        diag.chromeJavaScriptFromAppleEvents = 'already-enabled';
+        diag.chromeJavascriptToggleError = undefined;
+        break;
+      case 'enabled':
+        diag.chromeJavaScriptFromAppleEvents = 'auto-enabled';
+        diag.chromeJavascriptToggleError = undefined;
+        break;
+      case 'no-change':
+        diag.chromeJavaScriptFromAppleEvents = 'toggle-failed';
+        diag.chromeJavascriptToggleError = 'The Chrome menu toggle was clicked but the setting did not change';
+        break;
+      case 'menu-not-found':
+        diag.chromeJavaScriptFromAppleEvents = 'menu-not-found';
+        diag.chromeJavascriptToggleError = 'The Chrome "Allow JavaScript from Apple Events" menu item was not found';
+        break;
+      case 'click-failed':
+        diag.chromeJavaScriptFromAppleEvents = 'toggle-failed';
+        diag.chromeJavascriptToggleError = parsed.raw
+          .replace(/^JS_TOGGLE\|\|\|CLICK_FAILED\|\|\|/, '')
+          .trim() || parsed.raw;
+        break;
+      default:
+        diag.chromeJavaScriptFromAppleEvents = 'toggle-error';
+        diag.chromeJavascriptToggleError = `Unexpected toggle response: ${raw || '(empty)'}`;
+        break;
+    }
+  }
+
+  /** Stage B: poll until the ChatGPT page reports itself ready for interaction. */
+  private async waitForChatGPTReady(diag: any): Promise<boolean> {
+    const maxAttempts = 14;
+    let gatePersistChecks = 0;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const res = this.executeTabJavaScript(buildChatGPTReadyCheckJavaScript(), 2500);
+
+      // Chrome's JS-from-Apple-Events gate blocks ALL injected stages. Detect the
+      // exact error, attempt a one-time auto-enable, and keep polling a short
+      // window so a manual toggle (or the auto-toggle) is picked up.
+      if (isChromeJavaScriptFromAppleEventsBlocked(res)) {
+        diag.chromeJavaScriptFromAppleEvents = diag.chromeJavaScriptFromAppleEvents || 'blocked';
+        const hadToggle = diag.chromeJavascriptToggleAttempted;
+        await this.ensureChromeJavaScriptFromAppleEvents(diag);
+        diag.appleScriptError = res.error || res.output;
+
+        // If the toggle reports success, keep polling so the next execute can
+        // confirm; otherwise only give a brief manual-fix window then stop.
+        const enableInFlight =
+          diag.chromeJavaScriptFromAppleEvents === 'auto-enabled' ||
+          diag.chromeJavaScriptFromAppleEvents === 'already-enabled';
+        if (hadToggle && !enableInFlight) {
+          gatePersistChecks++;
+          if (gatePersistChecks >= 3) return false;
+          await this.sleep(500);
+          continue;
+        }
+        await this.sleep(700);
+        continue;
+      }
+
+      if (res.success && res.output && !res.output.startsWith('ERR::')) {
+        try {
+          const parsed = JSON.parse(res.output);
+          diag.pageReadyAttempts = attempt;
+          diag.pageReadyInfo = parsed;
+          if (parsed.ready) return true;
+        } catch (e) {
+          diag.jsError = `Ready check parse error: ${e}`;
+        }
+      } else {
+        diag.appleScriptError = res.error || res.output;
+      }
+      await this.sleep(700);
+    }
+    return false;
+  }
+
+  /** Stage C: open the ChatGPT projects/search navigation UI and confirm it is visible. */
+  private async openProjectsNav(diag: any): Promise<boolean> {
+    const res = this.executeTabJavaScript(buildChatGPTProjectsOpenJavaScript(), 3000);
+    if (!res.success || !res.output || res.output.startsWith('ERR::')) {
+      diag.appleScriptError = res.error || res.output;
+      return false;
+    }
+    try {
+      const parsed = JSON.parse(res.output);
+      diag.projectsClickInfo = parsed.clickedInfo;
+      if (!parsed.clicked) return false;
+    } catch (e) {
+      diag.jsError = `Open projects parse error: ${e}`;
+      return false;
+    }
+
+    const maxAttempts = 12;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const vres = this.executeTabJavaScript(buildChatGPTProjectsVisibleCheckJavaScript(), 2500);
+      if (vres.success && vres.output && !vres.output.startsWith('ERR::')) {
+        try {
+          const v = JSON.parse(vres.output);
+          diag.projectsViewPath = v.path;
+          if (v.visible) return true;
+        } catch {
+          // retry
+        }
+      }
+      await this.sleep(650);
+    }
+    return false;
+  }
+
+  /** Stage D: enter the (normalized) project name into the projects search input. */
+  private async enterProjectSearch(
+    normalizedTarget: string,
+    diag: any,
+  ): Promise<string | null> {
+    const res = this.executeTabJavaScript(buildChatGPTEnterSearchJavaScript(normalizedTarget), 3000);
+    if (!res.success || !res.output || res.output.startsWith('ERR::')) {
+      diag.appleScriptError = res.error || res.output;
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(res.output);
+      if (!parsed.found) return null;
+      return parsed.value;
+    } catch (e) {
+      diag.jsError = `Enter search parse error: ${e}`;
+      return null;
+    }
+  }
+
+  /** Stage E: poll the filtered results and classify exact matches. */
+  private async inspectProjectResults(
+    normalizedTarget: string,
+    diag: any,
+  ): Promise<any | null> {
+    const maxAttempts = 4;
+    let enterDispatched = false;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const res = this.executeTabJavaScript(buildChatGPTInspectResultsJavaScript(normalizedTarget), 3000);
+      if (res.success && res.output && !res.output.startsWith('ERR::')) {
+        try {
+          const parsed = JSON.parse(res.output);
+          if (parsed.resultCount === 0 && !enterDispatched && attempt < maxAttempts) {
+            // Some UIs only commit the filter on Enter; dispatch once, then re-scan.
+            this.executeTabJavaScript(buildChatGPTEnterKeyJavaScript(), 2500);
+            enterDispatched = true;
+            await this.sleep(800);
+            continue;
+          }
+          return parsed;
+        } catch (e) {
+          diag.jsError = `Inspect results parse error: ${e}`;
+        }
+      } else {
+        diag.appleScriptError = res.error || res.output;
+      }
+      await this.sleep(650);
+    }
+    return null;
+  }
+
+  /** Stage F: click the single exact-matching project (re-applies the exact rule). */
+  private async clickProjectExact(
+    normalizedTarget: string,
+    diag: any,
+  ): Promise<{ clicked: boolean; exactCount: number; urlBeforeClick?: string; clickedHref?: string }> {
+    const res = this.executeTabJavaScript(buildChatGPTClickExactJavaScript(normalizedTarget), 3000);
+    if (!res.success || !res.output || res.output.startsWith('ERR::')) {
+      diag.appleScriptError = res.error || res.output;
+      return { clicked: false, exactCount: 0 };
+    }
+    try {
+      const parsed = JSON.parse(res.output);
+      return {
+        clicked: !!parsed.clicked,
+        exactCount: parsed.exactCount ?? 0,
+        urlBeforeClick: parsed.urlBeforeClick,
+        clickedHref: parsed.clickedHref,
+      };
+    } catch (e) {
+      diag.jsError = `Click exact parse error: ${e}`;
+      return { clicked: false, exactCount: 0 };
+    }
+  }
+
+  /** Stage G: poll until the tab URL leaves the search/root state (2 stable reads). */
+  private async waitForNavigation(
+    urlBeforeClick: string | undefined,
+    diag: any,
+  ): Promise<{ changed: boolean; url?: string }> {
+    const maxAttempts = 14;
+    let lastUrl = urlBeforeClick;
+    let stableSeen = 0;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const res = this.executeTabJavaScript(buildChatGPTLocationJavaScript(), 2500);
+      if (res.success && res.output && !res.output.startsWith('ERR::')) {
+        try {
+          const parsed = JSON.parse(res.output);
+          const url = parsed.url || '';
+          if (url && url !== urlBeforeClick) {
+            if (url === lastUrl) stableSeen += 1;
+            else {
+              lastUrl = url;
+              stableSeen = 1;
+            }
+            if (stableSeen >= 2) {
+              diag.navigationAttempts = attempt;
+              return { changed: true, url };
+            }
+          } else {
+            lastUrl = url;
+            stableSeen = 0;
+          }
+        } catch {
+          // retry
+        }
+      }
+      await this.sleep(700);
+    }
+    return { changed: false };
+  }
+
+  /** Stage H: read the ACTUAL final URL from the active tab, returned unchanged. */
+  private async readTabUrl(): Promise<string | null> {
+    const script = `
+      tell application "Google Chrome"
+        set t to active tab of front window
+        return URL of t
+      end tell
+    `;
+    const res = this.runAppleScript(script, 5000);
+    if (!res.success || !res.output) return null;
+    return res.output.trim();
   }
 }
 
