@@ -1030,7 +1030,7 @@ export class ChatGPTProvider extends BaseMacOSProvider {
     }
 
     // 2. Insert prompt into composer and trigger Send
-    const escapedText = request.instructionText.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const escapedText = escapeAppleScriptStringLiteral(request.instructionText);
     const sendResult = this.runAppleScript(`
       tell application "System Events"
         tell application process "${targetProcess}"
@@ -1843,7 +1843,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
 
     // 2. Insert bounded instruction into composer and trigger Send
     // Escape text safely for AppleScript
-    const escapedText = request.instructionText.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const escapedText = escapeAppleScriptStringLiteral(request.instructionText);
     const sendResult = this.runAppleScript(`
       tell application "System Events"
         tell application process "${targetProcess}"
