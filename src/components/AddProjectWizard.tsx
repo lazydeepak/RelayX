@@ -215,7 +215,7 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
         {/* Content */}
         <div className="p-6">
           {error && (
-            <div className="mb-4 p-3 rounded-lg bg-red-950/40 border border-red-500/40 text-red-300 text-xs flex items-center gap-2">
+            <div className="mb-4 p-3 rounded-lg bg-red-950/40 border border-red-500/40 text-red-100 text-xs flex items-center gap-2">
               <AlertCircle className="w-4 h-4 shrink-0" />
               <span>{error}</span>
             </div>
