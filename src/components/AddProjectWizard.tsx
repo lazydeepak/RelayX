@@ -71,12 +71,28 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
     }
   };
 
+  const handleClearBindings = () => {
+    setPlannerUrl(undefined);
+    setMultiplePlanners(undefined);
+    setWorkerSessionId(undefined);
+    setWorkerWindowTitle(undefined);
+    setWorkerMatchVia(undefined);
+  };
+
   const handleParsePlannerUrl = () => {
-    if (!plannerUrl) return;
-    const parsed = parseChatGPTUrl(plannerUrl);
-    setPlannerUrl(parsed.projectUrl);
-    if (parsed.sessionId && !workerSessionId) {
-      setWorkerSessionId(parsed.sessionId);
+    if (!plannerUrl) {
+      setError('Enter a URL or project/session ID before parsing');
+      return;
+    }
+    try {
+      const parsed = parseChatGPTUrl(plannerUrl);
+      setPlannerUrl(parsed.projectUrl);
+      if (parsed.sessionId && !workerSessionId) {
+        setWorkerSessionId(parsed.sessionId);
+      }
+      setError(null);
+    } catch {
+      setError('Failed to parse URL');
     }
   };
 
@@ -118,7 +134,7 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
       const plannerRes = await relayBridge.resolveChatGPTProject(name);
       setChatgptDiagnostics(plannerRes.diagnostics);
       if (plannerRes.success) {
-        setPlannerUrl(plannerRes.projectUrl);
+        if (!plannerUrl) setPlannerUrl(plannerRes.projectUrl);
       } else if (plannerRes.foundMultiple) {
         setMultiplePlanners(plannerRes.foundMultiple);
       }
@@ -127,11 +143,10 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
       const workerRes = await relayBridge.discoverOpenCodeSessions(path, root);
       setOpencodeDiagnostics(workerRes.diagnostics);
       if (workerRes.success && workerRes.sessions.length > 0) {
-        // Pick the best match (already sorted by score)
         const best = workerRes.sessions[0];
-        setWorkerSessionId(best.sessionId);
-        setWorkerWindowTitle(best.windowTitle);
-        setWorkerMatchVia(best.matchedVia);
+        if (!workerSessionId) setWorkerSessionId(best.sessionId);
+        if (!workerWindowTitle) setWorkerWindowTitle(best.windowTitle);
+        if (!workerMatchVia) setWorkerMatchVia(best.matchedVia);
       }
 
       setStep('confirmation');
@@ -144,6 +159,14 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
   };
 
   const handleFinalize = async () => {
+    if (!projectName.trim()) {
+      setError('Project name is required');
+      return;
+    }
+    if (!projectPath) {
+      setError('Project folder path is required');
+      return;
+    }
     setIsProcessing(true);
     setError(null);
     try {
@@ -353,6 +376,13 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
                 </div>
 
                 <div className="pt-1 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleClearBindings}
+                    className="text-[10px] px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 font-medium transition-colors"
+                  >
+                    Clear
+                  </button>
                   <button
                     type="button"
                     onClick={() => performDiscovery(projectName, projectPath, gitRoot)}
