@@ -1,0 +1,6 @@
+{
+  "name": "Relay - AI Work Orchestration Control Plane",
+  "description": "Local macOS-first AI work orchestration control plane coordinating planners, workers, assignments, recovery, supervision, and observable UI automation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

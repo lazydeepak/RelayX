@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+.dark {
+  color-scheme: dark;
+}
+
+.light {
+  color-scheme: light;
+}
+
+/* Light mode overrides ensuring WCAG 2.2 AA contrast compliance */
+.light body {
+  background-color: #f8fafc !important;
+  color: #0f172a !important;
+}
+
+.light .bg-slate-950,
+.light [class*="bg-slate-950"] { background-color: #ffffff !important; }
+
+.light .bg-slate-900,
+.light [class*="bg-slate-900"] { background-color: #f1f5f9 !important; }
+
+.light .bg-slate-850,
+.light .bg-slate-800,
+.light [class*="bg-slate-800"] { background-color: #e2e8f0 !important; }
+
+.light .bg-slate-750,
+.light .bg-slate-700,
+.light [class*="bg-slate-700"] { background-color: #cbd5e1 !important; }
+
+.light .text-slate-100 { color: #0f172a !important; }
+.light .text-slate-200 { color: #1e293b !important; }
+.light .text-slate-300 { color: #334155 !important; }
+.light .text-slate-400 { color: #475569 !important; } /* WCAG AA enhanced contrast vs white/f1f5f9 */
+.light .text-slate-500 { color: #64748b !important; }
+
+.light .border-slate-800 { border-color: #cbd5e1 !important; }
+.light .border-slate-700 { border-color: #94a3b8 !important; }
+.light .border-slate-900 { border-color: #e2e8f0 !important; }
+
+.light .hover\:bg-slate-850:hover,
+.light .hover\:bg-slate-800:hover { background-color: #cbd5e1 !important; }
+.light .hover\:bg-slate-700:hover { background-color: #94a3b8 !important; }
+
+
