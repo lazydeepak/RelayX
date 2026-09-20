@@ -641,7 +641,7 @@ export function buildChatGPTReadyCheckJavaScript(): string {
   ];
   const found = markers.filter(function (sel) { return !!document.querySelector(sel); });
   return JSON.stringify({
-    ready: document.readyState === 'complete' && found.length > 0,
+    ready: (document.readyState === 'complete' || document.readyState === 'interactive') && found.length > 0,
     readyState: document.readyState,
     title: document.title,
     url: location.href,
