@@ -2276,6 +2276,26 @@ export class OpenCodeProvider extends BaseMacOSProvider {
     };
   }
 
+  /** Segment-aware path containment: /dev/Relay/packages/app may match /dev/Relay; /dev/RelayX must not. */
+  private segmentPathContains(parentOrChildA: string, parentOrChildB: string): boolean {
+    const a = parentOrChildA.split('/').filter(Boolean);
+    const b = parentOrChildB.split('/').filter(Boolean);
+    if (a.length === 0 || b.length === 0) return false;
+    const min = Math.min(a.length, b.length);
+    for (let i = 0; i < min; i++) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
+
+  /** Boundary-aware complete basename match. */
+  private exactBasenameInTitle(title: string, basename: string): boolean {
+    if (!basename || basename.length === 0) return false;
+    const escaped = basename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp('(^|[^a-z0-9])' + escaped + '([^a-z0-9]|$)', 'i');
+    return re.test(title);
+  }
+
   override async findRuntime(descriptor: RuntimeTargetDescriptor): Promise<RuntimeInspectionResult> {
     const res = await super.findRuntime(descriptor);
     if (res.found && res.windowTitle) {
@@ -2801,7 +2821,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
     projectPath: string,
     gitRoot: string | undefined,
     options: { allowMissingDirectory: boolean; directoryScopedMatchedVia: string },
-  ): { results: RuntimeInspectionResult[]; candidates: any[] } {
+  ): { results: RuntimeInspectionResult[]; candidates: any[]; ambiguous?: boolean } {
     const normProjPath = projectPath.toLowerCase().replace(/\/$/, '');
     const normGitRoot = gitRoot ? gitRoot.toLowerCase().replace(/\/$/, '') : undefined;
 
@@ -2829,13 +2849,13 @@ export class OpenCodeProvider extends BaseMacOSProvider {
       } else if (normPersDir === normProjPath) {
         matchScore += 100;
         matchedVia = 'exact_path';
-      } else if (normProjPath.startsWith(normPersDir) || normPersDir.startsWith(normProjPath)) {
+      } else if (this.segmentPathContains(normPersDir, normProjPath)) {
         matchScore += 50;
         matchedVia = 'path_prefix';
       }
 
       if (normGitRoot && normPersDir) {
-        if (normPersDir === normGitRoot || normPersDir.startsWith(normGitRoot)) {
+        if (normPersDir === normGitRoot || this.segmentPathContains(normPersDir, normGitRoot)) {
           matchScore += 30;
           matchedVia = matchedVia || 'git_root';
         }
@@ -2919,13 +2939,22 @@ export class OpenCodeProvider extends BaseMacOSProvider {
       }
     }
 
-    const sortedResults = results.sort(
-      (a, b) =>
-        ((b.evidence.details as any)?.matchScore || 0) -
-        ((a.evidence.details as any)?.matchScore || 0),
-    );
+    const scoreWeight = (via?: string) => {
+      if (via === 'exact_path') return 3;
+      if (via === 'path_prefix') return 2;
+      if (via === 'title_fallback') return 1;
+      return 0;
+    };
+    const sortedResults = results.sort((a, b) => {
+      const aScore = ((b.evidence.details as any)?.matchScore || 0) - ((a.evidence.details as any)?.matchScore || 0);
+      if (aScore !== 0) return aScore;
+      return scoreWeight((b.evidence.details as any)?.matchedVia) - scoreWeight((a.evidence.details as any)?.matchedVia);
+    });
 
-    return { results: sortedResults, candidates };
+    const topScore = sortedResults.length > 0 ? (sortedResults[0].evidence?.details as any)?.matchScore || 0 : 0;
+    const topTieCount = sortedResults.filter((r: any) => ((r.evidence?.details as any)?.matchScore || 0) === topScore).length;
+    const ambiguous = topTieCount > 1 && sortedResults.length > 1;
+    return { results: ambiguous ? [] : sortedResults, candidates, ambiguous };
   }
 
   /**
@@ -2949,7 +2978,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
     //    persisted `ses_*` records the human OpenCode UI operates.
     const sharedRes = await this.discoverSessionsViaSharedService(projectPath);
     if (sharedRes.ok) {
-      const { results, candidates } = this.matchAuthoritativeSessions(
+      const authRes = this.matchAuthoritativeSessions(
         sharedRes.sessions.map((s) => ({
           id: s.sessionId,
           directory: s.directory,
@@ -2960,9 +2989,11 @@ export class OpenCodeProvider extends BaseMacOSProvider {
         gitRoot,
         { allowMissingDirectory: true, directoryScopedMatchedVia: 'service_directory_query' },
       );
+      // Project-level enumeration: return all valid candidates deterministically;
+      // ambiguity only blocks automatic single-session selection, not enumeration.
       return {
         success: true,
-        sessions: results,
+        sessions: authRes.results,
         diagnostics: {
           source: 'opencode_shared_service',
           projectPath,
@@ -2970,7 +3001,8 @@ export class OpenCodeProvider extends BaseMacOSProvider {
           authoritativeSessionsDiscovered: sharedRes.sessions.length,
           correlatedUiRuntimes: uiRuntimes.length,
           sharedService: sharedRes.diagnostics,
-          candidates,
+          candidates: authRes.candidates,
+          ambiguous: authRes.ambiguous || undefined,
         },
       };
     }
@@ -2996,13 +3028,13 @@ export class OpenCodeProvider extends BaseMacOSProvider {
         } else if (normPersDir === normProjPath) {
           matchScore += 100;
           matchedVia = 'exact_path';
-        } else if (normProjPath.startsWith(normPersDir) || normPersDir.startsWith(normProjPath)) {
+        } else if (this.segmentPathContains(normPersDir, normProjPath)) {
           matchScore += 50;
           matchedVia = 'path_prefix';
         }
 
         if (normGitRoot && normPersDir) {
-          if (normPersDir === normGitRoot || normPersDir.startsWith(normGitRoot)) {
+          if (normPersDir === normGitRoot || this.segmentPathContains(normPersDir, normGitRoot)) {
             matchScore += 30;
             matchedVia = matchedVia || 'git_root';
           }
@@ -3086,10 +3118,19 @@ export class OpenCodeProvider extends BaseMacOSProvider {
         }
       }
 
-      const sortedResults = results.sort((a, b) => 
-        ((b.evidence.details as any)?.matchScore || 0) - ((a.evidence.details as any)?.matchScore || 0)
-      );
+      const scoreWeight = (via?: string) => {
+        if (via === 'exact_path') return 3;
+        if (via === 'path_prefix') return 2;
+        if (via === 'title_fallback') return 1;
+        return 0;
+      };
+      const sortedResults = results.sort((a, b) => {
+        const diff = ((b.evidence.details as any)?.matchScore || 0) - ((a.evidence.details as any)?.matchScore || 0);
+        if (diff !== 0) return diff;
+        return scoreWeight((b.evidence.details as any)?.matchedVia) - scoreWeight((a.evidence.details as any)?.matchedVia);
+      });
 
+      // Project-level enumeration preserves all candidates deterministically.
       return {
         success: true,
         sessions: sortedResults,
@@ -3123,19 +3164,19 @@ export class OpenCodeProvider extends BaseMacOSProvider {
         if (normInfoPath === normProjPath) {
           matchScore += 100;
           matchedVia = 'exact_path';
-        } else if (normProjPath.startsWith(normInfoPath!) || normInfoPath!.startsWith(normProjPath)) {
+        } else if (this.segmentPathContains(normInfoPath!, normProjPath)) {
           matchScore += 50;
           matchedVia = 'path_prefix';
         }
 
         if (gitRoot && normInfoPath) {
-          if (normInfoPath === normGitRoot || normInfoPath.startsWith(normGitRoot!)) {
+          if (normInfoPath === normGitRoot || this.segmentPathContains(normInfoPath!, normGitRoot!)) {
             matchScore += 30;
             matchedVia = matchedVia || 'git_root';
           }
         }
 
-        if (basename && windowTitle.toLowerCase().includes(basename)) {
+        if (basename && this.exactBasenameInTitle(windowTitle, basename)) {
           matchScore += 10;
           matchedVia = matchedVia || 'title_fallback';
         }
@@ -3177,9 +3218,17 @@ export class OpenCodeProvider extends BaseMacOSProvider {
       }
     }
 
-    const sortedResults = results.sort((a, b) => 
-      ((b.evidence.details as any)?.matchScore || 0) - ((a.evidence.details as any)?.matchScore || 0)
-    );
+    const scoreWeight = (via?: string) => {
+      if (via === 'exact_path') return 3;
+      if (via === 'path_prefix') return 2;
+      if (via === 'title_fallback') return 1;
+      return 0;
+    };
+    const sortedResults = results.sort((a, b) => {
+      const diff = ((b.evidence.details as any)?.matchScore || 0) - ((a.evidence.details as any)?.matchScore || 0);
+      if (diff !== 0) return diff;
+      return scoreWeight((b.evidence.details as any)?.matchedVia) - scoreWeight((a.evidence.details as any)?.matchedVia);
+    });
 
     return {
       success: true,
