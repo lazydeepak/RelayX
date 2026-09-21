@@ -908,11 +908,13 @@ export class RelayApiService implements IRelayApi {
       return {
         success: true,
         sessions: sessions.map((m: any) => ({
-          sessionId: (m.evidence.details as any)?.parsedSessionId,
+          sessionId: (m.evidence.details as any)?.parsedSessionId || (m.evidence.details as any)?.authoritativeSessionId,
           windowTitle: m.windowTitle,
           workspacePath: (m.evidence.details as any)?.workspacePath,
           matchScore: (m.evidence.details as any)?.matchScore,
           matchedVia: (m.evidence.details as any)?.matchedVia,
+          openCodeProjectId: (m.evidence.details as any)?.openCodeProjectId,
+          hasUiCorrelation: (m.evidence.details as any)?.hasUiCorrelation,
         })),
         diagnostics,
       };
@@ -930,6 +932,13 @@ export class RelayApiService implements IRelayApi {
     workerSessionId?: string;
   }): Promise<{ success: boolean; projectId?: ProjectId; error?: string }> {
     try {
+      if (!setup.workerSessionId || !setup.workerSessionId.trim()) {
+        return {
+          success: false,
+          error: 'An authoritative OpenCode worker session is required before creating a project.',
+        };
+      }
+
       // 1. Create Project
       const project = await this.engine.createProject(
         setup.name,
@@ -958,22 +967,19 @@ export class RelayApiService implements IRelayApi {
         plannerId = planner.id;
       }
 
-      let workerId: RuntimeSessionId | undefined;
-      if (setup.workerSessionId) {
-        const worker = await this.engine.registerRuntimeSession(
-          'opencode',
-          `OpenCode: ${setup.name}`,
-          'com.opencode.desktop',
-        );
-        worker.recordObservationSuccess('available', {
-          id: `ev_bind_${Date.now()}`,
-          timestamp: Date.now(),
-          source: 'reconciliation_probe',
-          details: { sessionId: setup.workerSessionId },
-        });
-        await this.db.runtimes.save(worker);
-        workerId = worker.id;
-      }
+      const worker = await this.engine.registerRuntimeSession(
+        'opencode',
+        `OpenCode: ${setup.name}`,
+        'dev.opencode.desktop',
+      );
+      worker.recordObservationSuccess('available', {
+        id: `ev_bind_${Date.now()}`,
+        timestamp: Date.now(),
+        source: 'reconciliation_probe',
+        details: { sessionId: setup.workerSessionId },
+      });
+      await this.db.runtimes.save(worker);
+      const workerId = worker.id;
 
       // 3. Create Default Pair
       await this.engine.createPair(

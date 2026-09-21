@@ -29,6 +29,14 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
   const [workerSessionId, setWorkerSessionId] = useState<string | undefined>();
   const [workerWindowTitle, setWorkerWindowTitle] = useState<string | undefined>();
   const [workerMatchVia, setWorkerMatchVia] = useState<string | undefined>();
+  const [discoveredWorkers, setDiscoveredWorkers] = useState<Array<{
+    sessionId: string;
+    windowTitle?: string;
+    workspacePath?: string;
+    matchScore?: number;
+    matchedVia?: string;
+    hasUiCorrelation?: boolean;
+  }>>([]);
 
   const [chatgptDiagnostics, setChatgptDiagnostics] = useState<any>(undefined);
   const [opencodeDiagnostics, setOpencodeDiagnostics] = useState<any>(undefined);
@@ -44,7 +52,9 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
       setPlannerUrl(undefined);
       setMultiplePlanners(undefined);
       setWorkerSessionId(undefined);
+      setWorkerWindowTitle(undefined);
       setWorkerMatchVia(undefined);
+      setDiscoveredWorkers([]);
       setChatgptDiagnostics(undefined);
       setOpencodeDiagnostics(undefined);
       setShowDiagnostics(false);
@@ -143,10 +153,16 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
       const workerRes = await relayBridge.discoverOpenCodeSessions(path, root);
       setOpencodeDiagnostics(workerRes.diagnostics);
       if (workerRes.success && workerRes.sessions.length > 0) {
-        const best = workerRes.sessions[0];
-        if (!workerSessionId) setWorkerSessionId(best.sessionId);
-        if (!workerWindowTitle) setWorkerWindowTitle(best.windowTitle);
-        if (!workerMatchVia) setWorkerMatchVia(best.matchedVia);
+        const validSessions = workerRes.sessions.filter((s): s is typeof s & { sessionId: string } => !!s.sessionId);
+        setDiscoveredWorkers(validSessions);
+        const best = validSessions[0];
+        if (best) {
+          if (!workerSessionId) setWorkerSessionId(best.sessionId);
+          if (!workerWindowTitle) setWorkerWindowTitle(best.windowTitle);
+          if (!workerMatchVia) setWorkerMatchVia(best.matchedVia);
+        }
+      } else {
+        setDiscoveredWorkers([]);
       }
 
       setStep('confirmation');
@@ -165,6 +181,10 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
     }
     if (!projectPath) {
       setError('Project folder path is required');
+      return;
+    }
+    if (!workerSessionId || !workerSessionId.trim()) {
+      setError('An authoritative OpenCode worker session must be bound before creating the project.');
       return;
     }
     setIsProcessing(true);
@@ -339,38 +359,93 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
                     )}
                   </div>
 
-                  <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 flex items-center gap-3">
-                    <div className="w-8 h-8 rounded bg-slate-800 flex items-center justify-center shrink-0">
-                      <Cpu className={`w-4 h-4 ${workerSessionId ? 'text-blue-400' : 'text-slate-600'}`} />
-                    </div>
-                    <div className="flex-1 min-w-0 space-y-1">
-                      <div className="flex items-center gap-2">
-                        <p className="text-xs font-medium text-slate-200">OpenCode Worker</p>
-                        {workerMatchVia && (
-                          <span className="text-[9px] px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20 uppercase tracking-tighter font-bold">
-                            {workerMatchVia.replace('_', ' ')}
-                          </span>
-                        )}
+                  <div className="space-y-2">
+                    <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 flex items-center gap-3">
+                      <div className="w-8 h-8 rounded bg-slate-800 flex items-center justify-center shrink-0">
+                        <Cpu className={`w-4 h-4 ${workerSessionId ? 'text-blue-400' : 'text-amber-500'}`} />
                       </div>
-                      <input
-                        type="text"
-                        value={workerWindowTitle || ''}
-                        onChange={(e) => setWorkerWindowTitle(e.target.value || undefined)}
-                        placeholder="Session / window title (editable)..."
-                        className="w-full text-[11px] px-2 py-1 rounded bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-blue-500 font-mono truncate"
-                      />
-                      <input
-                        type="text"
-                        value={workerSessionId || ''}
-                        onChange={(e) => setWorkerSessionId(e.target.value || undefined)}
-                        placeholder="Session / project ID (editable)..."
-                        className="w-full text-[11px] px-2 py-1 rounded bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-blue-500 font-mono truncate"
-                      />
+                      <div className="flex-1 min-w-0 space-y-1">
+                        <div className="flex items-center gap-2">
+                          <p className="text-xs font-medium text-slate-200">OpenCode Worker</p>
+                          {workerMatchVia && (
+                            <span className="text-[9px] px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20 uppercase tracking-tighter font-bold">
+                              {workerMatchVia.replace('_', ' ')}
+                            </span>
+                          )}
+                          {!workerSessionId && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/30 uppercase tracking-tight font-medium">
+                              Required
+                            </span>
+                          )}
+                        </div>
+                        <input
+                          type="text"
+                          value={workerWindowTitle || ''}
+                          onChange={(e) => setWorkerWindowTitle(e.target.value || undefined)}
+                          placeholder="Session / window title (editable)..."
+                          className="w-full text-[11px] px-2 py-1 rounded bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-blue-500 font-mono truncate"
+                        />
+                        <input
+                          type="text"
+                          value={workerSessionId || ''}
+                          onChange={(e) => setWorkerSessionId(e.target.value || undefined)}
+                          placeholder="Authoritative OpenCode session ID (e.g. ses_...)..."
+                          className="w-full text-[11px] px-2 py-1 rounded bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-blue-500 font-mono truncate"
+                        />
+                      </div>
+                      {workerSessionId ? (
+                        <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                      ) : (
+                        <AlertCircle className="w-4 h-4 text-amber-500 shrink-0" />
+                      )}
                     </div>
-                    {workerSessionId ? (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-                    ) : (
-                      <AlertCircle className="w-4 h-4 text-slate-600" />
+
+                    {discoveredWorkers.length > 1 && (
+                      <div className="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800 space-y-1.5">
+                        <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                          Multiple Matching Sessions ({discoveredWorkers.length}):
+                        </p>
+                        <div className="space-y-1 max-h-36 overflow-y-auto">
+                          {discoveredWorkers.map((w) => (
+                            <button
+                              key={w.sessionId}
+                              type="button"
+                              onClick={() => {
+                                setWorkerSessionId(w.sessionId);
+                                if (w.windowTitle) setWorkerWindowTitle(w.windowTitle);
+                                if (w.matchedVia) setWorkerMatchVia(w.matchedVia);
+                              }}
+                              className={`w-full text-left p-1.5 rounded text-[11px] border transition-colors flex items-center justify-between gap-2 ${
+                                workerSessionId === w.sessionId
+                                  ? 'bg-blue-950/40 border-blue-600/50 text-blue-200'
+                                  : 'bg-slate-950 hover:bg-slate-800/80 border-slate-800 text-slate-300'
+                              }`}
+                            >
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="font-mono text-[10px] font-semibold text-slate-200 truncate">{w.sessionId}</span>
+                                  {w.matchedVia && (
+                                    <span className="text-[8px] px-1 py-0.2 rounded bg-slate-800 text-slate-400 border border-slate-700">
+                                      {w.matchedVia}
+                                    </span>
+                                  )}
+                                  {w.hasUiCorrelation && (
+                                    <span className="text-[8px] px-1 py-0.2 rounded bg-emerald-950 text-emerald-400 border border-emerald-800">
+                                      UI window
+                                    </span>
+                                  )}
+                                </div>
+                                {w.workspacePath && (
+                                  <p className="text-[9px] text-slate-500 font-mono truncate">{w.workspacePath}</p>
+                                )}
+                              </div>
+                              {workerSessionId === w.sessionId && (
+                                <CheckCircle2 className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                     )}
                   </div>
                 </div>

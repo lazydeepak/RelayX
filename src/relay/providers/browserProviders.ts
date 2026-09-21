@@ -156,18 +156,32 @@ export class BrowserOpenCodeProvider extends BaseBrowserProvider {
   readonly defaultProcessName = 'opencode';
   readonly defaultWindowTitle = 'OpenCode Session';
 
-  async matchSessionsByPath(projectPath: string, gitRoot?: string): Promise<RuntimeInspectionResult[]> {
+  async matchSessionsByPath(projectPath: string, gitRoot?: string): Promise<{
+    success: boolean;
+    sessions: RuntimeInspectionResult[];
+    diagnostics?: any;
+  }> {
     // Simulated discovery for demo/preview
     const res = await this.findRuntime({ providerType: 'opencode' });
     res.windowTitle = `OpenCode: ${projectPath.split('/').pop()}`;
     res.evidence.details = {
       ...res.evidence.details,
       parsedSessionId: 'sess_demo_123',
+      authoritativeSessionId: 'sess_demo_123',
       workspacePath: projectPath,
-      matchScore: 0.95,
-      matchedVia: 'path_similarity',
+      matchScore: 100,
+      matchedVia: 'exact_path',
+      hasUiCorrelation: true,
     };
-    return [res];
+    return {
+      success: true,
+      sessions: [res],
+      diagnostics: {
+        source: 'browser_preview_mock',
+        projectPath,
+        gitRoot,
+      },
+    };
   }
 }
 

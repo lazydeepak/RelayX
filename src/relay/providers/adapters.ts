@@ -2521,23 +2521,207 @@ export class OpenCodeProvider extends BaseMacOSProvider {
   }
 
   /**
-   * Matches running OpenCode sessions to a specific local project path.
-   * Prioritizes exact path matches and Git root correlation.
+   * Discovers authoritative persisted OpenCode sessions via CLI or session store.
+   * Runs `opencode session list --format json` (or candidate binary paths).
+   */
+  public async discoverPersistedSessions(): Promise<{
+    success: boolean;
+    sessions: Array<{
+      id: string;
+      projectId?: string;
+      directory?: string;
+      title?: string;
+      updatedAt?: number | string;
+      createdAt?: number | string;
+      [key: string]: any;
+    }>;
+    diagnostics?: Record<string, any>;
+  }> {
+    const candidateBins = ['opencode', '/usr/local/bin/opencode', '/opt/homebrew/bin/opencode'];
+    let lastError: string | undefined;
+
+    for (const bin of candidateBins) {
+      try {
+        const { execFileSync } = require('child_process');
+        const output = execFileSync(bin, ['session', 'list', '--format', 'json'], {
+          encoding: 'utf8',
+          timeout: 4000,
+        }).trim();
+
+        if (output) {
+          const parsed = JSON.parse(output);
+          const sessions = Array.isArray(parsed) ? parsed : (parsed.sessions || []);
+          return {
+            success: true,
+            sessions,
+            diagnostics: {
+              source: 'cli',
+              binaryUsed: bin,
+              sessionCount: sessions.length,
+            },
+          };
+        }
+      } catch (err: any) {
+        lastError = err.message || String(err);
+      }
+    }
+
+    return {
+      success: false,
+      sessions: [],
+      diagnostics: {
+        source: 'cli',
+        error: lastError || 'OpenCode CLI not found or failed to return sessions',
+      },
+    };
+  }
+
+  /**
+   * Matches OpenCode sessions to a project path by querying authoritative persisted sessions first,
+   * then correlating with visible UI runtimes. If no authoritative sessions exist or CLI fails,
+   * falls back gracefully to window-based candidate discovery.
    */
   public async matchSessionsByPath(projectPath: string, gitRoot?: string): Promise<{
     success: boolean;
     sessions: RuntimeInspectionResult[];
     diagnostics?: any;
   }> {
-    const all = await this.findAllRuntimes();
-    const candidates: any[] = [];
-    const results: RuntimeInspectionResult[] = [];
-
     const normProjPath = projectPath.toLowerCase().replace(/\/$/, '');
     const normGitRoot = gitRoot ? gitRoot.toLowerCase().replace(/\/$/, '') : undefined;
     const basename = projectPath.split('/').pop()?.toLowerCase();
 
-    for (const session of all) {
+    // 1. Authoritative Persisted Sessions Discovery
+    const persistedRes = await this.discoverPersistedSessions();
+    const uiRuntimes = await this.findAllRuntimes();
+
+    const candidates: any[] = [];
+    const results: RuntimeInspectionResult[] = [];
+
+    if (persistedRes.success && persistedRes.sessions.length > 0) {
+      for (const pers of persistedRes.sessions) {
+        const persId = pers.id;
+        const persDir = pers.directory;
+        const normPersDir = persDir ? persDir.toLowerCase().replace(/\/$/, '') : undefined;
+
+        let matchScore = 0;
+        let matchedVia: string | undefined;
+        let rejectionReason: string | undefined;
+
+        if (!normPersDir) {
+          rejectionReason = 'Persisted session has no directory property';
+        } else if (normPersDir === normProjPath) {
+          matchScore += 100;
+          matchedVia = 'exact_path';
+        } else if (normProjPath.startsWith(normPersDir) || normPersDir.startsWith(normProjPath)) {
+          matchScore += 50;
+          matchedVia = 'path_prefix';
+        }
+
+        if (normGitRoot && normPersDir) {
+          if (normPersDir === normGitRoot || normPersDir.startsWith(normGitRoot)) {
+            matchScore += 30;
+            matchedVia = matchedVia || 'git_root';
+          }
+        }
+
+        if (matchScore === 0) {
+          rejectionReason = `Directory "${persDir}" does not match projectPath "${projectPath}" or gitRoot "${gitRoot}"`;
+        }
+
+        const accepted = matchScore > 0;
+
+        // Correlate with UI runtimes (secondary presentation/focus surface)
+        let correlatedRuntime: RuntimeInspectionResult | undefined;
+        for (const ui of uiRuntimes) {
+          const parsed = this.parseSessionIdentity(ui.windowTitle);
+          if (parsed.sessionId === persId) {
+            correlatedRuntime = ui;
+            break;
+          }
+          if (parsed.workspacePath && normPersDir) {
+            const normUiPath = parsed.workspacePath.toLowerCase().replace(/\/$/, '');
+            if (normUiPath === normPersDir) {
+              correlatedRuntime = ui;
+              break;
+            }
+          }
+        }
+
+        candidates.push({
+          sessionId: persId,
+          directory: persDir,
+          projectId: pers.projectId,
+          matchScore,
+          matchedVia,
+          hasUiCorrelation: !!correlatedRuntime,
+          correlatedPid: correlatedRuntime?.applicationPid,
+          correlatedWindowTitle: correlatedRuntime?.windowTitle,
+          accepted,
+          rejectionReason,
+        });
+
+        if (accepted) {
+          const evidence: ObservableEvidence = correlatedRuntime?.evidence || {
+            id: `ev_persisted_match_${Date.now()}`,
+            timestamp: Date.now(),
+            source: 'reconciliation_probe',
+            windowTitle: correlatedRuntime?.windowTitle || `OpenCode [${persId}] ${persDir || ''}`,
+            applicationPid: correlatedRuntime?.applicationPid,
+            bundleIdentifier: this.defaultBundleId,
+            details: {},
+          };
+
+          evidence.details = {
+            ...evidence.details,
+            parsedSessionId: persId,
+            authoritativeSessionId: persId,
+            workspacePath: persDir || projectPath,
+            openCodeProjectId: pers.projectId,
+            matchScore,
+            matchedVia,
+            hasUiCorrelation: !!correlatedRuntime,
+            canonicalPath: projectPath,
+            gitRoot,
+          };
+
+          results.push({
+            found: true,
+            status: correlatedRuntime ? correlatedRuntime.status : 'available',
+            windowTitle: correlatedRuntime?.windowTitle || `OpenCode [${persId}] ${persDir || ''}`,
+            applicationPid: correlatedRuntime?.applicationPid,
+            bundleIdentifier: this.defaultBundleId,
+            composerVisible: correlatedRuntime?.composerVisible ?? false,
+            composerHasFocus: correlatedRuntime?.composerHasFocus ?? false,
+            sendButtonVisible: correlatedRuntime?.sendButtonVisible ?? false,
+            stopButtonVisible: correlatedRuntime?.stopButtonVisible ?? false,
+            cancelButtonVisible: correlatedRuntime?.cancelButtonVisible ?? false,
+            isWorking: correlatedRuntime?.isWorking ?? false,
+            isComplete: correlatedRuntime?.isComplete ?? false,
+            evidence,
+          });
+        }
+      }
+
+      const sortedResults = results.sort((a, b) => 
+        ((b.evidence.details as any)?.matchScore || 0) - ((a.evidence.details as any)?.matchScore || 0)
+      );
+
+      return {
+        success: true,
+        sessions: sortedResults,
+        diagnostics: {
+          source: 'opencode session list --format json',
+          projectPath,
+          gitRoot,
+          authoritativeSessionsDiscovered: persistedRes.sessions.length,
+          correlatedUiRuntimes: uiRuntimes.length,
+          candidates,
+        },
+      };
+    }
+
+    // 2. Secondary Presentation/Window Fallback if CLI yielded no sessions
+    for (const session of uiRuntimes) {
       const windowTitle = session.windowTitle;
       const info = this.parseSessionIdentity(windowTitle);
       const normInfoPath = info.workspacePath ? info.workspacePath.toLowerCase().replace(/\/$/, '') : undefined;
@@ -2572,7 +2756,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
         }
 
         if (matchScore === 0) {
-          rejectionReason = `Workspace path "${info.workspacePath}" (norm: "${normInfoPath}") does not match projectPath ("${projectPath}") or gitRoot ("${gitRoot}") and title does not contain basename ("${basename}")`;
+          rejectionReason = `Workspace path "${info.workspacePath}" does not match projectPath ("${projectPath}") or gitRoot ("${gitRoot}")`;
         }
       }
 
@@ -2591,7 +2775,6 @@ export class OpenCodeProvider extends BaseMacOSProvider {
       });
 
       if (accepted) {
-        // Enrich evidence with score and findings
         session.evidence.details = {
           ...session.evidence.details,
           parsedSessionId: info.sessionId,
@@ -2613,10 +2796,11 @@ export class OpenCodeProvider extends BaseMacOSProvider {
       success: true,
       sessions: sortedResults,
       diagnostics: {
-        source: 'findAllRuntimes()',
+        source: 'ui_fallback',
+        cliStatus: persistedRes.diagnostics,
         projectPath,
         gitRoot,
-        totalRuntimesInspected: all.length,
+        totalRuntimesInspected: uiRuntimes.length,
         candidates,
       },
     };
