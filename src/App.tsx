@@ -13,6 +13,8 @@ import { ProjectModal, ProjectModalMode } from './components/ProjectModal.tsx';
 import { PairModal, PairModalMode } from './components/PairModal.tsx';
 import { RuntimeModal, RuntimeModalMode } from './components/RuntimeModal.tsx';
 import { RuntimeHistoryModal } from './components/RuntimeHistoryModal.tsx';
+import { ProjectDetailModal } from './components/ProjectDetailModal.tsx';
+import { SessionDetailModal } from './components/SessionDetailModal.tsx';
 import { AddProjectWizard } from './components/AddProjectWizard.tsx';
 import { relayBridge } from './services/relayBridge.ts';
 import {
@@ -112,6 +114,16 @@ export default function App() {
     sessionId: string;
     sessionName: string;
   }>({ isOpen: false, sessionId: '', sessionName: '' });
+
+  const [projectDetail, setProjectDetail] = useState<{
+    isOpen: boolean;
+    projectId: string | null;
+  }>({ isOpen: false, projectId: null });
+
+  const [sessionDetail, setSessionDetail] = useState<{
+    isOpen: boolean;
+    sessionId: string | null;
+  }>({ isOpen: false, sessionId: null });
 
   const notify = (msg: string) => {
     setStatusNotification(msg);
@@ -227,6 +239,50 @@ export default function App() {
   const handleViewSessionHistory = (sessionId: string, sessionName: string) => {
     setHistoryModal({ isOpen: true, sessionId, sessionName });
   };
+
+  const handleOpenProjectDetail = (project: UIProject) => {
+    setProjectDetail({ isOpen: true, projectId: project.id });
+  };
+
+  const handleOpenSessionDetail = (sessionId: string) => {
+    setSessionDetail({ isOpen: true, sessionId });
+  };
+
+  const handleOpenSessionDetailFromProject = (sessionId: string) => {
+    setProjectDetail({ isOpen: false, projectId: null });
+    setSessionDetail({ isOpen: true, sessionId });
+  };
+
+  const handleEditProjectFromDetail = (project: UIProject) => {
+    setProjectDetail({ isOpen: false, projectId: null });
+    setProjectModal({ isOpen: true, mode: 'edit', project });
+  };
+
+  const handleArchiveSessionFromDetail = (sessionId: string) => {
+    setSessionDetail({ isOpen: false, sessionId: null });
+    handleArchiveSession(sessionId);
+  };
+
+  // Close detail surfaces if the underlying record disappears (e.g. deleted).
+  useEffect(() => {
+    if (
+      projectDetail.isOpen &&
+      projectDetail.projectId &&
+      !projects.some((p) => p.id === projectDetail.projectId)
+    ) {
+      setProjectDetail({ isOpen: false, projectId: null });
+    }
+  }, [projects, projectDetail.isOpen, projectDetail.projectId]);
+
+  useEffect(() => {
+    if (
+      sessionDetail.isOpen &&
+      sessionDetail.sessionId &&
+      !sessions.some((s) => s.id === sessionDetail.sessionId)
+    ) {
+      setSessionDetail({ isOpen: false, sessionId: null });
+    }
+  }, [sessions, sessionDetail.isOpen, sessionDetail.sessionId]);
 
   const handleDetachRuntime = async (pairId: string, role: 'planner' | 'worker') => {
     try {
@@ -448,6 +504,7 @@ export default function App() {
                 onOpenEditProject={(project) =>
                   setProjectModal({ isOpen: true, mode: 'edit', project })
                 }
+                onOpenProjectDetail={handleOpenProjectDetail}
                 onArchiveProject={handleArchiveProject}
                 onUnarchiveProject={handleUnarchiveProject}
                 onOpenCreatePair={(projectId) =>
@@ -486,6 +543,7 @@ export default function App() {
                 onDetachSession={handleDetachSessionFromPairs}
                 onAttachToPair={handleAttachSessionToPair}
                 onViewHistory={handleViewSessionHistory}
+                onOpenSessionDetail={handleOpenSessionDetail}
               />
             )}
 
@@ -520,6 +578,37 @@ export default function App() {
       </main>
 
       {/* Modals */}
+      <ProjectDetailModal
+        isOpen={projectDetail.isOpen}
+        projectId={projectDetail.projectId}
+        projects={projects}
+        pairs={pairs}
+        sessions={sessions}
+        assignments={assignments}
+        events={events}
+        attentionItems={attentionItems}
+        onClose={() => setProjectDetail({ isOpen: false, projectId: null })}
+        onEdit={handleEditProjectFromDetail}
+        onViewEvidence={(ev) => setSelectedEvidence(ev)}
+        onOpenSessionDetail={handleOpenSessionDetailFromProject}
+      />
+
+      <SessionDetailModal
+        isOpen={sessionDetail.isOpen}
+        sessionId={sessionDetail.sessionId}
+        sessions={sessions}
+        pairs={pairs}
+        projects={projects}
+        assignments={assignments}
+        events={events}
+        onClose={() => setSessionDetail({ isOpen: false, sessionId: null })}
+        onProbe={(id) => handleInspect(id)}
+        onViewEvidence={(ev) => setSelectedEvidence(ev)}
+        onViewHistory={handleViewSessionHistory}
+        onArchive={handleArchiveSessionFromDetail}
+        onUnarchive={(id) => handleUnarchiveSession(id)}
+      />
+
       <EvidenceModal
         evidence={selectedEvidence}
         onClose={() => setSelectedEvidence(null)}

@@ -28,6 +28,7 @@ interface PairViewProps {
   projects: UIProject[];
   onOpenCreateProject: () => void;
   onOpenEditProject: (project: UIProject) => void;
+  onOpenProjectDetail: (project: UIProject) => void;
   onArchiveProject: (id: string) => void;
   onUnarchiveProject: (id: string) => void;
   onOpenCreatePair: (projectId?: string) => void;
@@ -49,6 +50,7 @@ export const PairView: React.FC<PairViewProps> = ({
   projects,
   onOpenCreateProject,
   onOpenEditProject,
+  onOpenProjectDetail,
   onArchiveProject,
   onUnarchiveProject,
   onOpenCreatePair,
@@ -210,6 +212,38 @@ export const PairView: React.FC<PairViewProps> = ({
             );
           })}
         </div>
+
+        {/* Selected Project Summary */}
+        {selectedProject && (
+          <button
+            type="button"
+            onClick={() => onOpenProjectDetail(selectedProject)}
+            className="w-full text-left p-3 rounded-lg bg-slate-950 border border-slate-800 hover:border-blue-600/60 hover:bg-slate-900 transition-colors group"
+            title="Open full project details"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <Layers className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                  <span className="text-sm font-semibold text-slate-100 truncate">
+                    {selectedProject.name}
+                  </span>
+                  <span className="text-[10px] text-slate-500">Project details</span>
+                </div>
+                <p className="text-[11px] font-mono text-slate-400 truncate mt-1 select-text">
+                  {selectedProject.canonicalPath || 'No repository path recorded'}
+                </p>
+                <p className="text-[10px] font-mono text-slate-500 truncate select-text">
+                  git: {selectedProject.gitRoot || 'Not available'}
+                </p>
+              </div>
+              <span className="flex items-center gap-1 text-xs font-medium text-blue-400 group-hover:text-blue-300 shrink-0">
+                <span>View Details</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </span>
+            </div>
+          </button>
+        )}
       </div>
 
       {/* Pairs List */}

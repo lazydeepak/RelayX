@@ -11,6 +11,7 @@ import {
   Layers,
   CheckCircle2,
   AlertTriangle,
+  Info,
 } from 'lucide-react';
 import { UIRuntimeSession, UIPair, ObservableEvidence, ProviderType } from '../types/ui.ts';
 
@@ -26,6 +27,7 @@ interface SessionsViewProps {
   onDetachSession: (sessionId: string) => void;
   onAttachToPair: (sessionId: string) => void;
   onViewHistory: (sessionId: string, name: string) => void;
+  onOpenSessionDetail: (sessionId: string) => void;
 }
 
 export const SessionsView: React.FC<SessionsViewProps> = ({
@@ -40,6 +42,7 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
   onDetachSession,
   onAttachToPair,
   onViewHistory,
+  onOpenSessionDetail,
 }) => {
   const [showArchived, setShowArchived] = React.useState(false);
 
@@ -186,7 +189,14 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
                     </div>
                   </div>
 
-                  <h3 className="text-sm font-bold text-slate-100">{session.name}</h3>
+                  <button
+                    type="button"
+                    onClick={() => onOpenSessionDetail(session.id)}
+                    className="text-sm font-bold text-slate-100 hover:text-blue-300 text-left transition-colors"
+                    title="Open session details"
+                  >
+                    {session.name}
+                  </button>
                   {session.status === 'archived' && session.archiveReason && (
                     <div className="mt-1 p-2 rounded bg-amber-500/5 border border-amber-500/10 text-[10px] text-amber-200/80 italic">
                       Reason: {session.archiveReason}
@@ -292,6 +302,15 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
                 {/* Bottom Controls */}
                 <div className="flex items-center justify-between pt-2 border-t border-slate-800/80">
                   <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => onOpenSessionDetail(session.id)}
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs transition-colors"
+                      title="Open full session details"
+                    >
+                      <Info className="w-3.5 h-3.5" />
+                      <span>Details</span>
+                    </button>
+
                     <button
                       onClick={() => onInspectSession(session.id)}
                       disabled={session.status === 'archived'}

@@ -41,6 +41,7 @@ export interface UIProject {
   gitRoot?: string;
   status: 'active' | 'archived';
   createdAt: number;
+  updatedAt?: number;
 }
 
 export interface UIPair {
@@ -82,6 +83,8 @@ export interface UIRuntimeSession {
   lastEvidence?: ObservableEvidence;
   archivedAt?: number;
   archiveReason?: string;
+  createdAt?: number;
+  updatedAt?: number;
 }
 
 export interface UIAssignment {

@@ -144,8 +144,11 @@ export class RelayApiService implements IRelayApi {
       id: p.id,
       name: p.name,
       description: p.description,
+      canonicalPath: p.canonicalPath,
+      gitRoot: p.gitRoot,
       status: p.status || 'active',
       createdAt: p.createdAt,
+      updatedAt: p.updatedAt,
     }));
   }
 
@@ -156,8 +159,11 @@ export class RelayApiService implements IRelayApi {
       id: p.id,
       name: p.name,
       description: p.description,
+      canonicalPath: p.canonicalPath,
+      gitRoot: p.gitRoot,
       status: p.status || 'active',
       createdAt: p.createdAt,
+      updatedAt: p.updatedAt,
     };
   }
 
@@ -167,8 +173,11 @@ export class RelayApiService implements IRelayApi {
       id: p.id,
       name: p.name,
       description: p.description,
+      canonicalPath: p.canonicalPath,
+      gitRoot: p.gitRoot,
       status: p.status || 'active',
       createdAt: p.createdAt,
+      updatedAt: p.updatedAt,
     };
   }
 
@@ -192,8 +201,11 @@ export class RelayApiService implements IRelayApi {
       id: p.id,
       name: p.name,
       description: p.description,
+      canonicalPath: p.canonicalPath,
+      gitRoot: p.gitRoot,
       status: p.status || 'active',
       createdAt: p.createdAt,
+      updatedAt: p.updatedAt,
     };
   }
 
@@ -203,8 +215,11 @@ export class RelayApiService implements IRelayApi {
       id: p.id,
       name: p.name,
       description: p.description,
+      canonicalPath: p.canonicalPath,
+      gitRoot: p.gitRoot,
       status: p.status || 'active',
       createdAt: p.createdAt,
+      updatedAt: p.updatedAt,
     };
   }
 
@@ -214,8 +229,11 @@ export class RelayApiService implements IRelayApi {
       id: p.id,
       name: p.name,
       description: p.description,
+      canonicalPath: p.canonicalPath,
+      gitRoot: p.gitRoot,
       status: p.status || 'active',
       createdAt: p.createdAt,
+      updatedAt: p.updatedAt,
     };
   }
 
@@ -444,6 +462,8 @@ export class RelayApiService implements IRelayApi {
       lastEvidence: r.lastEvidence,
       archivedAt: r.archivedAt,
       archiveReason: r.archiveReason,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
     };
   }
 
@@ -472,6 +492,8 @@ export class RelayApiService implements IRelayApi {
       lastEvidence: r.lastEvidence,
       archivedAt: r.archivedAt,
       archiveReason: r.archiveReason,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
     };
   }
 
@@ -499,6 +521,8 @@ export class RelayApiService implements IRelayApi {
         lastHeartbeatAt: r.lastHeartbeatAt,
         lastObservedAt: r.lastObservedAt,
         lastEvidence: r.lastEvidence,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
       };
     });
   }
@@ -530,6 +554,8 @@ export class RelayApiService implements IRelayApi {
       lastHeartbeatAt: runtime.lastHeartbeatAt,
       lastObservedAt: runtime.lastObservedAt,
       lastEvidence: runtime.lastEvidence,
+      createdAt: runtime.createdAt,
+      updatedAt: runtime.updatedAt,
     };
   }
 
@@ -562,6 +588,8 @@ export class RelayApiService implements IRelayApi {
           lastHeartbeatAt: runtime.lastHeartbeatAt,
           lastObservedAt: runtime.lastObservedAt,
           lastEvidence: runtime.lastEvidence,
+          createdAt: runtime.createdAt,
+          updatedAt: runtime.updatedAt,
         },
       };
     } catch (err: any) {
