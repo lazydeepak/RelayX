@@ -75,7 +75,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <div className="flex items-center gap-2 px-2 py-1.5 rounded bg-slate-900 border border-slate-800">
           <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
           <div className="flex-1 min-w-0">
-            <p className="text-xs font-medium text-slate-200 truncate">Relay Engine v1.0</p>
+            <p className="text-xs font-medium text-slate-200 truncate">RelayX Engine v1.0</p>
             <p className="text-[11px] text-slate-400 truncate">SQLite Sync • Local macOS</p>
           </div>
           <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>

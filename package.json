@@ -1,9 +1,9 @@
 {
   "name": "relay-app",
-  "productName": "Relay",
+  "productName": "RelayX",
   "private": true,
   "version": "1.0.0",
-  "description": "Relay - Local macOS AI Work Orchestration Control Plane",
+  "description": "RelayX - Local macOS AI Work Orchestration Control Plane",
   "main": "dist-electron/main.cjs",
   "type": "module",
   "scripts": {

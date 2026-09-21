@@ -23,7 +23,18 @@ export class MockProvider implements IRuntimeProvider {
 
   async findRuntime(descriptor: RuntimeTargetDescriptor): Promise<RuntimeInspectionResult> {
     if (this.shouldFailInspection) {
-      return { found: false, status: 'unavailable', composerVisible: false };
+      return {
+        found: false,
+        status: 'unavailable',
+        composerVisible: false,
+        composerHasFocus: false,
+        sendButtonVisible: false,
+        stopButtonVisible: false,
+        cancelButtonVisible: false,
+        isWorking: false,
+        isComplete: false,
+        evidence: { id: `ev_fail_${Date.now()}`, timestamp: Date.now(), source: 'reconciliation_probe' },
+      };
     }
     return {
       found: true,
@@ -49,7 +60,7 @@ export class MockProvider implements IRuntimeProvider {
   async deliverInstruction(request: DeliveryInstructionRequest): Promise<DeliveryInstructionResult> {
     return {
       outcome: this.deliveryOutcome,
-      failureReason: this.deliveryFailureReason,
+      reason: this.deliveryFailureReason,
       evidence: { id: `ev_d_${Date.now()}`, timestamp: Date.now(), source: 'macos_accessibility', runtimeSessionId: request.runtimeSessionId, windowTitle: this.windowTitle, applicationPid: this.applicationPid },
     };
   }
