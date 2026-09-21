@@ -102,6 +102,8 @@ const relayApi: IRelayApi = {
   selectProjectFolder: () => ipcRenderer.invoke(RELAY_IPC_CHANNELS.SELECT_PROJECT_FOLDER),
   resolveChatGPTProject: (name: string) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.RESOLVE_CHATGPT_PROJECT, name),
+  discoverChatGPTPlanner: (name: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.DISCOVER_CHATGPT_PLANNER, name),
   discoverOpenCodeSessions: (projectPath: string, gitRoot?: string) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.DISCOVER_OPENCODE_SESSIONS, projectPath, gitRoot),
   finalizeProjectSetup: (setup: any) =>

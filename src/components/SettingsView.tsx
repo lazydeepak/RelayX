@@ -264,12 +264,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
 
           {appStatus?.permissions && !appStatus.permissions.accessibilityGranted && appStatus.platform === 'darwin' && (
-            <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-start gap-2.5 text-amber-300">
-              <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-              <div className="text-[11px]">
-                <strong className="font-semibold block text-amber-200">System Settings authorization required:</strong>
+            <div className="p-3 rounded-lg bg-amber-500/15 border border-amber-400/40 flex items-start gap-2.5 text-amber-100">
+              <ShieldAlert className="w-4 h-4 text-amber-300 shrink-0 mt-0.5" />
+              <div className="text-xs">
+                <strong className="font-semibold block text-amber-50">System Settings authorization required:</strong>
                 To enable visible UI control and Stop button verification, grant Relay or your Terminal Accessibility permissions under:
-                <div className="font-mono bg-amber-950/40 px-2 py-1 rounded mt-1 text-amber-200 border border-amber-800/40">
+                <div className="font-mono bg-amber-950/60 px-2 py-1 rounded mt-1 text-amber-100 border border-amber-700/50">
                   System Settings &gt; Privacy &amp; Security &gt; Accessibility
                 </div>
               </div>

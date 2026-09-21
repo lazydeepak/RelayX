@@ -46,4 +46,84 @@
 .light .hover\:bg-slate-800:hover { background-color: #cbd5e1 !important; }
 .light .hover\:bg-slate-700:hover { background-color: #94a3b8 !important; }
 
+/* Warning / error message boxes: WCAG 2.2 AA — light-mode text on light-mode background must stay ≥ 4.5:1 */
+.light [class*="bg-red-950/20"],
+.light [class*="bg-red-950/30"],
+.light [class*="bg-red-950/40"],
+.light [class*="bg-red-950/60"] { background-color: #fee2e2 !important; }
+.light [class*="bg-red-500/10"],
+.light [class*="bg-red-500/20"],
+.light [class*="bg-red-600/10"],
+.light [class*="bg-red-600/20"] { background-color: #fee2e2 !important; }
+
+.light [class*="border-red-500/20"],
+.light [class*="border-red-500/40"],
+.light [class*="border-red-700/50"],
+.light [class*="border-red-800/40"] { border-color: #fda4af !important; }
+
+.light [class*="text-red-100"],
+.light [class*="text-red-200"],
+.light [class*="text-red-300"],
+.light [class*="text-red-400"] { color: #991b1b !important; }
+
+.light [class*="bg-amber-500/5"],
+.light [class*="bg-amber-500/10"],
+.light [class*="bg-amber-500/15"],
+.light [class*="bg-amber-500/20"],
+.light [class*="bg-amber-950/20"],
+.light [class*="bg-amber-950"] { background-color: #fef3c7 !important; }
+/* Inner mono detail box (e.g. the opencode path in Settings) stays visibly a child surface */
+.light [class*="bg-amber-950/60"] { background-color: #fde68a !important; }
+
+.light [class*="border-amber-400/40"],
+.light [class*="border-amber-500/10"],
+.light [class*="border-amber-500/20"],
+.light [class*="border-amber-500/30"],
+.light [class*="border-amber-500/40"],
+.light [class*="border-amber-700/50"],
+.light [class*="border-amber-800/40"],
+.light [class*="border-amber-800"] { border-color: #fbbf24 !important; }
+
+.light [class*="text-amber-100"],
+.light [class*="text-amber-200"],
+.light [class*="text-amber-300"],
+.light [class*="text-amber-400"] { color: #92400e !important; }
+.light [class*="text-amber-50"] { color: #78350f !important; }
+
+.light [class*="bg-emerald-950/30"],
+.light [class*="bg-emerald-950/40"],
+.light [class*="bg-emerald-500/10"],
+.light [class*="bg-emerald-500/20"],
+.light [class*="bg-emerald-600/20"] { background-color: #d1fae5 !important; }
+
+.light [class*="border-emerald-500/20"],
+.light [class*="border-emerald-500/30"],
+.light [class*="border-emerald-500/40"],
+.light [class*="border-emerald-500/50"],
+.light [class*="border-emerald-600/50"],
+.light [class*="border-emerald-800/40"] { border-color: #6ee7b7 !important; }
+
+.light [class*="text-emerald-200"],
+.light [class*="text-emerald-300"],
+.light [class*="text-emerald-400"] { color: #065f46 !important; }
+
+.light [class*="bg-blue-500/10"],
+.light [class*="bg-blue-500/20"],
+.light [class*="bg-blue-600/20"] { background-color: #dbeafe !important; }
+
+.light [class*="border-blue-500/20"],
+.light [class*="border-blue-500/30"] { border-color: #93c5fd !important; }
+
+.light [class*="text-blue-400"] { color: #1e40af !important; }
+
+.light [class*="bg-purple-500/10"],
+.light [class*="bg-purple-500/20"] { background-color: #ede9fe !important; }
+
+.light [class*="border-purple-500/20"] { border-color: #c4b5fd !important; }
+
+.light [class*="text-purple-400"] { color: #5b21b6 !important; }
+
+/* Section headers / icon accents (indigo) — AA ≥ 4.5:1 on light slate cards */
+.light [class*="text-indigo-400"] { color: #3730a3 !important; }
+
 

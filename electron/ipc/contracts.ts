@@ -50,6 +50,7 @@ export const RELAY_IPC_CHANNELS = {
   // Add Project Workflow
   SELECT_PROJECT_FOLDER: 'relay:select-project-folder',
   RESOLVE_CHATGPT_PROJECT: 'relay:resolve-chatgpt-project',
+  DISCOVER_CHATGPT_PLANNER: 'relay:discover-chatgpt-planner',
   DISCOVER_OPENCODE_SESSIONS: 'relay:discover-opencode-sessions',
   FINALIZE_PROJECT_SETUP: 'relay:finalize-project-setup',
 } as const;

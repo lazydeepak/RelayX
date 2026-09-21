@@ -12,6 +12,14 @@ import {
   DeliveryInstructionRequest,
   DeliveryInstructionResult,
 } from './interfaces.ts';
+import {
+  OpenCodeServiceError,
+  discoverOpenCodeSessionClient,
+  type DiscoveredSessionClient,
+  type OpenCodeServiceErrorCode,
+  type OpenCodeSessionSummary,
+  type ServiceDiscoveryFailure,
+} from './opencodeSessionClient.ts';
 
 /**
  * Foundation for macOS Native Automation & Process Probing.
@@ -2521,8 +2529,109 @@ export class OpenCodeProvider extends BaseMacOSProvider {
   }
 
   /**
+   * Resolves the OpenCode executable path using a deterministic chain:
+   * 1. Explicit configured binary path (if architecture supports config)
+   * 2. OPENCODE_BIN environment variable
+   * 3. Process PATH lookup (via `which` / `command -v`)
+   * 4. macOS login-shell resolution (for Electron GUI PATH issues)
+   * 5. Known installation paths as fallback
+   * Returns resolved path or undefined if not found.
+   */
+  private async resolveOpenCodeBinary(): Promise<{
+    path: string | undefined;
+    source: 'config' | 'env' | 'path' | 'login-shell' | 'fallback' | 'none';
+    tried: string[];
+    error?: string;
+  }> {
+    const tried: string[] = [];
+    const homedir = process.env.HOME || process.env.USERPROFILE || '';
+
+    // 1. Explicit configured binary path - check if provider has config
+    // (Currently no config system, but keeping this step for future extensibility)
+    // const configPath = this.getConfigBinaryPath?.();
+    // if (configPath) return { path: configPath, source: 'config', tried };
+
+    // 2. OPENCODE_BIN environment variable
+    const envBin = process.env.OPENCODE_BIN;
+    if (envBin) {
+      tried.push(envBin);
+      try {
+        const { accessSync, constants } = await import('fs');
+        accessSync(envBin, constants.X_OK);
+        return { path: envBin, source: 'env', tried };
+      } catch {
+        // Not executable, continue
+      }
+    }
+
+    // 3. Process PATH lookup using `which` (works in Node)
+    try {
+      const { execFileSync } = await import('child_process');
+      const whichResult = execFileSync('which', ['opencode'], { encoding: 'utf8', timeout: 2000 }).trim();
+      if (whichResult) {
+        tried.push(whichResult);
+        const { accessSync, constants } = await import('fs');
+        accessSync(whichResult, constants.X_OK);
+        return { path: whichResult, source: 'path', tried };
+      }
+    } catch {
+      // which failed, continue
+    }
+
+    // 4. macOS login-shell resolution for Electron GUI apps
+    // Electron apps launched from GUI don't inherit shell PATH, so we invoke login shell
+    if (process.platform === 'darwin') {
+      try {
+        const { execFileSync } = await import('child_process');
+        // Use login shell to get user's actual PATH with command -v
+        const loginShellResult = execFileSync(
+          'bash',
+          ['-l', '-c', 'command -v opencode'],
+          { encoding: 'utf8', timeout: 3000 }
+        ).trim();
+        if (loginShellResult) {
+          tried.push(loginShellResult);
+          const { accessSync, constants } = await import('fs');
+          accessSync(loginShellResult, constants.X_OK);
+          return { path: loginShellResult, source: 'login-shell', tried };
+        }
+      } catch {
+        // login shell failed, continue
+      }
+    }
+
+    // 5. Known installation paths as final fallback
+    const fallbackPaths = [
+      // OpenCode installer default location
+      homedir ? `${homedir}/.opencode/bin/opencode` : null,
+      // Homebrew Intel Mac
+      '/usr/local/bin/opencode',
+      // Homebrew Apple Silicon Mac
+      '/opt/homebrew/bin/opencode',
+      // Other common locations
+      '/usr/bin/opencode',
+      homedir ? `${homedir}/bin/opencode` : null,
+      homedir ? `${homedir}/.local/bin/opencode` : null,
+    ].filter(Boolean) as string[];
+
+    for (const fbPath of fallbackPaths) {
+      tried.push(fbPath);
+      try {
+        const { accessSync, constants } = await import('fs');
+        accessSync(fbPath, constants.X_OK);
+        return { path: fbPath, source: 'fallback', tried };
+      } catch {
+        // Not accessible, continue
+      }
+    }
+
+    // 6. None found - return truthful unavailable state
+    return { path: undefined, source: 'none', tried, error: 'OpenCode CLI not found in any resolution path' };
+  }
+
+  /**
    * Discovers authoritative persisted OpenCode sessions via CLI or session store.
-   * Runs `opencode session list --format json` (or candidate binary paths).
+   * Runs `opencode session list --format json` using robust executable resolution.
    */
   public async discoverPersistedSessions(): Promise<{
     success: boolean;
@@ -2537,33 +2646,48 @@ export class OpenCodeProvider extends BaseMacOSProvider {
     }>;
     diagnostics?: Record<string, any>;
   }> {
-    const candidateBins = ['opencode', '/usr/local/bin/opencode', '/opt/homebrew/bin/opencode'];
+    const resolution = await this.resolveOpenCodeBinary();
+    const triedPaths = resolution.tried;
     let lastError: string | undefined;
 
-    for (const bin of candidateBins) {
-      try {
-        const { execFileSync } = require('child_process');
-        const output = execFileSync(bin, ['session', 'list', '--format', 'json'], {
-          encoding: 'utf8',
-          timeout: 4000,
-        }).trim();
+    if (!resolution.path) {
+      return {
+        success: false,
+        sessions: [],
+        diagnostics: {
+          source: 'cli',
+          error: resolution.error || 'OpenCode CLI not found',
+          resolutionSource: resolution.source,
+          triedPaths,
+        },
+      };
+    }
 
-        if (output) {
-          const parsed = JSON.parse(output);
-          const sessions = Array.isArray(parsed) ? parsed : (parsed.sessions || []);
-          return {
-            success: true,
-            sessions,
-            diagnostics: {
-              source: 'cli',
-              binaryUsed: bin,
-              sessionCount: sessions.length,
-            },
-          };
-        }
-      } catch (err: any) {
-        lastError = err.message || String(err);
+    const bin = resolution.path;
+    try {
+      const { execFileSync } = await import('child_process');
+      const output = execFileSync(bin, ['session', 'list', '--format', 'json'], {
+        encoding: 'utf8',
+        timeout: 4000,
+      }).trim();
+
+      if (output) {
+        const parsed = JSON.parse(output);
+        const sessions = Array.isArray(parsed) ? parsed : (parsed.sessions || []);
+        return {
+          success: true,
+          sessions,
+          diagnostics: {
+            source: 'cli',
+            binaryUsed: bin,
+            resolutionSource: resolution.source,
+            triedPaths,
+            sessionCount: sessions.length,
+          },
+        };
       }
+    } catch (err: any) {
+      lastError = err.message || String(err);
     }
 
     return {
@@ -2571,9 +2695,237 @@ export class OpenCodeProvider extends BaseMacOSProvider {
       sessions: [],
       diagnostics: {
         source: 'cli',
-        error: lastError || 'OpenCode CLI not found or failed to return sessions',
+        error: lastError || 'OpenCode CLI failed to return sessions',
+        resolutionSource: resolution.source,
+        binaryUsed: bin,
+        triedPaths,
       },
     };
+  }
+
+  /**
+   * Resolves a read-only client for the already-running, user-wide shared
+   * OpenCode service (registered via `~/.local/state/opencode/service.json`).
+   *
+   * This never starts a private OpenCode server and never creates a session:
+   * Relay observes the exact same persisted `ses_*` records the human UI
+   * operates. Overridable so tests can run without a live service.
+   */
+  protected async resolveSharedServiceClient(): Promise<DiscoveredSessionClient> {
+    return discoverOpenCodeSessionClient();
+  }
+
+  /**
+   * Directory-scoped authoritative session discovery via the shared service.
+   *
+   * Returns `ok: false` with a truthful failure code when the service is
+   * unavailable/misconfigured/unauthorized — callers must not interpret that
+   * as "no sessions exist".
+   */
+  public async discoverSessionsViaSharedService(projectPath: string): Promise<{
+    ok: boolean;
+    failure?: OpenCodeServiceErrorCode | ServiceDiscoveryFailure;
+    sessions: OpenCodeSessionSummary[];
+    diagnostics: Record<string, unknown>;
+  }> {
+    const { discovery, client } = await this.resolveSharedServiceClient();
+    const baseDiagnostics: Record<string, unknown> = {
+      source: 'opencode_shared_service',
+      projectPath,
+      serviceFile: discovery.path,
+    };
+
+    if (discovery.status !== 'available' || !client) {
+      const failure: ServiceDiscoveryFailure =
+        discovery.status === 'unavailable' ? discovery.failure : 'service_metadata_missing';
+      return {
+        ok: false,
+        failure,
+        sessions: [],
+        diagnostics: {
+          ...baseDiagnostics,
+          failure,
+          error:
+            discovery.status === 'unavailable'
+              ? discovery.error
+              : 'No shared OpenCode service client was available',
+        },
+      };
+    }
+
+    try {
+      const result = await client.listSessionsByDirectory(projectPath);
+      return {
+        ok: true,
+        sessions: result.sessions,
+        diagnostics: {
+          ...baseDiagnostics,
+          method: 'GET /api/session?directory=',
+          serviceUrl: discovery.registration.url,
+          serviceVersion: result.serviceVersion,
+          versionMismatch: result.versionMismatch,
+          sessionCount: result.sessions.length,
+        },
+      };
+    } catch (err) {
+      if (err instanceof OpenCodeServiceError) {
+        return {
+          ok: false,
+          failure: err.code,
+          sessions: [],
+          diagnostics: {
+            ...baseDiagnostics,
+            failure: err.code,
+            error: err.message,
+            httpStatus: err.status,
+          },
+        };
+      }
+      return {
+        ok: false,
+        failure: 'request_failed',
+        sessions: [],
+        diagnostics: { ...baseDiagnostics, failure: 'request_failed', error: String(err) },
+      };
+    }
+  }
+
+  /**
+   * Correlates authoritative session records with visible UI runtimes and
+   * produces `RuntimeInspectionResult`s. UI correlation is presentation/focus
+   * evidence only — the accepted binding is always the authoritative id.
+   */
+  private matchAuthoritativeSessions(
+    authoritative: Array<{ id: string; directory?: string; projectId?: string }>,
+    uiRuntimes: RuntimeInspectionResult[],
+    projectPath: string,
+    gitRoot: string | undefined,
+    options: { allowMissingDirectory: boolean; directoryScopedMatchedVia: string },
+  ): { results: RuntimeInspectionResult[]; candidates: any[] } {
+    const normProjPath = projectPath.toLowerCase().replace(/\/$/, '');
+    const normGitRoot = gitRoot ? gitRoot.toLowerCase().replace(/\/$/, '') : undefined;
+
+    const candidates: any[] = [];
+    const results: RuntimeInspectionResult[] = [];
+
+    for (const pers of authoritative) {
+      const persId = pers.id;
+      const persDir = pers.directory;
+      const normPersDir = persDir ? persDir.toLowerCase().replace(/\/$/, '') : undefined;
+
+      let matchScore = 0;
+      let matchedVia: string | undefined;
+      let rejectionReason: string | undefined;
+
+      if (!normPersDir) {
+        if (options.allowMissingDirectory) {
+          // The shared service already scoped this query by directory, so a
+          // record without an echoed directory is still authoritative.
+          matchScore += 100;
+          matchedVia = options.directoryScopedMatchedVia;
+        } else {
+          rejectionReason = 'Persisted session has no directory property';
+        }
+      } else if (normPersDir === normProjPath) {
+        matchScore += 100;
+        matchedVia = 'exact_path';
+      } else if (normProjPath.startsWith(normPersDir) || normPersDir.startsWith(normProjPath)) {
+        matchScore += 50;
+        matchedVia = 'path_prefix';
+      }
+
+      if (normGitRoot && normPersDir) {
+        if (normPersDir === normGitRoot || normPersDir.startsWith(normGitRoot)) {
+          matchScore += 30;
+          matchedVia = matchedVia || 'git_root';
+        }
+      }
+
+      if (matchScore === 0 && !rejectionReason) {
+        rejectionReason = `Directory "${persDir}" does not match projectPath "${projectPath}" or gitRoot "${gitRoot}"`;
+      }
+
+      const accepted = matchScore > 0;
+
+      // Correlate with UI runtimes (secondary presentation/focus surface)
+      let correlatedRuntime: RuntimeInspectionResult | undefined;
+      for (const ui of uiRuntimes) {
+        const parsed = this.parseSessionIdentity(ui.windowTitle);
+        if (parsed.sessionId === persId) {
+          correlatedRuntime = ui;
+          break;
+        }
+        if (parsed.workspacePath && normPersDir) {
+          const normUiPath = parsed.workspacePath.toLowerCase().replace(/\/$/, '');
+          if (normUiPath === normPersDir) {
+            correlatedRuntime = ui;
+            break;
+          }
+        }
+      }
+
+      candidates.push({
+        sessionId: persId,
+        directory: persDir,
+        projectId: pers.projectId,
+        matchScore,
+        matchedVia,
+        hasUiCorrelation: !!correlatedRuntime,
+        correlatedPid: correlatedRuntime?.applicationPid,
+        correlatedWindowTitle: correlatedRuntime?.windowTitle,
+        accepted,
+        rejectionReason,
+      });
+
+      if (accepted) {
+        const evidence: ObservableEvidence = correlatedRuntime?.evidence || {
+          id: `ev_persisted_match_${Date.now()}`,
+          timestamp: Date.now(),
+          source: 'reconciliation_probe',
+          windowTitle: correlatedRuntime?.windowTitle || `OpenCode [${persId}] ${persDir || ''}`,
+          applicationPid: correlatedRuntime?.applicationPid,
+          bundleIdentifier: this.defaultBundleId,
+          details: {},
+        };
+
+        evidence.details = {
+          ...evidence.details,
+          parsedSessionId: persId,
+          authoritativeSessionId: persId,
+          workspacePath: persDir || projectPath,
+          openCodeProjectId: pers.projectId,
+          matchScore,
+          matchedVia,
+          hasUiCorrelation: !!correlatedRuntime,
+          canonicalPath: projectPath,
+          gitRoot,
+        };
+
+        results.push({
+          found: true,
+          status: correlatedRuntime ? correlatedRuntime.status : 'available',
+          windowTitle: correlatedRuntime?.windowTitle || `OpenCode [${persId}] ${persDir || ''}`,
+          applicationPid: correlatedRuntime?.applicationPid,
+          bundleIdentifier: this.defaultBundleId,
+          composerVisible: correlatedRuntime?.composerVisible ?? false,
+          composerHasFocus: correlatedRuntime?.composerHasFocus ?? false,
+          sendButtonVisible: correlatedRuntime?.sendButtonVisible ?? false,
+          stopButtonVisible: correlatedRuntime?.stopButtonVisible ?? false,
+          cancelButtonVisible: correlatedRuntime?.cancelButtonVisible ?? false,
+          isWorking: correlatedRuntime?.isWorking ?? false,
+          isComplete: correlatedRuntime?.isComplete ?? false,
+          evidence,
+        });
+      }
+    }
+
+    const sortedResults = results.sort(
+      (a, b) =>
+        ((b.evidence.details as any)?.matchScore || 0) -
+        ((a.evidence.details as any)?.matchScore || 0),
+    );
+
+    return { results: sortedResults, candidates };
   }
 
   /**
@@ -2590,9 +2942,41 @@ export class OpenCodeProvider extends BaseMacOSProvider {
     const normGitRoot = gitRoot ? gitRoot.toLowerCase().replace(/\/$/, '') : undefined;
     const basename = projectPath.split('/').pop()?.toLowerCase();
 
-    // 1. Authoritative Persisted Sessions Discovery
-    const persistedRes = await this.discoverPersistedSessions();
     const uiRuntimes = await this.findAllRuntimes();
+
+    // 1. Authoritative discovery via the already-running shared OpenCode
+    //    service. This is the preferred mechanism: it returns the exact
+    //    persisted `ses_*` records the human OpenCode UI operates.
+    const sharedRes = await this.discoverSessionsViaSharedService(projectPath);
+    if (sharedRes.ok) {
+      const { results, candidates } = this.matchAuthoritativeSessions(
+        sharedRes.sessions.map((s) => ({
+          id: s.sessionId,
+          directory: s.directory,
+          projectId: s.projectId,
+        })),
+        uiRuntimes,
+        projectPath,
+        gitRoot,
+        { allowMissingDirectory: true, directoryScopedMatchedVia: 'service_directory_query' },
+      );
+      return {
+        success: true,
+        sessions: results,
+        diagnostics: {
+          source: 'opencode_shared_service',
+          projectPath,
+          gitRoot,
+          authoritativeSessionsDiscovered: sharedRes.sessions.length,
+          correlatedUiRuntimes: uiRuntimes.length,
+          sharedService: sharedRes.diagnostics,
+          candidates,
+        },
+      };
+    }
+
+    // 2. Compatibility fallback: authoritative persisted sessions via the CLI.
+    const persistedRes = await this.discoverPersistedSessions();
 
     const candidates: any[] = [];
     const results: RuntimeInspectionResult[] = [];
@@ -2715,6 +3099,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
           gitRoot,
           authoritativeSessionsDiscovered: persistedRes.sessions.length,
           correlatedUiRuntimes: uiRuntimes.length,
+          sharedService: sharedRes.diagnostics,
           candidates,
         },
       };
@@ -2777,10 +3162,14 @@ export class OpenCodeProvider extends BaseMacOSProvider {
       if (accepted) {
         session.evidence.details = {
           ...session.evidence.details,
-          parsedSessionId: info.sessionId,
+          // Window titles are NON-authoritative evidence: record the observed
+          // id for display/telemetry only. A window title must never establish
+          // an authoritative `ses_*` binding.
+          observedWindowSessionId: info.sessionId,
           workspacePath: info.workspacePath,
           matchScore,
           matchedVia,
+          authoritative: false,
           canonicalPath: projectPath,
           gitRoot,
         };
@@ -2797,10 +3186,12 @@ export class OpenCodeProvider extends BaseMacOSProvider {
       sessions: sortedResults,
       diagnostics: {
         source: 'ui_fallback',
+        sharedService: sharedRes.diagnostics,
         cliStatus: persistedRes.diagnostics,
         projectPath,
         gitRoot,
         totalRuntimesInspected: uiRuntimes.length,
+        authoritative: false,
         candidates,
       },
     };

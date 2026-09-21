@@ -935,19 +935,47 @@ export class RelayApiService implements IRelayApi {
 
       return {
         success: true,
-        sessions: sessions.map((m: any) => ({
-          sessionId: (m.evidence.details as any)?.parsedSessionId || (m.evidence.details as any)?.authoritativeSessionId,
-          windowTitle: m.windowTitle,
-          workspacePath: (m.evidence.details as any)?.workspacePath,
-          matchScore: (m.evidence.details as any)?.matchScore,
-          matchedVia: (m.evidence.details as any)?.matchedVia,
-          openCodeProjectId: (m.evidence.details as any)?.openCodeProjectId,
-          hasUiCorrelation: (m.evidence.details as any)?.hasUiCorrelation,
-        })),
+        sessions: sessions.map((m: any) => {
+          const details = (m.evidence?.details || {}) as any;
+          // Only an authoritative id (shared service / persisted store) may
+          // become the bound worker session. Window-derived ids are display-only.
+          const authoritativeSessionId =
+            details.authoritativeSessionId || details.parsedSessionId;
+          return {
+            sessionId: authoritativeSessionId,
+            authoritativeSessionId,
+            observedWindowSessionId: details.observedWindowSessionId,
+            authoritative: !!authoritativeSessionId,
+            windowTitle: m.windowTitle,
+            workspacePath: details.workspacePath,
+            matchScore: details.matchScore,
+            matchedVia: details.matchedVia,
+            openCodeProjectId: details.openCodeProjectId,
+            hasUiCorrelation: details.hasUiCorrelation,
+          };
+        }),
         diagnostics,
       };
     } catch (err: any) {
       return { success: false, sessions: [], error: err.message };
+    }
+  }
+
+  public async discoverChatGPTPlanner(name: string): Promise<{
+    success: boolean;
+    finalUrl?: string;
+    projectName?: string;
+    error?: string;
+    diagnostics?: any;
+  }> {
+    try {
+      const provider = this.engine.getProvider('chatgpt') as any;
+      if (!provider || typeof provider.resolveChatGPTProject !== 'function') {
+        return { success: false, error: 'ChatGPT provider does not support project resolution' };
+      }
+      return await provider.resolveChatGPTProject(name);
+    } catch (err: any) {
+      return { success: false, error: err.message };
     }
   }
 

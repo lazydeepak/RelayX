@@ -112,6 +112,9 @@ export function registerRelayIpcHandlers(service: RelayApiService): void {
   ipcMain.handle(RELAY_IPC_CHANNELS.RESOLVE_CHATGPT_PROJECT, (_event, name) =>
     service.resolveChatGPTProject(name),
   );
+  ipcMain.handle(RELAY_IPC_CHANNELS.DISCOVER_CHATGPT_PLANNER, (_event, name) =>
+    service.discoverChatGPTPlanner(name),
+  );
   ipcMain.handle(RELAY_IPC_CHANNELS.DISCOVER_OPENCODE_SESSIONS, (_event, projectPath, gitRoot) =>
     service.discoverOpenCodeSessions(projectPath, gitRoot),
   );

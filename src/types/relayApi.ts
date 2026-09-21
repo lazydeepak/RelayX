@@ -123,14 +123,30 @@ export interface IRelayApi {
     foundMultiple?: Array<{ name: string; url: string }>;
     diagnostics?: any;
   }>;
+  discoverChatGPTPlanner(name: string): Promise<{
+    success: boolean;
+    finalUrl?: string;
+    projectName?: string;
+    foundMultiple?: Array<{ name: string; url: string }>;
+    error?: string;
+    diagnostics?: any;
+  }>;
   discoverOpenCodeSessions(projectPath: string, gitRoot?: string): Promise<{
     success: boolean;
     sessions: Array<{ 
       sessionId?: string; 
+      /** Authoritative `ses_*` id resolved via the shared service or persisted store. */
+      authoritativeSessionId?: string;
+      /** Window-derived id — display/telemetry only, never a binding. */
+      observedWindowSessionId?: string;
+      /** True only when `sessionId` came from an authoritative source. */
+      authoritative?: boolean;
       windowTitle?: string; 
       workspacePath?: string;
       matchScore?: number;
       matchedVia?: string;
+      openCodeProjectId?: string;
+      hasUiCorrelation?: boolean;
     }>;
     diagnostics?: any;
     error?: string;

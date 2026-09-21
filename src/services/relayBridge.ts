@@ -391,6 +391,13 @@ export const relayBridge: IRelayApi = {
     return getLocalFallbackService().resolveChatGPTProject(name);
   },
 
+  discoverChatGPTPlanner: async (name: string) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.discoverChatGPTPlanner(name);
+    }
+    return getLocalFallbackService().discoverChatGPTPlanner(name);
+  },
+
   discoverOpenCodeSessions: async (projectPath: string, gitRoot?: string) => {
     if (typeof window !== 'undefined' && window.relayApi) {
       return window.relayApi.discoverOpenCodeSessions(projectPath, gitRoot);

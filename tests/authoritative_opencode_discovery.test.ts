@@ -5,9 +5,29 @@ import { RelayApiService } from '../src/relay/application/RelayApiService.ts';
 import { RelayEngine } from '../src/relay/application/RelayEngine.ts';
 import { MemoryRelayDatabase } from '../src/relay/persistence/memory/MemoryDatabase.ts';
 
+/**
+ * Base for tests that exercise the CLI/persisted fallback path without a live
+ * shared OpenCode service. The shared-service path is stubbed unavailable so
+ * these tests deterministically cover the compatibility fallback.
+ */
+class CliFallbackOpenCodeProvider extends OpenCodeProvider {
+  public override async discoverSessionsViaSharedService(_projectPath: string) {
+    return {
+      ok: false as const,
+      failure: 'service_metadata_missing' as const,
+      sessions: [],
+      diagnostics: {
+        source: 'opencode_shared_service',
+        failure: 'service_metadata_missing',
+        error: 'test: shared service disabled',
+      },
+    };
+  }
+}
+
 describe('Authoritative OpenCode Session Discovery Tests', () => {
   it('prioritizes authoritative persisted sessions over window titles and correlates exact directory match', async () => {
-    class MockOpenCodeProvider extends OpenCodeProvider {
+    class MockOpenCodeProvider extends CliFallbackOpenCodeProvider {
       public override async discoverPersistedSessions() {
         return {
           success: true,
@@ -66,7 +86,7 @@ describe('Authoritative OpenCode Session Discovery Tests', () => {
   });
 
   it('matches persisted session without requiring an active UI window (headless or stopped service)', async () => {
-    class HeadlessOpenCodeProvider extends OpenCodeProvider {
+    class HeadlessOpenCodeProvider extends CliFallbackOpenCodeProvider {
       public override async discoverPersistedSessions() {
         return {
           success: true,
@@ -97,7 +117,7 @@ describe('Authoritative OpenCode Session Discovery Tests', () => {
   });
 
   it('excludes unrelated sessions with non-matching directories', async () => {
-    class OtherSessionsProvider extends OpenCodeProvider {
+    class OtherSessionsProvider extends CliFallbackOpenCodeProvider {
       public override async discoverPersistedSessions() {
         return {
           success: true,
@@ -127,7 +147,7 @@ describe('Authoritative OpenCode Session Discovery Tests', () => {
   });
 
   it('exposes multiple sessions with diagnostics when multiple sessions match git root / prefix', async () => {
-    class MultiSessionProvider extends OpenCodeProvider {
+    class MultiSessionProvider extends CliFallbackOpenCodeProvider {
       public override async discoverPersistedSessions() {
         return {
           success: true,
