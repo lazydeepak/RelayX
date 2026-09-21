@@ -82,6 +82,12 @@ export class MemoryRuntimeSessionRepository implements IRuntimeSessionRepository
     this.items.set(session.id, session);
   }
 
+  async findByExternalSessionId(providerType: string, externalSessionId: string): Promise<RuntimeSession | null> {
+    return Array.from(this.items.values()).find(
+      (r) => r.providerType === providerType && r.externalSessionId === externalSessionId,
+    ) ?? null;
+  }
+
   async delete(id: RuntimeSessionId): Promise<void> {
     this.items.delete(id);
   }

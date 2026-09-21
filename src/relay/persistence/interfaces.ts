@@ -40,6 +40,7 @@ export interface IPairRepository {
 export interface IRuntimeSessionRepository {
   findById(id: RuntimeSessionId): Promise<RuntimeSession | null>;
   findByBundleId(bundleId: string): Promise<RuntimeSession[]>;
+  findByExternalSessionId(providerType: string, externalSessionId: string): Promise<RuntimeSession | null>;
   findAll(): Promise<RuntimeSession[]>;
   findActive(): Promise<RuntimeSession[]>;
   save(session: RuntimeSession): Promise<void>;

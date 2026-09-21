@@ -156,11 +156,19 @@ export class SqliteRuntimeSessionRepository implements IRuntimeSessionRepository
       updatedAt: Number(row.updated_at),
       archivedAt: row.archived_at ? Number(row.archived_at) : undefined,
       archiveReason: row.archive_reason as string | undefined,
+      externalSessionId: (row.external_session_id as string | null | undefined) ?? null,
+      externalProjectRef: (row.external_project_ref as string | null | undefined) ?? null,
     });
   }
 
   async findById(id: RuntimeSessionId): Promise<RuntimeSession | null> {
     const row = this.db.prepare('SELECT * FROM runtime_sessions WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.mapRow(row);
+  }
+
+  async findByExternalSessionId(providerType: string, externalSessionId: string): Promise<RuntimeSession | null> {
+    const row = this.db.prepare('SELECT * FROM runtime_sessions WHERE provider_type = ? AND external_session_id = ?').get(providerType, externalSessionId) as Record<string, unknown> | undefined;
     if (!row) return null;
     return this.mapRow(row);
   }
@@ -185,8 +193,8 @@ export class SqliteRuntimeSessionRepository implements IRuntimeSessionRepository
       INSERT INTO runtime_sessions (
         id, provider_type, name, bundle_identifier, window_title, application_pid,
         status, consecutive_observation_failures, last_heartbeat_at, last_observed_at,
-        last_evidence_json, archived_at, archive_reason, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        last_evidence_json, archived_at, archive_reason, external_session_id, external_project_ref, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         provider_type = excluded.provider_type,
         name = excluded.name,
@@ -200,6 +208,8 @@ export class SqliteRuntimeSessionRepository implements IRuntimeSessionRepository
         last_evidence_json = excluded.last_evidence_json,
         archived_at = excluded.archived_at,
         archive_reason = excluded.archive_reason,
+        external_session_id = excluded.external_session_id,
+        external_project_ref = excluded.external_project_ref,
         updated_at = excluded.updated_at
     `);
     stmt.run(
@@ -216,6 +226,8 @@ export class SqliteRuntimeSessionRepository implements IRuntimeSessionRepository
       safeJsonStringify(session.lastEvidence),
       session.archivedAt ?? null,
       session.archiveReason ?? null,
+      session.externalSessionId ?? null,
+      session.externalProjectRef ?? null,
       session.createdAt,
       session.updatedAt,
     );

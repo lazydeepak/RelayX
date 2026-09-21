@@ -617,6 +617,19 @@ export class RelayApiService implements IRelayApi {
       }
       await this.db.runtimes.save(runtime);
 
+      // Persist authoritative external identity when evidence carries it.
+      const details = (inspection.evidence?.details || {}) as any;
+      if (details.authoritativeSessionId || details.parsedSessionId || details.workspacePath || details.projectUrl) {
+        const extId = details.authoritativeSessionId || details.parsedSessionId || (details.openCodeProjectId ? details.openCodeProjectId : undefined);
+        if (extId && runtime.externalSessionId !== extId) {
+          const projRef = runtime.providerType === 'opencode'
+            ? (details.workspacePath || runtime.externalProjectRef || null)
+            : (details.projectUrl || details.projectName || runtime.externalProjectRef || null);
+          runtime.updateExternalIdentity(extId, projRef);
+          await this.db.runtimes.save(runtime);
+        }
+      }
+
       return {
         success: inspection.found,
         evidence: inspection.evidence,

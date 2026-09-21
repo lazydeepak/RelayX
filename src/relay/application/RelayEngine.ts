@@ -284,6 +284,13 @@ export class RelayEngine {
       } else {
         existing.recordObservationFailure();
       }
+      // Authoritative persistence of external provider identity at discovery boundary
+      const det = (inspection.evidence?.details || {}) as any;
+      const extId = det.authoritativeSessionId || det.parsedSessionId || (det.openCodeProjectId ? det.openCodeProjectId : undefined);
+      if (extId && existing.externalSessionId !== extId) {
+        const projRef = providerType === 'opencode' ? det.workspacePath || existing.externalProjectRef : (det.projectUrl || det.projectName || existing.externalProjectRef);
+        existing.updateExternalIdentity(extId, projRef ?? existing.externalProjectRef ?? null);
+      }
       await this.repos.runtimes.save(existing);
       await this.emitEvent('runtime', existing.id, 'runtime.discovered', {
         actor: 'engine',
@@ -306,6 +313,13 @@ export class RelayEngine {
     } else {
       runtime.status = 'unavailable';
       runtime.lastEvidence = inspection.evidence;
+    }
+    // Persist authoritative external identity at creation boundary
+    const det = (inspection.evidence?.details || {}) as any;
+    const extId = det.authoritativeSessionId || det.parsedSessionId || (det.openCodeProjectId ? det.openCodeProjectId : undefined);
+    if (extId) {
+      const projRef = providerType === 'opencode' ? det.workspacePath || null : (det.projectUrl || det.projectName || null);
+      runtime.updateExternalIdentity(extId, projRef);
     }
     await this.repos.runtimes.save(runtime);
     await this.emitEvent('runtime', runtime.id, 'runtime.discovered', {

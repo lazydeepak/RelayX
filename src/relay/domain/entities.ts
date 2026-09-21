@@ -237,6 +237,8 @@ export interface RuntimeSessionProps {
   updatedAt: number;
   archivedAt?: number;
   archiveReason?: string;
+  externalSessionId?: string | null;
+  externalProjectRef?: string | null;
 }
 
 export class RuntimeSession {
@@ -255,6 +257,8 @@ export class RuntimeSession {
   public updatedAt: number;
   public archivedAt?: number;
   public archiveReason?: string;
+  public externalSessionId?: string | null;
+  public externalProjectRef?: string | null;
 
   constructor(props: RuntimeSessionProps) {
     this.id = props.id;
@@ -272,6 +276,8 @@ export class RuntimeSession {
     this.updatedAt = props.updatedAt;
     this.archivedAt = props.archivedAt;
     this.archiveReason = props.archiveReason;
+    this.externalSessionId = props.externalSessionId ?? null;
+    this.externalProjectRef = props.externalProjectRef ?? null;
   }
 
   public static create(
@@ -289,6 +295,8 @@ export class RuntimeSession {
       consecutiveObservationFailures: 0,
       createdAt: now,
       updatedAt: now,
+      externalSessionId: null,
+      externalProjectRef: null,
     });
   }
 
@@ -340,6 +348,15 @@ export class RuntimeSession {
     if (this.status === 'suspended') {
       this.status = 'available';
     }
+  }
+
+  public updateExternalIdentity(
+    externalSessionId?: string | null,
+    externalProjectRef?: string | null,
+  ): void {
+    if (externalSessionId !== undefined) this.externalSessionId = externalSessionId;
+    if (externalProjectRef !== undefined) this.externalProjectRef = externalProjectRef;
+    this.updatedAt = Date.now();
   }
 
   public archive(reason?: string): void {

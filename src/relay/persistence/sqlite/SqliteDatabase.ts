@@ -85,10 +85,15 @@ export class SqliteRelayDatabase implements IRelayRepositories {
         last_evidence_json TEXT,
         archived_at INTEGER,
         archive_reason TEXT,
+        external_session_id TEXT,
+        external_project_ref TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
+    `);
+    this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_extern ON runtime_sessions(provider_type, external_session_id) WHERE external_session_id IS NOT NULL;`);
 
+    this.db.exec(`
       CREATE TABLE IF NOT EXISTS pairs (
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -101,7 +106,9 @@ export class SqliteRelayDatabase implements IRelayRepositories {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
+    `);
 
+    this.db.exec(`
       CREATE TABLE IF NOT EXISTS assignments (
         id TEXT PRIMARY KEY,
         pair_id TEXT NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,
@@ -206,6 +213,8 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     addColumnIfNeeded(this.db, 'runtime_sessions', 'last_evidence_json', 'TEXT');
     addColumnIfNeeded(this.db, 'runtime_sessions', 'archived_at', 'INTEGER');
     addColumnIfNeeded(this.db, 'runtime_sessions', 'archive_reason', 'TEXT');
+    addColumnIfNeeded(this.db, 'runtime_sessions', 'external_session_id', 'TEXT');
+    addColumnIfNeeded(this.db, 'runtime_sessions', 'external_project_ref', 'TEXT');
 
     addColumnIfNeeded(this.db, 'pairs', 'active_assignment_id', 'TEXT');
     addColumnIfNeeded(this.db, 'pairs', 'last_supervised_at', 'INTEGER');
