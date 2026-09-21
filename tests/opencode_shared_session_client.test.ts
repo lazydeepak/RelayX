@@ -321,6 +321,9 @@ describe('OpenCodeSessionClient read-only capabilities', () => {
       if (req.url.endsWith('/api/info')) return { body: { version: '2.0.12', pid: 1, urls: [SERVICE_URL] } };
       if (req.url.includes('/api/session/active')) return { body: { data: {} } };
       if (req.url.includes('/api/session/ses_read/message')) return { body: { data: [] } };
+      if (req.url.endsWith('/api/session/ses_read')) {
+        return { body: { data: { id: 'ses_read', location: { directory: '/Users/relay/alpha' } } } };
+      }
       return { body: { data: [] } };
     });
     const client = makeClient(fetchImpl);
