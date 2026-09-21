@@ -364,6 +364,17 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
           })}
         </div>
       )}
+      <div className="mt-6 p-4 rounded-xl bg-slate-950/60 border border-slate-800">
+        <button onClick={() => {}} className="text-xs font-medium text-slate-300 hover:text-blue-400">Unpaired Sessions (folded)</button>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mt-2">
+          {visibleSessions.filter((s) => !pairs.some((p) => p.plannerSessionId === s.id || p.workerSessionId === s.id)).map((s) => (
+            <div key={s.id} className="p-3 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-400">
+              <div className="font-medium text-slate-200">{s.name}</div>
+              <div>{s.providerType.toUpperCase()} • {s.status} • {s.externalSessionId ? 'id:' + s.externalSessionId.slice(0,8) : 'unpaired'}</div>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 };

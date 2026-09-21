@@ -39,6 +39,8 @@ export interface ProjectProps {
   description: string;
   canonicalPath?: string;
   gitRoot?: string;
+  plannerProjectUrl?: string;
+  workerWorkspacePath?: string;
   status?: ProjectStatus;
   createdAt: number;
   updatedAt: number;
@@ -50,6 +52,8 @@ export class Project {
   public description: string;
   public canonicalPath?: string;
   public gitRoot?: string;
+  public plannerProjectUrl?: string;
+  public workerWorkspacePath?: string;
   public status: ProjectStatus;
   public readonly createdAt: number;
   public updatedAt: number;
@@ -60,12 +64,14 @@ export class Project {
     this.description = props.description;
     this.canonicalPath = props.canonicalPath;
     this.gitRoot = props.gitRoot;
+    this.plannerProjectUrl = props.plannerProjectUrl;
+    this.workerWorkspacePath = props.workerWorkspacePath;
     this.status = props.status ?? 'active';
     this.createdAt = props.createdAt;
     this.updatedAt = props.updatedAt;
   }
 
-  public static create(name: string, description = '', canonicalPath?: string, gitRoot?: string): Project {
+  public static create(name: string, description = '', canonicalPath?: string, gitRoot?: string, plannerProjectUrl?: string, workerWorkspacePath?: string): Project {
     const now = Date.now();
     return new Project({
       id: createId<ProjectId>('proj'),
@@ -73,17 +79,21 @@ export class Project {
       description,
       canonicalPath,
       gitRoot,
+      plannerProjectUrl,
+      workerWorkspacePath,
       status: 'active',
       createdAt: now,
       updatedAt: now,
     });
   }
 
-  public update(name?: string, description?: string, canonicalPath?: string, gitRoot?: string): void {
+  public update(name?: string, description?: string, canonicalPath?: string, gitRoot?: string, plannerProjectUrl?: string, workerWorkspacePath?: string): void {
     if (name !== undefined) this.name = name;
     if (description !== undefined) this.description = description;
     if (canonicalPath !== undefined) this.canonicalPath = canonicalPath;
     if (gitRoot !== undefined) this.gitRoot = gitRoot;
+    if (plannerProjectUrl !== undefined) this.plannerProjectUrl = plannerProjectUrl;
+    if (workerWorkspacePath !== undefined) this.workerWorkspacePath = workerWorkspacePath;
     this.updatedAt = Date.now();
   }
 

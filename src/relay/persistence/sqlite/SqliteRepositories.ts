@@ -68,6 +68,8 @@ export class SqliteProjectRepository implements IProjectRepository {
       description: (row.description as string) || '',
       canonicalPath: row.canonical_path ? (row.canonical_path as string) : undefined,
       gitRoot: row.git_root ? (row.git_root as string) : undefined,
+      plannerProjectUrl: row.planner_project_url ? (row.planner_project_url as string) : undefined,
+      workerWorkspacePath: row.worker_workspace_path ? (row.worker_workspace_path as string) : undefined,
       status: (row.status as any) || 'active',
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
@@ -83,6 +85,8 @@ export class SqliteProjectRepository implements IProjectRepository {
       description: (row.description as string) || '',
       canonicalPath: row.canonical_path ? (row.canonical_path as string) : undefined,
       gitRoot: row.git_root ? (row.git_root as string) : undefined,
+      plannerProjectUrl: row.planner_project_url ? (row.planner_project_url as string) : undefined,
+      workerWorkspacePath: row.worker_workspace_path ? (row.worker_workspace_path as string) : undefined,
       status: (row.status as any) || 'active',
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
@@ -99,6 +103,8 @@ export class SqliteProjectRepository implements IProjectRepository {
           description: (row.description as string) || '',
           canonicalPath: row.canonical_path ? (row.canonical_path as string) : undefined,
           gitRoot: row.git_root ? (row.git_root as string) : undefined,
+          plannerProjectUrl: row.planner_project_url ? (row.planner_project_url as string) : undefined,
+          workerWorkspacePath: row.worker_workspace_path ? (row.worker_workspace_path as string) : undefined,
           status: (row.status as any) || 'active',
           createdAt: Number(row.created_at),
           updatedAt: Number(row.updated_at),
@@ -108,13 +114,15 @@ export class SqliteProjectRepository implements IProjectRepository {
 
   async save(project: Project): Promise<void> {
     const stmt = this.db.prepare(`
-      INSERT INTO projects (id, name, description, canonical_path, git_root, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO projects (id, name, description, canonical_path, git_root, planner_project_url, worker_workspace_path, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         description = excluded.description,
         canonical_path = excluded.canonical_path,
         git_root = excluded.git_root,
+        planner_project_url = excluded.planner_project_url,
+        worker_workspace_path = excluded.worker_workspace_path,
         status = excluded.status,
         updated_at = excluded.updated_at
     `);
@@ -124,6 +132,8 @@ export class SqliteProjectRepository implements IProjectRepository {
       project.description ?? '',
       project.canonicalPath || null,
       project.gitRoot || null,
+      project.plannerProjectUrl || null,
+      project.workerWorkspacePath || null,
       project.status || 'active',
       project.createdAt,
       project.updatedAt ?? project.createdAt,

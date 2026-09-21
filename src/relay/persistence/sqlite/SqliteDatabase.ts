@@ -66,6 +66,8 @@ export class SqliteRelayDatabase implements IRelayRepositories {
         description TEXT,
         canonical_path TEXT,
         git_root TEXT,
+        planner_project_url TEXT,
+        worker_workspace_path TEXT,
         status TEXT NOT NULL DEFAULT 'active',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
@@ -205,6 +207,8 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     // Comprehensive column migration audit (idempotent, safe for existing databases)
     addColumnIfNeeded(this.db, 'projects', 'canonical_path', 'TEXT');
     addColumnIfNeeded(this.db, 'projects', 'git_root', 'TEXT');
+    addColumnIfNeeded(this.db, 'projects', 'planner_project_url', 'TEXT');
+    addColumnIfNeeded(this.db, 'projects', 'worker_workspace_path', 'TEXT');
     addColumnIfNeeded(this.db, 'projects', 'status', "TEXT NOT NULL DEFAULT 'active'");
 
     addColumnIfNeeded(this.db, 'runtime_sessions', 'consecutive_observation_failures', 'INTEGER NOT NULL DEFAULT 0');

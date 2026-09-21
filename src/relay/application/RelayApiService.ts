@@ -29,6 +29,7 @@ import {
   DeliveryId,
   AttentionItemId,
 } from '../domain/types.ts';
+import path from 'node:path';
 
 export interface RelayApiServiceOptions {
   isElectron?: boolean;
@@ -325,6 +326,51 @@ export class RelayApiService implements IRelayApi {
     plannerSessionId?: string,
     workerSessionId?: string,
   ): Promise<UIPair> {
+    // Service-layer cross-project guard: selected runtimes must match expected roles
+    if (plannerSessionId) {
+      const p = await this.db.runtimes.findById(plannerSessionId as RuntimeSessionId);
+      if (p && p.providerType !== 'chatgpt') throw new Error('Planner session must be ChatGPT');
+    }
+    if (workerSessionId) {
+      const w = await this.db.runtimes.findById(workerSessionId as RuntimeSessionId);
+      if (w && w.providerType !== 'opencode' && w.providerType !== 'vscode') throw new Error('Worker session must be OpenCode or VS Code');
+    }
+    // Project-ownership invariant: each selected runtime must belong to the selected project.
+    if (plannerSessionId || workerSessionId) {
+      const planner = plannerSessionId
+        ? await this.db.runtimes.findById(plannerSessionId as RuntimeSessionId)
+        : null;
+      const worker = workerSessionId
+        ? await this.db.runtimes.findById(workerSessionId as RuntimeSessionId)
+        : null;
+      const proj = await this.db.projects.findById(projectId as ProjectId);
+      if (!proj) throw new Error('Project not found');
+      const normalizeChatRef = (ref: string | null): string => {
+        if (!ref) return '';
+        const match = ref.match(/(?:^|\/g\/)(g-p-[^/?#]+)/i);
+        return (match?.[1] ?? ref).replace(/\/$/, '').toLowerCase();
+      };
+      if (plannerSessionId && (!planner || !planner.externalProjectRef || !proj.plannerProjectUrl)) {
+        throw new Error('Cross-project pairing: planner project ownership cannot be proven');
+      }
+      const plannerNorm = normalizeChatRef(planner?.externalProjectRef ?? null);
+      const projNorm = normalizeChatRef(proj.plannerProjectUrl ?? null);
+      if (plannerSessionId && plannerNorm !== projNorm) {
+        throw new Error('Cross-project pairing: planner session belongs to different ChatGPT project');
+      }
+      const normalizeWorkerPath = (ref: string | null): string => {
+        if (!ref) return '';
+        return path.posix.normalize(ref.replaceAll('\\', '/')).replace(/\/$/, '');
+      };
+      if (workerSessionId && (!worker || !worker.externalProjectRef || !proj.workerWorkspacePath)) {
+        throw new Error('Cross-project pairing: worker project ownership cannot be proven');
+      }
+      const normProjWorker = normalizeWorkerPath(proj.workerWorkspacePath ?? null);
+      const normWorkerRef = normalizeWorkerPath(worker?.externalProjectRef ?? null);
+      if (workerSessionId && normWorkerRef !== normProjWorker) {
+        throw new Error('Cross-project pairing: worker session belongs to different workspace');
+      }
+    }
     const pair = await this.engine.createPair(
       projectId as ProjectId,
       name,

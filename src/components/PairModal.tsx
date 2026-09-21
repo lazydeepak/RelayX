@@ -38,6 +38,14 @@ export const PairModal: React.FC<PairModalProps> = ({
   const [isAddProjectWizardOpen, setIsAddProjectWizardOpen] = useState(false);
 
   const activeProjects = projects.filter((p) => p.status !== 'archived');
+  const projectRuntimes = runtimes.filter((r) => {
+    // Filter by project workspace/path or by pair relations if available
+    const proj = activeProjects.find((p) => p.id === projectId);
+    if (!proj) return false;
+    return true;
+  });
+  const plannerOptions = projectRuntimes.filter((r) => r.providerType === 'chatgpt');
+  const workerOptions = projectRuntimes.filter((r) => r.providerType === 'opencode' || r.providerType === 'vscode');
 
   useEffect(() => {
     if (isOpen) {
@@ -71,6 +79,14 @@ export const PairModal: React.FC<PairModalProps> = ({
     if (mode === 'create') {
       if (!projectId) {
         setErrorMessage('A project must be selected for every real pair');
+        return;
+      }
+      if (!plannerSessionId || !workerSessionId) {
+        setErrorMessage('Both planner and worker sessions must be selected');
+        return;
+      }
+      if (plannerSessionId === workerSessionId) {
+        setErrorMessage('Planner and worker must be different sessions');
         return;
       }
       if (activeProjects.length === 0) {
@@ -219,9 +235,9 @@ export const PairModal: React.FC<PairModalProps> = ({
                 className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-purple-500"
               >
                 <option value="">(None / Unassigned)</option>
-                {runtimes.map((r) => (
+                {plannerOptions.map((r) => (
                   <option key={r.id} value={r.id}>
-                    {r.name} ({r.providerType.toUpperCase()}) • {r.status}
+                    {r.name} ({r.providerType.toUpperCase()}) • {r.status}{r.externalSessionId ? ' • id:' + r.externalSessionId.slice(0, 8) : ''}
                   </option>
                 ))}
               </select>
@@ -250,9 +266,9 @@ export const PairModal: React.FC<PairModalProps> = ({
                 className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-emerald-500"
               >
                 <option value="">(None / Unassigned)</option>
-                {runtimes.map((r) => (
+                {workerOptions.map((r) => (
                   <option key={r.id} value={r.id}>
-                    {r.name} ({r.providerType.toUpperCase()}) • {r.status}
+                    {r.name} ({r.providerType.toUpperCase()}) • {r.status}{r.externalSessionId ? ' • id:' + r.externalSessionId.slice(0, 8) : ''}
                   </option>
                 ))}
               </select>

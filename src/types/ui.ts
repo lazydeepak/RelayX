@@ -85,6 +85,8 @@ export interface UIRuntimeSession {
   archiveReason?: string;
   createdAt?: number;
   updatedAt?: number;
+  externalSessionId?: string | null;
+  externalProjectRef?: string | null;
 }
 
 export interface UIAssignment {
