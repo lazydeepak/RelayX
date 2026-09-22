@@ -5,6 +5,9 @@
  * marked `ambiguous` for an assignment — never the assignment ID and never an
  * unrelated (non-ambiguous) delivery of the same assignment. When no delivery of
  * the assignment is ambiguous, recovery must be left unavailable (no deliveryId).
+ * When TWO OR MORE deliveries of the assignment are ambiguous, the service must
+ * not pick the first: it leaves recovery unavailable and exposes the ambiguous
+ * count so the UI can demand an explicit selection/reconciliation.
  *
  * This test only seeds fixtures and reads via listAttentionItems; it never calls
  * resolveAmbiguousDelivery / dispatchAssignment, so no delivery state is altered.
@@ -31,7 +34,7 @@ describe('service boundary: ambiguous delivery selection for recovery', () => {
     return { db, engine, api };
   };
 
-  it('exposes exactly the ambiguous delivery ID, and leaves recovery unavailable when none exists', async () => {
+  it('exposes the sole ambiguous delivery ID; leaves recovery unavailable for zero or multiple ambiguous deliveries', async () => {
     // --- Scenario A: assignment with two deliveries, only one ambiguous ---
     const { db: dbA, engine: engineA, api: apiA } = makeContext();
 
@@ -127,6 +130,61 @@ describe('service boundary: ambiguous delivery selection for recovery', () => {
     assert.strictEqual(itemB.deliveryId, undefined, 'no ambiguous delivery -> no delivery ID');
     assert.strictEqual(
       recoveryDeliveryArgument(itemB),
+      '',
+      'recovery button argument must be empty -> recovery unavailable',
+    );
+
+    // --- Scenario C: same assignment shape but TWO ambiguous deliveries ---
+    const { db: dbC, engine: engineC, api: apiC } = makeContext();
+
+    const workerC = await engineC.registerRuntimeSession('opencode', 'Worker');
+    const assignmentC = await engineC.createAssignment(
+      (await seedPair(engineC, 'Proj C')).id,
+      'Doubly ambiguous assignment',
+      'Delivered twice without confirmation',
+    );
+
+    const attemptC = Attempt.create(assignmentC.id, 1);
+    await dbC.attempts.save(attemptC);
+
+    const ambiguousC1 = Delivery.create(
+      assignmentC.id,
+      attemptC.id,
+      workerC.id,
+      'first delivery',
+      `idemp_${assignmentC.id}_1`,
+    );
+    ambiguousC1.markAmbiguous('No confirmation for the first delivery');
+    await dbC.deliveries.save(ambiguousC1);
+
+    const ambiguousC2 = Delivery.create(
+      assignmentC.id,
+      attemptC.id,
+      workerC.id,
+      'second delivery',
+      `idemp_${assignmentC.id}_2`,
+    );
+    ambiguousC2.markAmbiguous('No confirmation for the second delivery');
+    await dbC.deliveries.save(ambiguousC2);
+
+    const attentionC = AttentionItem.create(
+      'critical',
+      'ambiguous_delivery',
+      'Ambiguous Delivery Pending Resolution',
+      'Multiple deliveries are ambiguous.',
+      { assignmentId: assignmentC.id },
+    );
+    await dbC.attention.save(attentionC);
+
+    const itemsC = await apiC.listAttentionItems();
+    const itemC = itemsC.find((i) => i.id === attentionC.id);
+    assert.ok(itemC, 'attention item must be listed');
+    assert.strictEqual(itemC.deliveryId, undefined, 'multiple ambiguous deliveries -> no ID may be auto-chosen');
+    assert.notStrictEqual(itemC.deliveryId, ambiguousC1.id, 'must never fall back to the first ambiguous delivery');
+    assert.notStrictEqual(itemC.deliveryId, ambiguousC2.id, 'must never fall back to the second ambiguous delivery');
+    assert.strictEqual(itemC.ambiguousDeliveryCount, 2, 'the ambiguous count must be exposed for the UI reason');
+    assert.strictEqual(
+      recoveryDeliveryArgument(itemC),
       '',
       'recovery button argument must be empty -> recovery unavailable',
     );

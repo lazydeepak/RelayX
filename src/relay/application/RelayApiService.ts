@@ -799,15 +799,25 @@ export class RelayApiService implements IRelayApi {
     const result: UIAttentionItem[] = [];
     for (const i of items) {
       let deliveryId: string | undefined;
+      let ambiguousDeliveryCount: number | undefined;
       if (i.type === 'ambiguous_delivery' && i.assignmentId) {
         const deliveries = await this.db.deliveries.findByAssignmentId(i.assignmentId);
-        deliveryId = deliveries.find((d) => d.status === 'ambiguous')?.id;
+        const ambiguous = deliveries.filter((d) => d.status === 'ambiguous');
+        ambiguousDeliveryCount = ambiguous.length;
+        // Expose an ID only when the assignment has exactly ONE ambiguous
+        // delivery. With two or more, picking the first would resolve an
+        // arbitrarily chosen delivery, so recovery stays unavailable until
+        // the operator selects or reconciles a delivery explicitly.
+        if (ambiguous.length === 1) {
+          deliveryId = ambiguous[0].id;
+        }
       }
       result.push({
         id: i.id,
         pairId: i.pairId,
         assignmentId: i.assignmentId,
         deliveryId,
+        ambiguousDeliveryCount,
         severity: i.severity,
         status: i.status,
         type: i.type,

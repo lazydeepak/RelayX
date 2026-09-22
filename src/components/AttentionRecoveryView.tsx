@@ -1,7 +1,7 @@
 import React from 'react';
 import { AlertTriangle, CheckCircle2, RotateCcw, ShieldAlert, ShieldCheck } from 'lucide-react';
 import { UIAttentionItem } from '../types/ui.ts';
-import { recoveryDeliveryArgument } from './attentionRecoveryModels.ts';
+import { recoveryDeliveryArgument, recoveryUnavailabilityReason } from './attentionRecoveryModels.ts';
 
 interface AttentionRecoveryViewProps {
   attentionItems: UIAttentionItem[];
@@ -96,6 +96,14 @@ export const AttentionRecoveryView: React.FC<AttentionRecoveryViewProps> = ({
                     </button>
                   </>
                 )}
+
+                {item.type === 'ambiguous_delivery' &&
+                  !recoveryDeliveryArgument(item) &&
+                  recoveryUnavailabilityReason(item) && (
+                    <p className="text-[11px] text-amber-300 max-w-[26ch] text-right">
+                      {recoveryUnavailabilityReason(item)}
+                    </p>
+                  )}
 
                 {item.type === 'runtime_suspended' && (
                   <button

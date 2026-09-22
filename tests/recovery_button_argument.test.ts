@@ -9,7 +9,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { recoveryDeliveryArgument } from '../src/components/attentionRecoveryModels.ts';
+import { recoveryDeliveryArgument, recoveryUnavailabilityReason } from '../src/components/attentionRecoveryModels.ts';
 import type { UIAttentionItem } from '../src/types/ui.ts';
 
 const reportedAmbiguousItem: UIAttentionItem = {
@@ -40,5 +40,23 @@ describe('recovery button argument (assignment vs delivery ID)', () => {
   it('yields an empty argument when the delivery reference is missing (no silent API call)', () => {
     const { deliveryId: _dropped, ...withoutDelivery } = reportedAmbiguousItem;
     assert.strictEqual(recoveryDeliveryArgument(withoutDelivery as UIAttentionItem), '');
+  });
+
+  it('withholds recovery with an explicit select/reconcile reason only when multiple deliveries are ambiguous', () => {
+    // Single ambiguous delivery (or none): recovery available as today, no reason shown.
+    assert.strictEqual(recoveryUnavailabilityReason(reportedAmbiguousItem), '');
+
+    // Two or more ambiguous deliveries: argument empty -> button hidden, reason must be shown.
+    const multi: UIAttentionItem = {
+      ...reportedAmbiguousItem,
+      deliveryId: undefined,
+      ambiguousDeliveryCount: 2,
+    };
+    assert.strictEqual(recoveryDeliveryArgument(multi), '');
+    assert.match(
+      recoveryUnavailabilityReason(multi),
+      /select or reconcile/i,
+      'reason must demand explicit selection or reconciliation',
+    );
   });
 });

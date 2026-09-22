@@ -123,6 +123,8 @@ export interface UIAttentionItem {
   pairId?: string;
   assignmentId?: string;
   deliveryId?: string;
+  /** Number of ambiguous deliveries for the assignment; set when >1 so the UI can explain withheld recovery. */
+  ambiguousDeliveryCount?: number;
   severity: AttentionSeverity;
   status: AttentionStatus;
   type: string;
