@@ -639,6 +639,8 @@ export class RelayApiService implements IRelayApi {
         lastHeartbeatAt: r.lastHeartbeatAt,
         lastObservedAt: r.lastObservedAt,
         lastEvidence: r.lastEvidence,
+        externalSessionId: r.externalSessionId,
+        externalProjectRef: r.externalProjectRef,
         createdAt: r.createdAt,
         updatedAt: r.updatedAt,
       };

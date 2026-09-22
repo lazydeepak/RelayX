@@ -1,8 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { X, GitMerge, Edit3, Trash2, Archive, AlertTriangle, CheckCircle2, Cpu, Unlink, FolderPlus, Plus } from 'lucide-react';
+import { X, GitMerge, Edit3, Trash2, Archive, AlertTriangle, CheckCircle2, Cpu, Unlink, FolderPlus, Plus, MessageSquare } from 'lucide-react';
 import { UIPair, UIProject, UIRuntimeSession } from '../types/ui.ts';
 import { relayBridge } from '../services/relayBridge.ts';
 import { AddProjectWizard } from './AddProjectWizard.tsx';
+import {
+  validateChatGPTConversationUrl,
+  shortenExternalId,
+  findPlannerIdConflict,
+  findConversationConflict,
+  canConfirmConversation,
+  describeConversationReview,
+  buildCreatePairArgs,
+} from './pairModalConversation.ts';
 
 export type PairModalMode = 'create' | 'edit';
 
@@ -33,6 +42,8 @@ export const PairModal: React.FC<PairModalProps> = ({
   const [name, setName] = useState<string>('');
   const [plannerSessionId, setPlannerSessionId] = useState<string>('');
   const [workerSessionId, setWorkerSessionId] = useState<string>('');
+  const [conversationUrl, setConversationUrl] = useState<string>('');
+  const [conversationConfirmed, setConversationConfirmed] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isAddProjectWizardOpen, setIsAddProjectWizardOpen] = useState(false);
@@ -47,6 +58,30 @@ export const PairModal: React.FC<PairModalProps> = ({
   const plannerOptions = projectRuntimes.filter((r) => r.providerType === 'chatgpt');
   const workerOptions = projectRuntimes.filter((r) => r.providerType === 'opencode' || r.providerType === 'vscode');
 
+  // Explicit ChatGPT conversation selection (create-mode only): the user pastes
+  // the exact URL of the specific conversation to pair. Nothing is sampled from
+  // Chrome or inferred from titles/projects — the entered URL is the source.
+  const selectedPlanner = plannerOptions.find((r) => r.id === plannerSessionId);
+  const conversationValidation = validateChatGPTConversationUrl(conversationUrl);
+  const parsedConversationId = conversationValidation.ok ? conversationValidation.parsed.conversationId : null;
+  const plannerConflictBoundId = findPlannerIdConflict(selectedPlanner, parsedConversationId);
+  const conversationConflictRuntime = findConversationConflict(runtimes, plannerSessionId, parsedConversationId);
+  const canConfirm = canConfirmConversation({
+    plannerSelected: Boolean(selectedPlanner),
+    conversationValid: conversationValidation.ok,
+    plannerConflictBoundId,
+    conversationConflictRuntimeId: conversationConflictRuntime?.id ?? null,
+  });
+  const conversationReview =
+    selectedPlanner && conversationValidation.ok
+      ? describeConversationReview(
+          selectedPlanner.name,
+          selectedPlanner.providerType,
+          selectedPlanner.externalSessionId ?? null,
+          conversationUrl,
+        )
+      : null;
+
   useEffect(() => {
     if (isOpen) {
       setErrorMessage(null);
@@ -57,6 +92,8 @@ export const PairModal: React.FC<PairModalProps> = ({
         setWorkerSessionId(pair.workerSessionId || '');
       } else if (mode === 'create') {
         setName('');
+        setConversationUrl('');
+        setConversationConfirmed(false);
         const defaultProj = initialProjectId || activeProjects[0]?.id || '';
         setProjectId(defaultProj);
         // default planner to first chatgpt/available runtime
@@ -89,6 +126,10 @@ export const PairModal: React.FC<PairModalProps> = ({
         setErrorMessage('Planner and worker must be different sessions');
         return;
       }
+      if (!conversationConfirmed) {
+        setErrorMessage('Confirm the specific ChatGPT conversation URL before creating the pair');
+        return;
+      }
       if (activeProjects.length === 0) {
         setErrorMessage('Cannot create a pair without an active project. Please add a project first.');
         return;
@@ -100,11 +141,19 @@ export const PairModal: React.FC<PairModalProps> = ({
 
     try {
       if (mode === 'create') {
-        await relayBridge.createPair(
+        const args = buildCreatePairArgs(
           projectId,
-          name.trim(),
+          name,
           plannerSessionId || undefined,
           workerSessionId || undefined,
+          conversationUrl,
+        );
+        await relayBridge.createPair(
+          args.projectId,
+          args.name,
+          args.plannerSessionId,
+          args.workerSessionId,
+          args.plannerConversationUrl,
         );
         onSuccess(`Pair "${name}" created successfully`);
       } else if (mode === 'edit' && pair) {
@@ -237,11 +286,90 @@ export const PairModal: React.FC<PairModalProps> = ({
                 <option value="">(None / Unassigned)</option>
                 {plannerOptions.map((r) => (
                   <option key={r.id} value={r.id}>
-                    {r.name} ({r.providerType.toUpperCase()}) • {r.status}{r.externalSessionId ? ' • id:' + r.externalSessionId.slice(0, 8) : ''}
+                    {r.name} ({r.providerType.toUpperCase()}) • {r.status}{r.externalSessionId ? ' • bound id: ' + shortenExternalId(r.externalSessionId, 8) : ''}
                   </option>
                 ))}
               </select>
             </div>
+
+            {mode === 'create' && (
+              <div className="space-y-3 pt-2 border-t border-slate-800">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-300 font-medium flex items-center gap-1.5">
+                    <MessageSquare className="w-3.5 h-3.5 text-sky-400" />
+                    ChatGPT Conversation *
+                  </span>
+                </div>
+                <input
+                  type="text"
+                  value={conversationUrl}
+                  onChange={(e) => {
+                    setConversationUrl(e.target.value);
+                    setConversationConfirmed(false);
+                  }}
+                  placeholder="https://chatgpt.com/g/g-p-…/c/…"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-sky-500"
+                />
+                <p className="text-[11px] text-slate-400">
+                  Paste the exact URL of the specific existing ChatGPT conversation to pair with the
+                  planner. Nothing is read from Chrome and no conversation is inferred from titles or
+                  projects — the URL you enter is authoritative.
+                </p>
+
+                {selectedPlanner && conversationUrl.trim() && !conversationValidation.ok && (
+                  <div className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-500/40 text-amber-300 text-[11px]">
+                    {conversationValidation.reason}
+                  </div>
+                )}
+
+                {selectedPlanner && parsedConversationId && plannerConflictBoundId && (
+                  <div className="p-2.5 rounded-lg bg-red-950/40 border border-red-500/40 text-red-300 text-[11px]">
+                    This planner runtime is already bound to conversation “
+                    {shortenExternalId(plannerConflictBoundId)}”. Select a different planner or
+                    conversation before submitting.
+                  </div>
+                )}
+
+                {parsedConversationId && conversationConflictRuntime && (
+                  <div className="p-2.5 rounded-lg bg-red-950/40 border border-red-500/40 text-red-300 text-[11px]">
+                    Conversation “{conversationConflictRuntime.externalSessionId}” is already bound to
+                    runtime “{conversationConflictRuntime.name}”. Choose a different conversation or
+                    free that runtime before submitting.
+                  </div>
+                )}
+
+                {conversationReview && (
+                  <div className="p-3 rounded-lg bg-slate-950/70 border border-slate-600 space-y-1.5">
+                    <p className="text-[11px] text-slate-300">
+                      Selected planner:{' '}
+                      <span className="text-slate-100 font-semibold">{conversationReview.plannerLabel}</span>
+                    </p>
+                    <p className="text-[11px] text-slate-300 break-all">
+                      Conversation URL:{' '}
+                      <span className="text-slate-100">{conversationReview.url}</span>
+                    </p>
+                    <label className={`flex items-start gap-2 mt-1 ${canConfirm ? 'cursor-pointer' : 'cursor-not-allowed'}`}>
+                      <input
+                        type="checkbox"
+                        checked={conversationConfirmed}
+                        disabled={!canConfirm}
+                        onChange={(e) => setConversationConfirmed(e.target.checked)}
+                        className="mt-0.5"
+                      />
+                      <span className="text-slate-200 text-[11px]">
+                        I confirm this is the specific ChatGPT conversation to pair with “
+                        {selectedPlanner?.name}”.
+                      </span>
+                    </label>
+                    {!canConfirm && (
+                      <p className="text-[11px] text-amber-300/80">
+                        Resolve the highlighted issues above to enable confirmation.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="space-y-3 pt-2 border-t border-slate-800">
               <div className="flex items-center justify-between">
@@ -268,7 +396,7 @@ export const PairModal: React.FC<PairModalProps> = ({
                 <option value="">(None / Unassigned)</option>
                 {workerOptions.map((r) => (
                   <option key={r.id} value={r.id}>
-                    {r.name} ({r.providerType.toUpperCase()}) • {r.status}{r.externalSessionId ? ' • id:' + r.externalSessionId.slice(0, 8) : ''}
+                    {r.name} ({r.providerType.toUpperCase()}) • {r.status}{r.externalSessionId ? ' • bound id: ' + shortenExternalId(r.externalSessionId, 8) : ''}
                   </option>
                 ))}
               </select>
@@ -284,7 +412,7 @@ export const PairModal: React.FC<PairModalProps> = ({
               </button>
               <button
                 type="submit"
-                disabled={isSubmitting || !name.trim() || (mode === 'create' && (!projectId || activeProjects.length === 0))}
+                disabled={isSubmitting || !name.trim() || (mode === 'create' && (!projectId || activeProjects.length === 0 || !conversationConfirmed))}
                 className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-medium shadow-md transition-colors"
               >
                 {mode === 'create' ? (
