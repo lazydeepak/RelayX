@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { unlinkSync, existsSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { SqliteRelayDatabase } from '../src/relay/persistence/sqlite/SqliteDatabase.ts';
-import { Project } from '../src/relay/domain/entities.ts';
+import { Pair, Project, RuntimeSession } from '../src/relay/domain/entities.ts';
+import { ProviderType } from '../src/relay/domain/types.ts';
 
 describe('Relay SQLite Migration & Legacy Schema Upgrade', () => {
   it('migrates an old Relay database schema (missing canonical_path, git_root, archived_at, etc.), preserves data, and supports Add Project', async () => {
@@ -82,7 +83,78 @@ describe('Relay SQLite Migration & Legacy Schema Upgrade', () => {
 
       // Verify user_version is updated
       const versionCheck = db.db.prepare('PRAGMA user_version').get() as { user_version: number };
-      assert.strictEqual(versionCheck.user_version, 1);
+      assert.strictEqual(versionCheck.user_version, 2);
+
+      db.close();
+    } finally {
+      if (existsSync(testDbPath)) {
+        try {
+          unlinkSync(testDbPath);
+        } catch {}
+      }
+    }
+  });
+
+  it('migrated database nullifies pair session references when runtimes are deleted (orphan triggers)', async () => {
+    const testDbPath = join(tmpdir(), `relay_orphan_trigger_test_${Date.now()}.sqlite`);
+    if (existsSync(testDbPath)) unlinkSync(testDbPath);
+
+    try {
+      // Start from a v0 schema so the v0 -> v2 migration (incl. orphan triggers) runs.
+      const rawDb = new DatabaseSync(testDbPath);
+      rawDb.exec(`
+        CREATE TABLE projects (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          description TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE runtime_sessions (
+          id TEXT PRIMARY KEY,
+          provider_type TEXT NOT NULL,
+          name TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        PRAGMA user_version = 0;
+      `);
+      rawDb.close();
+
+      const db = new SqliteRelayDatabase(testDbPath);
+
+      // 1. The orphan-nullification triggers must exist after migration
+      const triggerNames = (
+        db.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger'").all() as { name: string }[]
+      ).map((t) => t.name);
+      assert.ok(triggerNames.includes('set_null_planner_session'), 'planner trigger must exist');
+      assert.ok(triggerNames.includes('set_null_worker_session'), 'worker trigger must exist');
+
+      // 2. Deleting a runtime must nullify pair references (never delete the pair)
+      const proj = Project.create('Orphan Project', 'seed', '/abs/proj');
+      await db.projects.save(proj);
+
+      const planner = RuntimeSession.create('chatgpt' as ProviderType, 'Planner');
+      const worker = RuntimeSession.create('opencode' as ProviderType, 'Worker');
+      await db.runtimes.save(planner);
+      await db.runtimes.save(worker);
+
+      const pair = Pair.create(proj.id, 'Orphan Pair', planner.id, worker.id);
+      await db.pairs.save(pair);
+
+      await db.runtimes.delete(planner.id);
+      const afterPlannerDelete = await db.pairs.findById(pair.id);
+      assert.ok(afterPlannerDelete, 'pair must survive planner runtime deletion');
+      assert.strictEqual(afterPlannerDelete?.plannerSessionId, undefined);
+      assert.strictEqual(afterPlannerDelete?.workerSessionId, worker.id);
+
+      await db.runtimes.delete(worker.id);
+      const afterWorkerDelete = await db.pairs.findById(pair.id);
+      assert.ok(afterWorkerDelete, 'pair must survive worker runtime deletion');
+      assert.strictEqual(afterWorkerDelete?.workerSessionId, undefined);
 
       db.close();
     } finally {

@@ -93,8 +93,6 @@ export class SqliteRelayDatabase implements IRelayRepositories {
         updated_at INTEGER NOT NULL
       );
     `);
-    this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_extern ON runtime_sessions(provider_type, external_session_id) WHERE external_session_id IS NOT NULL;`);
-
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS pairs (
         id TEXT PRIMARY KEY,
@@ -211,6 +209,9 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     addColumnIfNeeded(this.db, 'projects', 'worker_workspace_path', 'TEXT');
     addColumnIfNeeded(this.db, 'projects', 'status', "TEXT NOT NULL DEFAULT 'active'");
 
+    addColumnIfNeeded(this.db, 'runtime_sessions', 'bundle_identifier', 'TEXT');
+    addColumnIfNeeded(this.db, 'runtime_sessions', 'window_title', 'TEXT');
+    addColumnIfNeeded(this.db, 'runtime_sessions', 'application_pid', 'INTEGER');
     addColumnIfNeeded(this.db, 'runtime_sessions', 'consecutive_observation_failures', 'INTEGER NOT NULL DEFAULT 0');
     addColumnIfNeeded(this.db, 'runtime_sessions', 'last_heartbeat_at', 'INTEGER');
     addColumnIfNeeded(this.db, 'runtime_sessions', 'last_observed_at', 'INTEGER');
@@ -219,6 +220,8 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     addColumnIfNeeded(this.db, 'runtime_sessions', 'archive_reason', 'TEXT');
     addColumnIfNeeded(this.db, 'runtime_sessions', 'external_session_id', 'TEXT');
     addColumnIfNeeded(this.db, 'runtime_sessions', 'external_project_ref', 'TEXT');
+
+    this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_extern ON runtime_sessions(provider_type, external_session_id) WHERE external_session_id IS NOT NULL;`);
 
     addColumnIfNeeded(this.db, 'pairs', 'active_assignment_id', 'TEXT');
     addColumnIfNeeded(this.db, 'pairs', 'last_supervised_at', 'INTEGER');
@@ -256,8 +259,25 @@ export class SqliteRelayDatabase implements IRelayRepositories {
 
     const versionResult = this.db.prepare('PRAGMA user_version').get() as { user_version: number } | undefined;
     const currentVersion = versionResult?.user_version ?? 0;
-    if (currentVersion < 1) {
-      this.db.exec('PRAGMA user_version = 1;');
+    if (currentVersion < 2) {
+      if (currentVersion < 1) {
+        this.db.exec('PRAGMA user_version = 1;');
+      }
+      this.db.exec(`
+        CREATE TRIGGER IF NOT EXISTS set_null_planner_session
+        AFTER DELETE ON runtime_sessions
+        BEGIN
+          UPDATE pairs SET planner_session_id = NULL WHERE planner_session_id = old.id;
+        END;
+      `);
+      this.db.exec(`
+        CREATE TRIGGER IF NOT EXISTS set_null_worker_session
+        AFTER DELETE ON runtime_sessions
+        BEGIN
+          UPDATE pairs SET worker_session_id = NULL WHERE worker_session_id = old.id;
+        END;
+      `);
+      this.db.exec('PRAGMA user_version = 2;');
     }
   }
 
