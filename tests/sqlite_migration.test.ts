@@ -165,4 +165,94 @@ describe('Relay SQLite Migration & Legacy Schema Upgrade', () => {
       }
     }
   });
+
+  it('fresh database creation completes the v0->v2 migration (version, triggers, index)', async () => {
+    const db = new SqliteRelayDatabase(':memory:');
+
+    const version = (db.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+    assert.strictEqual(version, 2);
+
+    const triggerNames = (
+      db.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger'").all() as { name: string }[]
+    ).map((t) => t.name);
+    assert.ok(triggerNames.includes('set_null_planner_session'), 'planner trigger must exist on fresh DB');
+    assert.ok(triggerNames.includes('set_null_worker_session'), 'worker trigger must exist on fresh DB');
+
+    const idx = db.db.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_runtime_extern'").get() as { sql: string } | undefined;
+    assert.ok(idx?.sql, 'external-identity unique index must exist on fresh DB');
+
+    // Nullification also applies on a fresh database
+    const proj = Project.create('Fresh Project', 'seed');
+    await db.projects.save(proj);
+    const planner = RuntimeSession.create('chatgpt' as ProviderType, 'Planner');
+    await db.runtimes.save(planner);
+    const pair = Pair.create(proj.id, 'Fresh Pair', planner.id);
+    await db.pairs.save(pair);
+
+    await db.runtimes.delete(planner.id);
+    const reloaded = await db.pairs.findById(pair.id);
+    assert.ok(reloaded, 'pair must survive runtime deletion on fresh DB');
+    assert.strictEqual(reloaded?.plannerSessionId, undefined);
+
+    db.close();
+  });
+
+  it('upgrades a v1-stamped database to v2 (skips the v0 step, stamps 2, gains triggers)', async () => {
+    const testDbPath = join(tmpdir(), `relay_v1_upgrade_test_${Date.now()}.sqlite`);
+    if (existsSync(testDbPath)) unlinkSync(testDbPath);
+
+    try {
+      // Simulate a database left by the v1-era code: no orphan triggers and user_version = 1.
+      // Opening it must run only the v1 -> v2 step (the column audit is version-independent).
+      const rawDb = new DatabaseSync(testDbPath);
+      rawDb.exec(`
+        CREATE TABLE projects (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          description TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE runtime_sessions (
+          id TEXT PRIMARY KEY,
+          provider_type TEXT NOT NULL,
+          name TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        PRAGMA user_version = 1;
+      `);
+      const legacyProjId = 'proj_v1_789';
+      const now = Date.now();
+      rawDb.prepare('INSERT INTO projects (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(legacyProjId, 'V1 Project', 'Created while on user_version 1', now, now);
+      rawDb.close();
+
+      const db = new SqliteRelayDatabase(testDbPath);
+
+      const version = (db.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+      assert.strictEqual(version, 2);
+
+      const triggerNames = (
+        db.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger'").all() as { name: string }[]
+      ).map((t) => t.name);
+      assert.ok(triggerNames.includes('set_null_planner_session'), 'planner trigger must exist after v1 -> v2 upgrade');
+      assert.ok(triggerNames.includes('set_null_worker_session'), 'worker trigger must exist after v1 -> v2 upgrade');
+
+      // v1-era data must survive the upgrade
+      const recovered = await db.projects.findById(legacyProjId as any);
+      assert.ok(recovered, 'v1-era project must survive the v1 -> v2 upgrade');
+      assert.strictEqual(recovered.name, 'V1 Project');
+
+      db.close();
+    } finally {
+      if (existsSync(testDbPath)) {
+        try {
+          unlinkSync(testDbPath);
+        } catch {}
+      }
+    }
+  });
 });
