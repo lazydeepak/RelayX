@@ -255,7 +255,9 @@ export class RelayEngine {
 
   /**
    * Discovers or updates a runtime session for a given provider.
-   * Invariant: Repeated discovery updates the existing runtime rather than creating duplicates.
+   * Invariant: Repeated discovery updates the existing runtime rather than creating
+   * duplicates — except when only project-scoped identity (openCodeProjectId) is present
+   * without a proven session ID: distinct sessions in one project must not collapse.
    */
   public async discoverRuntime(
     providerType: ProviderType,
@@ -265,13 +267,41 @@ export class RelayEngine {
     const targetDescriptor = descriptor ?? { providerType };
     const inspection = await provider.findRuntime(targetDescriptor);
 
-    const existingRuntimes = await this.repos.runtimes.findAll();
-    const existing = existingRuntimes.find((r) => {
-      if (r.providerType !== providerType) return false;
-      if (inspection.applicationPid && r.applicationPid === inspection.applicationPid) return true;
-      if (targetDescriptor.bundleIdentifier && r.bundleIdentifier === targetDescriptor.bundleIdentifier) return true;
-      return true;
-    });
+    // Session identity must be PROVEN to identify one provider session. Only an
+    // authoritativeSessionId verified against the shared OpenCode service or a
+    // persisted session record qualifies. parsedSessionId can also arrive from a
+    // plain window-title parse (unverified), and openCodeProjectId is project
+    // identity, never session identity — neither may drive reuse or be persisted
+    // as the external session ID.
+    const details = (inspection.evidence?.details || {}) as any;
+    const extId: string | undefined = details.authoritativeSessionId;
+    // Project identity is tracked separately from session identity.
+    const projectRef: string | null = providerType === 'opencode'
+      ? (details.workspacePath || details.openCodeProjectId || null)
+      : (details.projectUrl || details.projectName || null);
+
+    let existing: RuntimeSession | null = null;
+    if (extId) {
+      // Proven session identity present: reuse ONLY the runtime bound to this exact
+      // (providerType, externalSessionId). PID/bundle/title/provider-only fallbacks
+      // would silently claim the wrong runtime (e.g. a legacy null-ID paired runtime).
+      existing = await this.repos.runtimes.findByExternalSessionId(providerType, extId);
+    } else if (details.openCodeProjectId) {
+      // Project-scoped identity without a proven session ID cannot distinguish one
+      // session from another inside the same project. Reusing by PID/bundle/provider
+      // could claim the wrong session, so a distinct runtime is created instead.
+      existing = null;
+    } else {
+      // No identity available at all: retain the documented legacy fallback —
+      // application PID, then bundle identifier, then any runtime of the provider type.
+      const existingRuntimes = await this.repos.runtimes.findAll();
+      existing = existingRuntimes.find((r) => {
+        if (r.providerType !== providerType) return false;
+        if (inspection.applicationPid && r.applicationPid === inspection.applicationPid) return true;
+        if (targetDescriptor.bundleIdentifier && r.bundleIdentifier === targetDescriptor.bundleIdentifier) return true;
+        return true;
+      }) ?? null;
+    }
 
     if (existing) {
       if (inspection.found) {
@@ -284,13 +314,8 @@ export class RelayEngine {
       } else {
         existing.recordObservationFailure();
       }
-      // Authoritative persistence of external provider identity at discovery boundary
-      const det = (inspection.evidence?.details || {}) as any;
-      const extId = det.authoritativeSessionId || det.parsedSessionId || (det.openCodeProjectId ? det.openCodeProjectId : undefined);
-      if (extId && existing.externalSessionId !== extId) {
-        const projRef = providerType === 'opencode' ? det.workspacePath || existing.externalProjectRef : (det.projectUrl || det.projectName || existing.externalProjectRef);
-        existing.updateExternalIdentity(extId, projRef ?? existing.externalProjectRef ?? null);
-      }
+      // Reuse found by exact external identity (or legacy fallback): the runtime's
+      // authoritative identity is preserved and observations are persisted.
       await this.repos.runtimes.save(existing);
       await this.emitEvent('runtime', existing.id, 'runtime.discovered', {
         actor: 'engine',
@@ -314,12 +339,11 @@ export class RelayEngine {
       runtime.status = 'unavailable';
       runtime.lastEvidence = inspection.evidence;
     }
-    // Persist authoritative external identity at creation boundary
-    const det = (inspection.evidence?.details || {}) as any;
-    const extId = det.authoritativeSessionId || det.parsedSessionId || (det.openCodeProjectId ? det.openCodeProjectId : undefined);
-    if (extId) {
-      const projRef = providerType === 'opencode' ? det.workspacePath || null : (det.projectUrl || det.projectName || null);
-      runtime.updateExternalIdentity(extId, projRef);
+    // Persist verified session identity and project identity separately at the
+    // creation boundary. Project identity is kept in externalProjectRef even when
+    // no proven session ID exists (e.g. evidence carrying only openCodeProjectId).
+    if (extId || projectRef) {
+      runtime.updateExternalIdentity(extId ?? null, projectRef ?? null);
     }
     await this.repos.runtimes.save(runtime);
     await this.emitEvent('runtime', runtime.id, 'runtime.discovered', {

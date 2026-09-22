@@ -663,17 +663,51 @@ export class RelayApiService implements IRelayApi {
       }
       await this.db.runtimes.save(runtime);
 
-      // Persist authoritative external identity when evidence carries it.
+      // Persist identity from inspection evidence under the same rule as
+      // discovery: ONLY an authoritativeSessionId (verified against the shared
+      // OpenCode service or a persisted session record) may become the session
+      // identity. parsedSessionId can arrive from a window-title parse
+      // (unverified) and openCodeProjectId is project identity — neither ever
+      // becomes externalSessionId. Project/workspace evidence is kept in
+      // externalProjectRef via the provider-specific mapping, and an inspection
+      // without a verified session ID never overwrites a persisted ID with a
+      // guessed value or null.
       const details = (inspection.evidence?.details || {}) as any;
-      if (details.authoritativeSessionId || details.parsedSessionId || details.workspacePath || details.projectUrl) {
-        const extId = details.authoritativeSessionId || details.parsedSessionId || (details.openCodeProjectId ? details.openCodeProjectId : undefined);
-        if (extId && runtime.externalSessionId !== extId) {
-          const projRef = runtime.providerType === 'opencode'
-            ? (details.workspacePath || runtime.externalProjectRef || null)
-            : (details.projectUrl || details.projectName || runtime.externalProjectRef || null);
-          runtime.updateExternalIdentity(extId, projRef);
-          await this.db.runtimes.save(runtime);
-        }
+      const extId: string | undefined = details.authoritativeSessionId;
+      const projRef: string | null = runtime.providerType === 'opencode'
+        ? (details.workspacePath || details.openCodeProjectId || runtime.externalProjectRef || null)
+        : (details.projectUrl || details.projectName || runtime.externalProjectRef || null);
+
+      // Identity conflict guard: the runtime is already bound to a different
+      // verified session. Never replace the persisted external ID — the observed
+      // session must be discovered independently via discoverRuntime. Pair
+      // binding and project reference are left untouched.
+      if (extId && runtime.externalSessionId && runtime.externalSessionId !== extId) {
+        const conflictEvidence: ObservableEvidence = {
+          ...inspection.evidence!,
+          details: {
+            ...details,
+            identityConflict: true,
+            persistedExternalSessionId: runtime.externalSessionId,
+            observedAuthoritativeSessionId: extId,
+          },
+        };
+        runtime.lastEvidence = conflictEvidence;
+        await this.db.runtimes.save(runtime);
+        return {
+          success: false,
+          evidence: conflictEvidence,
+          error: `External session identity conflict: runtime is bound to '${runtime.externalSessionId}' but inspection observed verified session '${extId}'. Discover the new session as a distinct runtime instead.`,
+        };
+      }
+
+      const sessionIdChanged = !!(extId && runtime.externalSessionId !== extId);
+      const projectRefChanged = !!projRef && projRef !== runtime.externalProjectRef;
+      if (sessionIdChanged || projectRefChanged) {
+        // Without a verified ID we pass undefined for the session identity so a
+        // persisted authoritative ID is preserved (never nulled or guessed).
+        runtime.updateExternalIdentity(sessionIdChanged ? extId : undefined, projectRefChanged ? projRef : undefined);
+        await this.db.runtimes.save(runtime);
       }
 
       return {
