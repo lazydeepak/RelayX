@@ -122,6 +122,7 @@ export interface UIAttentionItem {
   id: string;
   pairId?: string;
   assignmentId?: string;
+  deliveryId?: string;
   severity: AttentionSeverity;
   status: AttentionStatus;
   type: string;

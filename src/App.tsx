@@ -412,10 +412,14 @@ export default function App() {
     }
   };
 
-  const handleResolveAmbiguous = async (assignmentId: string, outcome: 'delivered' | 'failed') => {
+  const handleResolveAmbiguous = async (deliveryId: string, outcome: 'delivered' | 'failed') => {
+    if (!deliveryId) {
+      notify('Cannot resolve: no delivery reference on this attention item');
+      return;
+    }
     try {
       await relayBridge.resolveAmbiguousDelivery(
-        assignmentId,
+        deliveryId,
         outcome === 'delivered' ? 'confirmed_delivered' : 'retry_permitted',
       );
       notify(`Delivery resolved as: ${outcome.toUpperCase()}`);

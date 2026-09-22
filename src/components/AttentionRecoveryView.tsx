@@ -1,10 +1,11 @@
 import React from 'react';
 import { AlertTriangle, CheckCircle2, RotateCcw, ShieldAlert, ShieldCheck } from 'lucide-react';
 import { UIAttentionItem } from '../types/ui.ts';
+import { recoveryDeliveryArgument } from './attentionRecoveryModels.ts';
 
 interface AttentionRecoveryViewProps {
   attentionItems: UIAttentionItem[];
-  onResolveAmbiguousDelivery: (assignmentId: string, outcome: 'delivered' | 'failed') => void;
+  onResolveAmbiguousDelivery: (deliveryId: string, outcome: 'delivered' | 'failed') => void;
   onRecoverSuspendedRuntime: (runtimeId?: string) => void;
   onAcknowledgeItem: (id: string) => void;
 }
@@ -79,16 +80,16 @@ export const AttentionRecoveryView: React.FC<AttentionRecoveryViewProps> = ({
 
               {/* Tier 1 Deterministic Recovery Controls */}
               <div className="flex flex-wrap items-center gap-2 shrink-0">
-                {item.type === 'ambiguous_delivery' && (
+                {item.type === 'ambiguous_delivery' && recoveryDeliveryArgument(item) && (
                   <>
                     <button
-                      onClick={() => onResolveAmbiguousDelivery(item.assignmentId || '', 'delivered')}
+                      onClick={() => onResolveAmbiguousDelivery(recoveryDeliveryArgument(item), 'delivered')}
                       className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition-colors"
                     >
                       Confirm Delivered
                     </button>
                     <button
-                      onClick={() => onResolveAmbiguousDelivery(item.assignmentId || '', 'failed')}
+                      onClick={() => onResolveAmbiguousDelivery(recoveryDeliveryArgument(item), 'failed')}
                       className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-medium transition-colors"
                     >
                       Mark As Failed

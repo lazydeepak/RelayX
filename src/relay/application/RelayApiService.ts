@@ -796,19 +796,29 @@ export class RelayApiService implements IRelayApi {
 
   public async listAttentionItems(): Promise<UIAttentionItem[]> {
     const items = await this.db.attention.findAll();
-    return items.map((i) => ({
-      id: i.id,
-      pairId: i.pairId,
-      assignmentId: i.assignmentId,
-      severity: i.severity,
-      status: i.status,
-      type: i.type,
-      title: i.title,
-      message: i.message,
-      suggestedAction: i.suggestedAction,
-      suggestedTier: i.suggestedTier,
-      createdAt: i.createdAt,
-    }));
+    const result: UIAttentionItem[] = [];
+    for (const i of items) {
+      let deliveryId: string | undefined;
+      if (i.type === 'ambiguous_delivery' && i.assignmentId) {
+        const deliveries = await this.db.deliveries.findByAssignmentId(i.assignmentId);
+        deliveryId = deliveries.find((d) => d.status === 'ambiguous')?.id;
+      }
+      result.push({
+        id: i.id,
+        pairId: i.pairId,
+        assignmentId: i.assignmentId,
+        deliveryId,
+        severity: i.severity,
+        status: i.status,
+        type: i.type,
+        title: i.title,
+        message: i.message,
+        suggestedAction: i.suggestedAction,
+        suggestedTier: i.suggestedTier,
+        createdAt: i.createdAt,
+      });
+    }
+    return result;
   }
 
   public async acknowledgeAttentionItem(id: string): Promise<{ success: boolean }> {
