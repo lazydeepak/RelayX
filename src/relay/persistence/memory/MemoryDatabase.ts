@@ -33,8 +33,91 @@ import {
   IAttentionRepository,
 } from '../interfaces.ts';
 
+/**
+ * Snapshot used by memory transaction rollback: for each map entry we keep the
+ * ORIGINAL entity reference (to restore map membership and preserve prototype /
+ * object identity) plus a deep copy of its top-level field values (to revert
+ * mutations made to an entity in place while it was mapped).
+ */
+export type MemoryRepoSnapshot<T> = Array<
+  [key: string, original: T, fields: Record<string, unknown>]
+>;
+
+/**
+ * Internal contract implemented by every memory repository so the memory
+ * transaction wrapper can snapshot and restore all repository state uniformly.
+ */
+interface ISnapshotableMemoryRepo {
+  snapshotState(): MemoryRepoSnapshot<unknown>;
+  restoreState(snapshot: MemoryRepoSnapshot<unknown>): void;
+}
+
+/**
+ * Deep-copies an entity's field values for snapshotting. Falls back to the
+ * shallow spread when a value is not structured-cloneable (e.g. functions),
+ * which still reverts every top-level entity mutation used by this model.
+ */
+function cloneEntityFields<T extends object>(entity: T): Record<string, unknown> {
+  const plain = { ...entity } as Record<string, unknown>;
+  const structuredClone = (globalThis as {
+    structuredClone?: <V>(value: V) => V;
+  }).structuredClone;
+  if (typeof structuredClone !== 'function') return plain;
+  try {
+    return structuredClone(plain);
+  } catch {
+    return plain;
+  }
+}
+
+function snapshotMapItems<T extends object>(items: Map<string, T>): MemoryRepoSnapshot<T> {
+  const snapshot: MemoryRepoSnapshot<T> = [];
+  for (const [key, entity] of items) {
+    snapshot.push([key, entity, cloneEntityFields(entity)]);
+  }
+  return snapshot;
+}
+
+/**
+ * Restores a repository map to its pre-transaction state:
+ * - Entries created during the transaction are removed.
+ * - Mutated entity objects are reverted IN PLACE (prototype and object identity
+ *   are preserved, so external holders of the same instance also see the
+ *   rolled-back state).
+ * - Entries deleted or replaced during the transaction are re-inserted with
+ *   their original entity reference and pre-transaction field values.
+ * - Properties added to an entity during the transaction are removed.
+ */
+function restoreMapItems<T extends object>(
+  items: Map<string, T>,
+  snapshot: MemoryRepoSnapshot<T>,
+): void {
+  const snapshotKeys = new Set<string>();
+  for (const [key] of snapshot) snapshotKeys.add(key);
+
+  for (const key of Array.from(items.keys())) {
+    if (!snapshotKeys.has(key)) items.delete(key);
+  }
+
+  for (const [key, original, fields] of snapshot) {
+    for (const prop of Object.keys(original)) {
+      if (!(prop in fields)) delete (original as Record<string, unknown>)[prop];
+    }
+    Object.assign(original, fields);
+    items.set(key, original);
+  }
+}
+
 export class MemoryProjectRepository implements IProjectRepository {
   private readonly items = new Map<string, Project>();
+
+  snapshotState(): MemoryRepoSnapshot<Project> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<Project>): void {
+    restoreMapItems(this.items, snapshot);
+  }
 
   async findById(id: ProjectId): Promise<Project | null> {
     return this.items.get(id) ?? null;
@@ -59,6 +142,14 @@ export class MemoryProjectRepository implements IProjectRepository {
 
 export class MemoryRuntimeSessionRepository implements IRuntimeSessionRepository {
   private readonly items = new Map<string, RuntimeSession>();
+
+  snapshotState(): MemoryRepoSnapshot<RuntimeSession> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<RuntimeSession>): void {
+    restoreMapItems(this.items, snapshot);
+  }
 
   async findById(id: RuntimeSessionId): Promise<RuntimeSession | null> {
     return this.items.get(id) ?? null;
@@ -96,6 +187,14 @@ export class MemoryRuntimeSessionRepository implements IRuntimeSessionRepository
 export class MemoryPairRepository implements IPairRepository {
   private readonly items = new Map<string, Pair>();
 
+  snapshotState(): MemoryRepoSnapshot<Pair> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<Pair>): void {
+    restoreMapItems(this.items, snapshot);
+  }
+
   async findById(id: PairId): Promise<Pair | null> {
     return this.items.get(id) ?? null;
   }
@@ -119,6 +218,14 @@ export class MemoryPairRepository implements IPairRepository {
 
 export class MemoryAssignmentRepository implements IAssignmentRepository {
   private readonly items = new Map<string, Assignment>();
+
+  snapshotState(): MemoryRepoSnapshot<Assignment> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<Assignment>): void {
+    restoreMapItems(this.items, snapshot);
+  }
 
   async findById(id: AssignmentId): Promise<Assignment | null> {
     return this.items.get(id) ?? null;
@@ -152,6 +259,14 @@ export class MemoryAssignmentRepository implements IAssignmentRepository {
 export class MemoryAttemptRepository implements IAttemptRepository {
   private readonly items = new Map<string, Attempt>();
 
+  snapshotState(): MemoryRepoSnapshot<Attempt> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<Attempt>): void {
+    restoreMapItems(this.items, snapshot);
+  }
+
   async findById(id: AttemptId): Promise<Attempt | null> {
     return this.items.get(id) ?? null;
   }
@@ -169,6 +284,14 @@ export class MemoryAttemptRepository implements IAttemptRepository {
 
 export class MemoryDeliveryRepository implements IDeliveryRepository {
   private readonly items = new Map<string, Delivery>();
+
+  snapshotState(): MemoryRepoSnapshot<Delivery> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<Delivery>): void {
+    restoreMapItems(this.items, snapshot);
+  }
 
   async findById(id: DeliveryId): Promise<Delivery | null> {
     return this.items.get(id) ?? null;
@@ -192,6 +315,14 @@ export class MemoryDeliveryRepository implements IDeliveryRepository {
 export class MemoryHandoffRepository implements IHandoffRepository {
   private readonly items = new Map<string, Handoff>();
 
+  snapshotState(): MemoryRepoSnapshot<Handoff> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<Handoff>): void {
+    restoreMapItems(this.items, snapshot);
+  }
+
   async findById(id: HandoffId): Promise<Handoff | null> {
     return this.items.get(id) ?? null;
   }
@@ -213,6 +344,14 @@ export class MemoryHandoffRepository implements IHandoffRepository {
 
 export class MemoryEventRepository implements IEventRepository {
   private readonly items = new Map<string, RelayEvent>();
+
+  snapshotState(): MemoryRepoSnapshot<RelayEvent> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<RelayEvent>): void {
+    restoreMapItems(this.items, snapshot);
+  }
 
   async findById(id: EventId): Promise<RelayEvent | null> {
     return this.items.get(id) ?? null;
@@ -237,6 +376,14 @@ export class MemoryEventRepository implements IEventRepository {
 
 export class MemoryAttentionRepository implements IAttentionRepository {
   private readonly items = new Map<string, AttentionItem>();
+
+  snapshotState(): MemoryRepoSnapshot<AttentionItem> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<AttentionItem>): void {
+    restoreMapItems(this.items, snapshot);
+  }
 
   async findById(id: AttentionItemId): Promise<AttentionItem | null> {
     return this.items.get(id) ?? null;
@@ -288,7 +435,32 @@ export class MemoryRelayDatabase implements IRelayRepositories {
     this.attention = new MemoryAttentionRepository();
   }
 
+  /**
+   * Memory transactions emulate rollback: before running the work, every
+   * repository's map contents are snapshotted; if the work throws, all
+   * repository state is restored to the snapshot (mutated entity objects are
+   * reverted in place, added entries are removed, deleted/replaced entries are
+   * re-inserted) and the ORIGINAL error is rethrown. On success no restore is
+   * performed — the work is the committed state.
+   */
   async runInTransaction<T>(work: () => Promise<T>): Promise<T> {
-    return work();
+    const repos: Array<ISnapshotableMemoryRepo> = [
+      this.projects,
+      this.pairs,
+      this.runtimes,
+      this.assignments,
+      this.attempts,
+      this.deliveries,
+      this.handoffs,
+      this.events,
+      this.attention,
+    ];
+    const snapshots = repos.map((repo) => repo.snapshotState());
+    try {
+      return await work();
+    } catch (err) {
+      repos.forEach((repo, index) => repo.restoreState(snapshots[index]));
+      throw err;
+    }
   }
 }

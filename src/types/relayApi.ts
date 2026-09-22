@@ -64,6 +64,7 @@ export interface IRelayApi {
     name: string,
     plannerSessionId?: string,
     workerSessionId?: string,
+    plannerConversationUrl?: string,
   ): Promise<UIPair>;
   updatePair(
     id: string,

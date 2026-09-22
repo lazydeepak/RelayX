@@ -1501,6 +1501,17 @@ export class ChatGPTProvider extends BaseMacOSProvider {
   }
 
   /**
+   * Strict extraction of the conversation ID from a ChatGPT project conversation URL
+   * of the exact shape https://chatgpt.com/g/<g-p-project>/c/<conversationId>.
+   * Returns null unless BOTH the g-p- project segment and a nonempty /c/ segment
+   * are present on a chatgpt.com host — project roots, bare /c/ URLs without a
+   * g-p- project, off-host URLs, and malformed strings never yield an ID.
+   */
+  public extractChatGPTConversationId(url: string): string | null {
+    return parseChatGPTConversationUrl(url)?.conversationId ?? null;
+  }
+
+  /**
    * Canonicalizes a ChatGPT project URL to its standard project root form.
    * e.g. https://chatgpt.com/g/g-p-123-abc/c/999 -> https://chatgpt.com/g/g-p-123-abc/project
    */
@@ -2225,6 +2236,40 @@ export class ChatGPTProvider extends BaseMacOSProvider {
     if (!res.success || !res.output) return null;
     return res.output.trim();
   }
+}
+
+/**
+ * Strict, pure parser for a ChatGPT project conversation URL of the exact shape
+ * https://chatgpt.com/g/<g-p-project>/c/<conversationId>.
+ *
+ * Rules:
+ * - Host must be (or end with) chatgpt.com.
+ * - Path must be exactly /g/<g-p-...>/c/<conversationId> with nothing after the
+ *   conversation ID (no trailing slash, no further path segments).
+ * - The g-p- project segment and a nonempty conversation ID are both required.
+ * - Project roots (/g/g-p-x or /g/g-p-x/project), bare /c/<id> URLs without a
+ *   project, off-host URLs, relative strings, and malformed input return null.
+ *
+ * The returned projectId/conversationId are returned verbatim (no decoding),
+ * so any caller can compare the slug against a stored project reference.
+ */
+export function parseChatGPTConversationUrl(url: string): {
+  projectId: string;
+  conversationId: string;
+} | null {
+  if (!url || typeof url !== 'string') return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (!(parsed.hostname === 'chatgpt.com' || parsed.hostname.endsWith('.chatgpt.com'))) return null;
+  const match = parsed.pathname.match(/^\/g\/(g-p-[^/]+)\/c\/([^/?#]+)$/);
+  if (!match) return null;
+  const conversationId = match[2];
+  if (!conversationId) return null;
+  return { projectId: match[1], conversationId };
 }
 
 /**

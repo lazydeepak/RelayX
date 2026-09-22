@@ -2,6 +2,7 @@ import {
   BrowserChatGPTProvider,
   BrowserOpenCodeProvider,
 } from '../providers/browserProviders.ts';
+import { parseChatGPTConversationUrl } from '../providers/adapters.ts';
 import { IRelayRepositories } from '../persistence/interfaces.ts';
 import { RelayEngine } from './RelayEngine.ts';
 import {
@@ -325,58 +326,129 @@ export class RelayApiService implements IRelayApi {
     name: string,
     plannerSessionId?: string,
     workerSessionId?: string,
+    plannerConversationUrl?: string,
   ): Promise<UIPair> {
     // Service-layer cross-project guard: selected runtimes must match expected roles
+    const planner = plannerSessionId
+      ? await this.db.runtimes.findById(plannerSessionId as RuntimeSessionId)
+      : null;
+    const worker = workerSessionId
+      ? await this.db.runtimes.findById(workerSessionId as RuntimeSessionId)
+      : null;
+    const proj = await this.db.projects.findById(projectId as ProjectId);
+
     if (plannerSessionId) {
-      const p = await this.db.runtimes.findById(plannerSessionId as RuntimeSessionId);
-      if (p && p.providerType !== 'chatgpt') throw new Error('Planner session must be ChatGPT');
+      if (!planner) throw new Error('Planner runtime not found');
+      if (planner.providerType !== 'chatgpt') throw new Error('Planner session must be ChatGPT');
     }
     if (workerSessionId) {
-      const w = await this.db.runtimes.findById(workerSessionId as RuntimeSessionId);
-      if (w && w.providerType !== 'opencode' && w.providerType !== 'vscode') throw new Error('Worker session must be OpenCode or VS Code');
+      if (!worker) throw new Error('Worker runtime not found');
+      if (worker.providerType !== 'opencode' && worker.providerType !== 'vscode') throw new Error('Worker session must be OpenCode or VS Code');
     }
-    // Project-ownership invariant: each selected runtime must belong to the selected project.
-    if (plannerSessionId || workerSessionId) {
-      const planner = plannerSessionId
-        ? await this.db.runtimes.findById(plannerSessionId as RuntimeSessionId)
-        : null;
-      const worker = workerSessionId
-        ? await this.db.runtimes.findById(workerSessionId as RuntimeSessionId)
-        : null;
-      const proj = await this.db.projects.findById(projectId as ProjectId);
+
+    // ChatGPT conversation binding contract (explicit, caller-supplied URL).
+    // When a plannerConversationUrl is provided it is the authoritative source of
+    // session identity for the SELECTED planner runtime: the URL must be a strict
+    // chatgpt.com/g/<g-p-project>/c/<conversationId> URL, its project slug must
+    // match the paired project, the conversation ID must be nonempty, and the
+    // runtime must not already be bound to a different conversation. Nothing is
+    // read from Chrome — the caller hands over an already-observed URL.
+    const normalizeChatRef = (ref: string | null): string => {
+      if (!ref) return '';
+      const match = ref.match(/(?:^|\/g\/)(g-p-[^/?#]+)/i);
+      return (match?.[1] ?? ref).replace(/\/$/, '').toLowerCase();
+    };
+    let conversationBinding: { projectId: string; conversationId: string } | null = null;
+    if (plannerConversationUrl) {
+      if (!plannerSessionId || !planner) {
+        throw new Error('plannerConversationUrl requires a selected ChatGPT planner runtime');
+      }
       if (!proj) throw new Error('Project not found');
-      const normalizeChatRef = (ref: string | null): string => {
-        if (!ref) return '';
-        const match = ref.match(/(?:^|\/g\/)(g-p-[^/?#]+)/i);
-        return (match?.[1] ?? ref).replace(/\/$/, '').toLowerCase();
-      };
-      if (plannerSessionId && (!planner || !planner.externalProjectRef || !proj.plannerProjectUrl)) {
+      const parsed = parseChatGPTConversationUrl(plannerConversationUrl);
+      if (!parsed) {
+        throw new Error(
+          `Invalid ChatGPT conversation URL '${plannerConversationUrl}': expected chatgpt.com/g/<g-p-project>/c/<conversationId>`,
+        );
+      }
+      if (!parsed.conversationId.trim()) {
+        throw new Error('ChatGPT conversation URL must contain a nonempty conversation ID');
+      }
+      const projectSlug = normalizeChatRef(proj.plannerProjectUrl ?? null);
+      if (!projectSlug) {
         throw new Error('Cross-project pairing: planner project ownership cannot be proven');
       }
-      const plannerNorm = normalizeChatRef(planner?.externalProjectRef ?? null);
-      const projNorm = normalizeChatRef(proj.plannerProjectUrl ?? null);
-      if (plannerSessionId && plannerNorm !== projNorm) {
-        throw new Error('Cross-project pairing: planner session belongs to different ChatGPT project');
+      if (parsed.projectId.toLowerCase() !== projectSlug) {
+        throw new Error('Cross-project pairing: conversation belongs to different ChatGPT project');
       }
-      const normalizeWorkerPath = (ref: string | null): string => {
-        if (!ref) return '';
-        return path.posix.normalize(ref.replaceAll('\\', '/')).replace(/\/$/, '');
-      };
-      if (workerSessionId && (!worker || !worker.externalProjectRef || !proj.workerWorkspacePath)) {
-        throw new Error('Cross-project pairing: worker project ownership cannot be proven');
+      if (planner.externalSessionId && planner.externalSessionId !== parsed.conversationId) {
+        throw new Error(
+          `Planner runtime is already bound to ChatGPT conversation '${planner.externalSessionId}'`,
+        );
       }
-      const normProjWorker = normalizeWorkerPath(proj.workerWorkspacePath ?? null);
-      const normWorkerRef = normalizeWorkerPath(worker?.externalProjectRef ?? null);
-      if (workerSessionId && normWorkerRef !== normProjWorker) {
-        throw new Error('Cross-project pairing: worker session belongs to different workspace');
+      // Duplicate external identity: the exact conversation must not already be
+      // bound to a DIFFERENT runtime (re-binding the same runtime is idempotent).
+      const duplicate = await this.db.runtimes.findByExternalSessionId('chatgpt', parsed.conversationId);
+      if (duplicate && duplicate.id !== planner.id) {
+        throw new Error(
+          `ChatGPT conversation '${parsed.conversationId}' is already bound to runtime '${duplicate.id}'`,
+        );
+      }
+      conversationBinding = parsed;
+    }
+
+    // Project-ownership invariant: each selected runtime must belong to the
+    // selected project. When a verified conversation URL was supplied it already
+    // proves project ownership for the planner, so the stored project ref is not
+    // required in that case; without a URL this remains the UNVERIFIED LEGACY
+    // pairing path where the stored ref must match the project's planner URL.
+    if (plannerSessionId || workerSessionId) {
+      if (!proj) throw new Error('Project not found');
+      if (plannerSessionId && planner && !conversationBinding) {
+        if (!planner.externalProjectRef || !proj.plannerProjectUrl) {
+          throw new Error('Cross-project pairing: planner project ownership cannot be proven');
+        }
+        const plannerNorm = normalizeChatRef(planner.externalProjectRef);
+        const projNorm = normalizeChatRef(proj.plannerProjectUrl);
+        if (plannerNorm !== projNorm) {
+          throw new Error('Cross-project pairing: planner session belongs to different ChatGPT project');
+        }
+      }
+      if (workerSessionId && worker) {
+        if (!worker.externalProjectRef || !proj.workerWorkspacePath) {
+          throw new Error('Cross-project pairing: worker project ownership cannot be proven');
+        }
+        const normalizeWorkerPath = (ref: string | null): string => {
+          if (!ref) return '';
+          return path.posix.normalize(ref.replaceAll('\\', '/')).replace(/\/$/, '');
+        };
+        const normProjWorker = normalizeWorkerPath(proj.workerWorkspacePath ?? null);
+        const normWorkerRef = normalizeWorkerPath(worker.externalProjectRef ?? null);
+        if (normWorkerRef !== normProjWorker) {
+          throw new Error('Cross-project pairing: worker session belongs to different workspace');
+        }
       }
     }
-    const pair = await this.engine.createPair(
-      projectId as ProjectId,
-      name,
-      plannerSessionId as RuntimeSessionId | undefined,
-      workerSessionId as RuntimeSessionId | undefined,
-    );
+
+    // Pair creation and the runtime identity write are atomic: the planner's
+    // externalSessionId/externalProjectRef are persisted only if the pair is
+    // created successfully. Invalid URL / ownership / duplicate / role failures
+    // above throw before any write, and a pair-creation failure inside the
+    // transaction rolls the runtime identity write back with it.
+    const pair = await this.db.runInTransaction(async () => {
+      if (conversationBinding && planner) {
+        planner.updateExternalIdentity(
+          conversationBinding.conversationId,
+          `https://chatgpt.com/g/${conversationBinding.projectId}/project`,
+        );
+        await this.db.runtimes.save(planner);
+      }
+      return this.engine.createPair(
+        projectId as ProjectId,
+        name,
+        plannerSessionId as RuntimeSessionId | undefined,
+        workerSessionId as RuntimeSessionId | undefined,
+      );
+    });
     const populated = await this.getPair(pair.id);
     if (!populated) throw new Error('Failed to retrieve created pair');
     return populated;

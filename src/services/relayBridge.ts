@@ -123,15 +123,17 @@ export const relayBridge: IRelayApi = {
     name: string,
     plannerSessionId?: string,
     workerSessionId?: string,
+    plannerConversationUrl?: string,
   ) => {
     if (typeof window !== 'undefined' && window.relayApi) {
-      return window.relayApi.createPair(projectId, name, plannerSessionId, workerSessionId);
+      return window.relayApi.createPair(projectId, name, plannerSessionId, workerSessionId, plannerConversationUrl);
     }
     return getLocalFallbackService().createPair(
       projectId,
       name,
       plannerSessionId,
       workerSessionId,
+      plannerConversationUrl,
     );
   },
 
