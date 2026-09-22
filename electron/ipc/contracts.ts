@@ -52,6 +52,9 @@ export const RELAY_IPC_CHANNELS = {
   RESOLVE_CHATGPT_PROJECT: 'relay:resolve-chatgpt-project',
   DISCOVER_CHATGPT_PLANNER: 'relay:discover-chatgpt-planner',
   DISCOVER_OPENCODE_SESSIONS: 'relay:discover-opencode-sessions',
+  ENUMERATE_CHATGPT_CONVERSATIONS: 'relay:enumerate-chatgpt-conversations',
+  ENUMERATE_WORKER_CHOICES: 'relay:enumerate-worker-choices',
+  ADOPT_OPENCODE_SESSION: 'relay:adopt-opencode-session',
   FINALIZE_PROJECT_SETUP: 'relay:finalize-project-setup',
 } as const;
 

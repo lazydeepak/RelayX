@@ -3,6 +3,7 @@ import {
   BrowserOpenCodeProvider,
 } from '../providers/browserProviders.ts';
 import { parseChatGPTConversationUrl } from '../providers/adapters.ts';
+import { RuntimeSession } from '../domain/entities.ts';
 import { IRelayRepositories } from '../persistence/interfaces.ts';
 import { RelayEngine } from './RelayEngine.ts';
 import {
@@ -10,6 +11,10 @@ import {
   DashboardState,
   SupervisionResult,
   AppStatus,
+  ChatGPTConversationChoice,
+  ChatGPTConversationChoiceList,
+  WorkerChoice,
+  WorkerChoiceList,
 } from '../../types/relayApi.ts';
 import {
   UIPair,
@@ -31,6 +36,44 @@ import {
   AttentionItemId,
 } from '../domain/types.ts';
 import path from 'node:path';
+
+/**
+ * Normalizes a ChatGPT project reference to its bare `g-p-…` slug (lowercased).
+ * Shared by the binding contract and the project-owned conversation registry.
+ */
+export function normalizeChatProjectSlug(ref: string | null | undefined): string {
+  if (!ref || typeof ref !== 'string') return '';
+  const match = ref.match(/(?:^|\/g\/)(g-p-[^/?#]+)/i);
+  return (match?.[1] ?? ref).replace(/\/$/, '').toLowerCase();
+}
+
+/** Normalizes a workspace path reference for project-ownership comparison. */
+export function normalizeWorkerProjectPath(ref: string | null): string {
+  if (!ref) return '';
+  return path.posix.normalize(ref.replaceAll('\\', '/')).replace(/\/$/, '').toLowerCase();
+}
+
+/**
+ * Recursively walks persisted evidence/details (plain JSON) collecting string
+ * values that could be project conversation URLs. Depth-capped and
+ * cycle-guarded — persisted payloads are plain data, but stay defensive.
+ */
+function collectConversationUrlCandidates(node: unknown, out: string[], depth = 0): void {
+  if (depth > 6 || node == null) return;
+  if (typeof node === 'string') {
+    if (node.includes('chatgpt.com') && node.includes('/g/')) out.push(node);
+    return;
+  }
+  if (Array.isArray(node)) {
+    for (const item of node) collectConversationUrlCandidates(item, out, depth + 1);
+    return;
+  }
+  if (typeof node === 'object') {
+    for (const key of Object.keys(node as Record<string, unknown>)) {
+      collectConversationUrlCandidates((node as Record<string, unknown>)[key], out, depth + 1);
+    }
+  }
+}
 
 export interface RelayApiServiceOptions {
   isElectron?: boolean;
@@ -353,11 +396,7 @@ export class RelayApiService implements IRelayApi {
     // match the paired project, the conversation ID must be nonempty, and the
     // runtime must not already be bound to a different conversation. Nothing is
     // read from Chrome — the caller hands over an already-observed URL.
-    const normalizeChatRef = (ref: string | null): string => {
-      if (!ref) return '';
-      const match = ref.match(/(?:^|\/g\/)(g-p-[^/?#]+)/i);
-      return (match?.[1] ?? ref).replace(/\/$/, '').toLowerCase();
-    };
+    const normalizeChatRef = normalizeChatProjectSlug;
     let conversationBinding: { projectId: string; conversationId: string } | null = null;
     if (plannerConversationUrl) {
       if (!plannerSessionId || !planner) {
@@ -417,10 +456,7 @@ export class RelayApiService implements IRelayApi {
         if (!worker.externalProjectRef || !proj.workerWorkspacePath) {
           throw new Error('Cross-project pairing: worker project ownership cannot be proven');
         }
-        const normalizeWorkerPath = (ref: string | null): string => {
-          if (!ref) return '';
-          return path.posix.normalize(ref.replaceAll('\\', '/')).replace(/\/$/, '');
-        };
+        const normalizeWorkerPath = normalizeWorkerProjectPath;
         const normProjWorker = normalizeWorkerPath(proj.workerWorkspacePath ?? null);
         const normWorkerRef = normalizeWorkerPath(worker.externalProjectRef ?? null);
         if (normWorkerRef !== normProjWorker) {
@@ -1146,6 +1182,201 @@ export class RelayApiService implements IRelayApi {
     } catch (err: any) {
       return { success: false, sessions: [], error: err.message };
     }
+  }
+
+  public async enumerateChatGPTConversations(projectId: string): Promise<ChatGPTConversationChoiceList> {
+    const proj = await this.db.projects.findById(projectId as ProjectId);
+    if (!proj) {
+      return { ok: false, error: 'Project not found', conversations: [] };
+    }
+    const projectSlug = normalizeChatProjectSlug(proj.plannerProjectUrl ?? null);
+    if (!projectSlug) {
+      return {
+        ok: false,
+        error: 'Project has no registered ChatGPT planner project, so there is no conversation registry scope',
+        conversations: [],
+      };
+    }
+
+    const byId = new Map<string, ChatGPTConversationChoice>();
+
+    // Authoritative source: chatgpt runtimes bound to a conversation inside this project.
+    const runtimes = await this.db.runtimes.findAll();
+    for (const r of runtimes) {
+      if (r.providerType !== 'chatgpt' || !r.externalSessionId) continue;
+      if (normalizeChatProjectSlug(r.externalProjectRef ?? null) !== projectSlug) continue;
+      byId.set(r.externalSessionId, {
+        conversationId: r.externalSessionId,
+        projectId: projectSlug,
+        url: `https://chatgpt.com/g/${projectSlug}/c/${r.externalSessionId}`,
+        source: 'bound',
+        boundRuntimeId: r.id,
+        lastSeenAt: r.updatedAt,
+      });
+    }
+
+    // Observed source: conversation URLs recorded in event evidence/details for this project.
+    const pairs = await this.db.pairs.findAll();
+    const activePlannerPairRuntimeIds = new Set(
+      pairs
+        .filter((p) => p.status !== 'archived' && p.plannerSessionId)
+        .map((p) => p.plannerSessionId as string),
+    );
+    const events = await this.db.events.findRecent(500);
+    for (const evt of events) {
+      const candidates: string[] = [];
+      collectConversationUrlCandidates(evt.evidence, candidates);
+      collectConversationUrlCandidates(evt.details, candidates);
+      for (const candidate of candidates) {
+        const parsed = parseChatGPTConversationUrl(candidate);
+        if (!parsed || parsed.projectId.toLowerCase() !== projectSlug) continue;
+        const existing = byId.get(parsed.conversationId);
+        if (existing) {
+          existing.lastSeenAt = Math.max(existing.lastSeenAt ?? 0, evt.timestamp);
+        } else {
+          byId.set(parsed.conversationId, {
+            conversationId: parsed.conversationId,
+            projectId: projectSlug,
+            url: `https://chatgpt.com/g/${projectSlug}/c/${parsed.conversationId}`,
+            source: 'observed',
+            lastSeenAt: evt.timestamp,
+          });
+        }
+      }
+    }
+
+    for (const conversation of byId.values()) {
+      if (conversation.boundRuntimeId && activePlannerPairRuntimeIds.has(conversation.boundRuntimeId)) {
+        conversation.paired = true;
+      }
+    }
+
+    const conversations = Array.from(byId.values());
+    conversations.sort((a, b) => {
+      const aBound = a.source === 'bound' ? 0 : 1;
+      const bBound = b.source === 'bound' ? 0 : 1;
+      if (aBound !== bBound) return aBound - bBound;
+      const dt = (b.lastSeenAt ?? 0) - (a.lastSeenAt ?? 0);
+      if (dt !== 0) return dt;
+      return a.conversationId.localeCompare(b.conversationId);
+    });
+
+    return { ok: true, projectSlug, conversations };
+  }
+
+  public async enumerateWorkerChoices(projectId: string): Promise<WorkerChoiceList> {
+    const proj = await this.db.projects.findById(projectId as ProjectId);
+    if (!proj) {
+      return { ok: false, error: 'Project not found', choices: [] };
+    }
+
+    const choices: WorkerChoice[] = [];
+    const registeredSessionIds = new Set<string>();
+    const projectPath = normalizeWorkerProjectPath(proj.workerWorkspacePath ?? null);
+
+    const pairs = await this.db.pairs.findAll();
+    const activeWorkerPairRuntimeIds = new Set(
+      pairs
+        .filter((p) => p.status !== 'archived' && p.workerSessionId)
+        .map((p) => p.workerSessionId as string),
+    );
+
+    // Already-registered runtimes proven to belong to this project's workspace.
+    const runtimes = await this.db.runtimes.findAll();
+    for (const r of runtimes) {
+      if (r.providerType !== 'opencode' && r.providerType !== 'vscode') continue;
+      if (projectPath) {
+        const ref = normalizeWorkerProjectPath(r.externalProjectRef ?? null);
+        if (!ref || ref !== projectPath) continue;
+      }
+      if (r.externalSessionId) registeredSessionIds.add(r.externalSessionId);
+      choices.push({
+        kind: 'registered',
+        runtimeId: r.id,
+        name: r.name,
+        status: r.status,
+        externalSessionId: r.externalSessionId ?? null,
+        paired: activeWorkerPairRuntimeIds.has(r.id),
+      });
+    }
+
+    // Discovered-but-unregistered sessions, scoped to this project's directory.
+    // Identity rule: only details.authoritativeSessionId (proven via the shared
+    // service / persisted store) may be adopted — parsed/window-derived ids are
+    // excluded and never become bindable worker sessions.
+    let discovery: { ok: boolean; reason?: string; excludedUnverified?: number } = { ok: false };
+    if (!proj.canonicalPath) {
+      discovery = { ok: false, reason: 'Project has no canonical path to scope session discovery' };
+    } else {
+      let provider: any;
+      try {
+        provider = this.engine.getProvider('opencode') as any;
+      } catch {
+        provider = null;
+      }
+      if (!provider || typeof provider.matchSessionsByPath !== 'function') {
+        discovery = { ok: false, reason: 'OpenCode provider does not support session matching' };
+      } else {
+        try {
+          const matchRes = await provider.matchSessionsByPath(proj.canonicalPath, proj.gitRoot);
+          const matches = matchRes?.sessions ?? [];
+          let excludedUnverified = 0;
+          for (const m of matches) {
+            const details = (m?.evidence?.details ?? {}) as any;
+            const sessionId: string | undefined = details.authoritativeSessionId;
+            if (!sessionId) {
+              excludedUnverified += 1;
+              continue;
+            }
+            if (registeredSessionIds.has(sessionId)) continue;
+            registeredSessionIds.add(sessionId);
+            choices.push({
+              kind: 'discovered',
+              sessionId,
+              windowTitle: m?.windowTitle,
+              workspacePath: details.workspacePath,
+              matchedVia: details.matchedVia,
+            });
+          }
+          discovery = { ok: true, excludedUnverified };
+        } catch (err: any) {
+          discovery = { ok: false, reason: err?.message ?? 'Session discovery failed' };
+        }
+      }
+    }
+
+    return { ok: true, projectPath: proj.canonicalPath ?? proj.workerWorkspacePath, choices, discovery };
+  }
+
+  public async adoptOpenCodeSession(projectId: string, sessionId: string, name?: string): Promise<UIRuntimeSession> {
+    const trimmed = sessionId.trim();
+    if (!trimmed.startsWith('ses_')) {
+      throw new Error('Only authoritative OpenCode session ids (ses_*) from discovery may be adopted');
+    }
+    const proj = await this.db.projects.findById(projectId as ProjectId);
+    if (!proj) throw new Error('Project not found');
+
+    const existing = await this.db.runtimes.findByExternalSessionId('opencode', trimmed);
+    if (existing) {
+      const existingRef = normalizeWorkerProjectPath(existing.externalProjectRef ?? null);
+      const projectRef = normalizeWorkerProjectPath(proj.workerWorkspacePath ?? null);
+      if (existingRef && projectRef && existingRef !== projectRef) {
+        throw new Error(`OpenCode session '${trimmed}' is already bound to a different workspace`);
+      }
+      const list = await this.listRuntimeSessions();
+      const ui = list.find((s) => s.id === existing.id);
+      if (!ui) throw new Error('Failed to retrieve adopted runtime');
+      return ui;
+    }
+
+    const runtime = RuntimeSession.create('opencode', name?.trim() || `OpenCode session ${trimmed}`);
+    runtime.updateExternalIdentity(trimmed, proj.workerWorkspacePath ?? null);
+    await this.db.runtimes.save(runtime);
+
+    const list = await this.listRuntimeSessions();
+    const ui = list.find((s) => s.id === runtime.id);
+    if (!ui) throw new Error('Failed to retrieve adopted runtime');
+    return ui;
   }
 
   public async discoverChatGPTPlanner(name: string): Promise<{

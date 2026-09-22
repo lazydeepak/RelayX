@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, GitMerge, Edit3, Trash2, Archive, AlertTriangle, CheckCircle2, Cpu, Unlink, FolderPlus, Plus, MessageSquare } from 'lucide-react';
 import { UIPair, UIProject, UIRuntimeSession } from '../types/ui.ts';
+import type { ChatGPTConversationChoice, WorkerChoice } from '../types/relayApi.ts';
 import { relayBridge } from '../services/relayBridge.ts';
 import { AddProjectWizard } from './AddProjectWizard.tsx';
 import {
@@ -10,6 +11,8 @@ import {
   findConversationConflict,
   canConfirmConversation,
   describeConversationReview,
+  describeConversationChoice,
+  describeDiscoveredWorkerChoice,
   buildCreatePairArgs,
 } from './pairModalConversation.ts';
 
@@ -44,19 +47,38 @@ export const PairModal: React.FC<PairModalProps> = ({
   const [workerSessionId, setWorkerSessionId] = useState<string>('');
   const [conversationUrl, setConversationUrl] = useState<string>('');
   const [conversationConfirmed, setConversationConfirmed] = useState(false);
+  const [conversationChoices, setConversationChoices] = useState<ChatGPTConversationChoice[]>([]);
+  const [conversationRegistryError, setConversationRegistryError] = useState<string | null>(null);
+  const [workerChoices, setWorkerChoices] = useState<WorkerChoice[]>([]);
+  const [workerDiscovery, setWorkerDiscovery] = useState<{ ok: boolean; reason?: string } | null>(null);
+  const [adoptedRuntimes, setAdoptedRuntimes] = useState<UIRuntimeSession[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isAddProjectWizardOpen, setIsAddProjectWizardOpen] = useState(false);
 
   const activeProjects = projects.filter((p) => p.status !== 'archived');
-  const projectRuntimes = runtimes.filter((r) => {
+  const runtimePool = [
+    ...runtimes,
+    ...adoptedRuntimes.filter((a) => !runtimes.some((r) => r.id === a.id)),
+  ];
+  const projectRuntimes = runtimePool.filter((r) => {
     // Filter by project workspace/path or by pair relations if available
     const proj = activeProjects.find((p) => p.id === projectId);
     if (!proj) return false;
     return true;
   });
   const plannerOptions = projectRuntimes.filter((r) => r.providerType === 'chatgpt');
-  const workerOptions = projectRuntimes.filter((r) => r.providerType === 'opencode' || r.providerType === 'vscode');
+  const workerOptions = projectRuntimes.filter(
+    (r) => r.providerType === 'opencode' || r.providerType === 'vscode',
+  );
+  const workerDiscoveredChoices = workerChoices.filter(
+    (c): c is Extract<WorkerChoice, { kind: 'discovered' }> =>
+      c.kind === 'discovered' && !runtimePool.some((r) => r.externalSessionId === c.sessionId),
+  );
+  // Derived selection for the "existing conversation" picker: a choice URL === the
+  // pasted URL, otherwise the "new conversation" option.
+  const conversationChoiceValue =
+    conversationChoices.find((c) => c.url === conversationUrl.trim())?.url ?? '__new__';
 
   // Explicit ChatGPT conversation selection (create-mode only): the user pastes
   // the exact URL of the specific conversation to pair. Nothing is sampled from
@@ -94,6 +116,11 @@ export const PairModal: React.FC<PairModalProps> = ({
         setName('');
         setConversationUrl('');
         setConversationConfirmed(false);
+        setConversationChoices([]);
+        setConversationRegistryError(null);
+        setWorkerChoices([]);
+        setWorkerDiscovery(null);
+        setAdoptedRuntimes([]);
         const defaultProj = initialProjectId || activeProjects[0]?.id || '';
         setProjectId(defaultProj);
         // default planner to first chatgpt/available runtime
@@ -104,6 +131,44 @@ export const PairModal: React.FC<PairModalProps> = ({
       }
     }
   }, [isOpen]);
+
+  // A new create-mode project resets the conversation selection: the registry and
+  // pasted URLs are scoped to the project's ChatGPT planner slug.
+  useEffect(() => {
+    setConversationUrl('');
+    setConversationConfirmed(false);
+  }, [projectId]);
+
+  // Load project-owned choices: the observed ChatGPT conversation registry and the
+  // OpenCode worker-session enumeration (registered + adoptable discovered ids).
+  useEffect(() => {
+    if (!(isOpen && mode === 'create' && projectId)) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const convRes = await relayBridge.enumerateChatGPTConversations(projectId);
+        if (cancelled) return;
+        setConversationChoices(convRes.ok ? convRes.conversations : []);
+        setConversationRegistryError(convRes.ok ? null : (convRes.error ?? 'Conversation registry unavailable'));
+      } catch (err: any) {
+        if (!cancelled) setConversationRegistryError(err?.message ?? 'Conversation registry unavailable');
+      }
+      try {
+        const workRes = await relayBridge.enumerateWorkerChoices(projectId);
+        if (cancelled) return;
+        setWorkerChoices(workRes.ok ? workRes.choices : []);
+        setWorkerDiscovery(workRes.ok ? (workRes.discovery ?? { ok: true }) : { ok: false, reason: workRes.error });
+      } catch {
+        if (!cancelled) {
+          setWorkerChoices([]);
+          setWorkerDiscovery({ ok: false, reason: 'Worker session enumeration failed' });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, mode, projectId]);
 
   if (!isOpen) return null;
 
@@ -170,6 +235,28 @@ export const PairModal: React.FC<PairModalProps> = ({
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const adoptWorkerSession = async (sessionId: string) => {
+    try {
+      setErrorMessage(null);
+      const runtime = await relayBridge.adoptOpenCodeSession(projectId, sessionId, undefined);
+      setAdoptedRuntimes((prev) =>
+        prev.some((r) => r.id === runtime.id) ? prev : [...prev, runtime],
+      );
+      setWorkerSessionId(runtime.id);
+      if (onRefresh) onRefresh();
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Failed to adopt the discovered session');
+    }
+  };
+
+  const handleWorkerChange = (value: string) => {
+    if (value.startsWith('adopt:')) {
+      adoptWorkerSession(value.slice('adopt:'.length));
+      return;
+    }
+    setWorkerSessionId(value);
   };
 
   return (
@@ -300,6 +387,43 @@ export const PairModal: React.FC<PairModalProps> = ({
                     ChatGPT Conversation *
                   </span>
                 </div>
+                <div>
+                  <select
+                    value={conversationChoiceValue}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setConversationConfirmed(false);
+                      if (v === '__new__') {
+                        setConversationUrl('');
+                      } else {
+                        setConversationUrl(v);
+                      }
+                    }}
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-sky-500"
+                  >
+                    <option value="__new__">New conversation — paste URL below…</option>
+                    {conversationChoices.map((c) => (
+                      <option key={c.conversationId} value={c.url}>
+                        {describeConversationChoice(c)}
+                      </option>
+                    ))}
+                  </select>
+                  {conversationRegistryError ? (
+                    <p className="mt-1 text-[11px] text-amber-300/90">
+                      Conversation registry unavailable: {conversationRegistryError}. Paste a URL
+                      below instead.
+                    </p>
+                  ) : conversationChoices.length === 0 ? (
+                    <p className="mt-1 text-[11px] text-slate-400">
+                      No existing conversations observed for this project yet — paste a new
+                      conversation URL below.
+                    </p>
+                  ) : (
+                    <p className="mt-1 text-[11px] text-slate-400">
+                      Or paste a different conversation URL below.
+                    </p>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={conversationUrl}
@@ -390,7 +514,7 @@ export const PairModal: React.FC<PairModalProps> = ({
               </div>
               <select
                 value={workerSessionId}
-                onChange={(e) => setWorkerSessionId(e.target.value)}
+                onChange={(e) => handleWorkerChange(e.target.value)}
                 className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-emerald-500"
               >
                 <option value="">(None / Unassigned)</option>
@@ -399,7 +523,22 @@ export const PairModal: React.FC<PairModalProps> = ({
                     {r.name} ({r.providerType.toUpperCase()}) • {r.status}{r.externalSessionId ? ' • bound id: ' + shortenExternalId(r.externalSessionId, 8) : ''}
                   </option>
                 ))}
+                {workerDiscoveredChoices.length > 0 && (
+                  <optgroup label="Discovered OpenCode sessions (authoritative, adoptable)">
+                    {workerDiscoveredChoices.map((c) => (
+                      <option key={c.sessionId} value={`adopt:${c.sessionId}`}>
+                        {describeDiscoveredWorkerChoice(c)}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
+              {mode === 'create' && workerDiscovery && !workerDiscovery.ok && (
+                <p className="text-[11px] text-amber-300/90">
+                  Session discovery unavailable ({workerDiscovery.reason ?? 'unknown reason'}) —
+                  showing registered sessions only.
+                </p>
+              )}
             </div>
 
             <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-800">

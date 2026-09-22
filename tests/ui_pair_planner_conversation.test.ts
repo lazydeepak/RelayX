@@ -13,7 +13,9 @@ import assert from 'node:assert';
 import {
   buildCreatePairArgs,
   canConfirmConversation,
+  describeConversationChoice,
   describeConversationReview,
+  describeDiscoveredWorkerChoice,
   findConversationConflict,
   findPlannerIdConflict,
   shortenExternalId,
@@ -165,5 +167,49 @@ describe('listRuntimeSessions surfaces persisted external identity to the modal'
     const workerUI = sessions.find((s) => s.id === unbound.id);
     assert.strictEqual(workerUI?.externalSessionId, null);
     assert.strictEqual(workerUI?.externalProjectRef, null);
+  });
+});
+describe('PairModal enumeration choice labels (observed registry + discovered workers)', () => {
+  it('describes a bound conversation with its authoritative markers', () => {
+    const label = describeConversationChoice({
+      conversationId: 'conv-bound-1234567890abc',
+      source: 'bound',
+      paired: true,
+      lastSeenAt: 0,
+    });
+    assert.match(label, /^conv-bound/);
+    assert.match(label, /bound/);
+    assert.match(label, /in active pair/);
+  });
+
+  it('describes an observed conversation distinctly', () => {
+    const label = describeConversationChoice({
+      conversationId: 'conv-observed',
+      source: 'observed',
+      paired: false,
+      lastSeenAt: 1_700_000_000_000,
+    });
+    assert.match(label, /conv-observed/);
+    assert.match(label, /observed/);
+    assert.doesNotMatch(label, /bound/);
+    assert.doesNotMatch(label, /in active pair/);
+  });
+
+  it('describes a discovered worker choice with window title', () => {
+    const label = describeDiscoveredWorkerChoice({
+      kind: 'discovered',
+      sessionId: 'ses_abcdef1234567890',
+      windowTitle: 'RelayX — sessions',
+    });
+    assert.match(label, /^ses_abcdef/);
+    assert.match(label, /… — RelayX — sessions$/);
+  });
+
+  it('falls back to the full id when the window title is absent', () => {
+    const label = describeDiscoveredWorkerChoice({
+      kind: 'discovered',
+      sessionId: 'ses_short',
+    });
+    assert.strictEqual(label, 'ses_short');
   });
 });

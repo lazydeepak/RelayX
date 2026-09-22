@@ -1,4 +1,5 @@
 import { parseChatGPTConversationUrl } from '../relay/providers/adapters.ts';
+import type { ChatGPTConversationChoice, WorkerChoice } from '../types/relayApi.ts';
 
 /**
  * Pure helper contract for PairModal's explicit ChatGPT conversation selection.
@@ -137,4 +138,21 @@ export function buildCreatePairArgs(
     workerSessionId: workerSessionId || undefined,
     plannerConversationUrl: plannerConversationUrl.trim(),
   };
+}
+
+/** Select-option label for an enumerated ChatGPT conversation choice. */
+export function describeConversationChoice(choice: Pick<ChatGPTConversationChoice, 'conversationId' | 'source' | 'paired' | 'lastSeenAt'>): string {
+  const parts = [
+    shortenExternalId(choice.conversationId, 14) ?? choice.conversationId,
+    choice.source === 'bound' ? 'bound' : 'observed',
+  ];
+  if (choice.paired) parts.push('in active pair');
+  if (choice.lastSeenAt) parts.push(`seen ${new Date(choice.lastSeenAt).toLocaleDateString()}`);
+  return parts.join(' • ');
+}
+
+/** Select-option label for a discovered (adoptable) OpenCode worker session. */
+export function describeDiscoveredWorkerChoice(choice: Extract<WorkerChoice, { kind: 'discovered' }>): string {
+  const short = shortenExternalId(choice.sessionId, 14) ?? choice.sessionId;
+  return choice.windowTitle ? `${short} — ${choice.windowTitle}` : short;
 }

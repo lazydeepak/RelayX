@@ -22,8 +22,8 @@ export function registerRelayIpcHandlers(service: RelayApiService): void {
   ipcMain.handle(RELAY_IPC_CHANNELS.GET_PAIR, (_event, id) => service.getPair(id));
   ipcMain.handle(
     RELAY_IPC_CHANNELS.CREATE_PAIR,
-    (_event, projId, name, plannerId, workerId) =>
-      service.createPair(projId, name, plannerId, workerId),
+    (_event, projId, name, plannerId, workerId, plannerConversationUrl) =>
+      service.createPair(projId, name, plannerId, workerId, plannerConversationUrl),
   );
   ipcMain.handle(RELAY_IPC_CHANNELS.UPDATE_PAIR, (_event, id, updates) =>
     service.updatePair(id, updates),
@@ -117,6 +117,15 @@ export function registerRelayIpcHandlers(service: RelayApiService): void {
   );
   ipcMain.handle(RELAY_IPC_CHANNELS.DISCOVER_OPENCODE_SESSIONS, (_event, projectPath, gitRoot) =>
     service.discoverOpenCodeSessions(projectPath, gitRoot),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.ENUMERATE_CHATGPT_CONVERSATIONS, (_event, projectId) =>
+    service.enumerateChatGPTConversations(projectId),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.ENUMERATE_WORKER_CHOICES, (_event, projectId) =>
+    service.enumerateWorkerChoices(projectId),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.ADOPT_OPENCODE_SESSION, (_event, projectId, sessionId, name) =>
+    service.adoptOpenCodeSession(projectId, sessionId, name),
   );
   ipcMain.handle(RELAY_IPC_CHANNELS.FINALIZE_PROJECT_SETUP, (_event, setup) =>
     service.finalizeProjectSetup(setup),

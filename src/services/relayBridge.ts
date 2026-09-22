@@ -407,6 +407,27 @@ export const relayBridge: IRelayApi = {
     return getLocalFallbackService().discoverOpenCodeSessions(projectPath, gitRoot);
   },
 
+  enumerateChatGPTConversations: async (projectId: string) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.enumerateChatGPTConversations(projectId);
+    }
+    return getLocalFallbackService().enumerateChatGPTConversations(projectId);
+  },
+
+  enumerateWorkerChoices: async (projectId: string) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.enumerateWorkerChoices(projectId);
+    }
+    return getLocalFallbackService().enumerateWorkerChoices(projectId);
+  },
+
+  adoptOpenCodeSession: async (projectId: string, sessionId: string, name?: string) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.adoptOpenCodeSession(projectId, sessionId, name);
+    }
+    return getLocalFallbackService().adoptOpenCodeSession(projectId, sessionId, name);
+  },
+
   finalizeProjectSetup: async (setup) => {
     if (typeof window !== 'undefined' && window.relayApi) {
       return window.relayApi.finalizeProjectSetup(setup);

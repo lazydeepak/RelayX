@@ -23,6 +23,7 @@ const relayApi: IRelayApi = {
     name: string,
     plannerSessionId?: string,
     workerSessionId?: string,
+    plannerConversationUrl?: string,
   ) =>
     ipcRenderer.invoke(
       RELAY_IPC_CHANNELS.CREATE_PAIR,
@@ -30,6 +31,7 @@ const relayApi: IRelayApi = {
       name,
       plannerSessionId,
       workerSessionId,
+      plannerConversationUrl,
     ),
   updatePair: (
     id: string,
@@ -106,6 +108,12 @@ const relayApi: IRelayApi = {
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.DISCOVER_CHATGPT_PLANNER, name),
   discoverOpenCodeSessions: (projectPath: string, gitRoot?: string) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.DISCOVER_OPENCODE_SESSIONS, projectPath, gitRoot),
+  enumerateChatGPTConversations: (projectId: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.ENUMERATE_CHATGPT_CONVERSATIONS, projectId),
+  enumerateWorkerChoices: (projectId: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.ENUMERATE_WORKER_CHOICES, projectId),
+  adoptOpenCodeSession: (projectId: string, sessionId: string, name?: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.ADOPT_OPENCODE_SESSION, projectId, sessionId, name),
   finalizeProjectSetup: (setup: any) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.FINALIZE_PROJECT_SETUP, setup),
 };

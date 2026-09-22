@@ -7,6 +7,7 @@ import {
   UIAttentionItem,
   ObservableEvidence,
   ProviderType,
+  RuntimeSessionStatus,
 } from './ui.ts';
 
 export interface DashboardState {
@@ -44,6 +45,65 @@ export interface AppStatus {
     systemEventsAvailable: boolean;
     notes?: string;
   };
+}
+
+/**
+ * A ChatGPT conversation RelayX has already bound or observed for a project —
+ * the project-owned conversation registry. No Chrome sampling: entries come
+ * only from persisted authoritative bindings and recorded event evidence.
+ */
+export interface ChatGPTConversationChoice {
+  /** The `c/` segment of the conversation URL. */
+  conversationId: string;
+  /** The owning `g-p-…` project slug this conversation was scoped to. */
+  projectId: string;
+  /** Reconstructed conversation URL — the authoritative binding input. */
+  url: string;
+  /**
+   * `bound` = authoritative (a planner runtime carries this conversation id);
+   * `observed` = the URL appeared in recorded event evidence.
+   */
+  source: 'bound' | 'observed';
+  boundRuntimeId?: string;
+  /** True when the bound planner runtime sits in a non-archived pair. */
+  paired?: boolean;
+  /** Newest timestamp at which the conversation was bound or observed. */
+  lastSeenAt?: number;
+}
+
+export interface ChatGPTConversationChoiceList {
+  ok: boolean;
+  error?: string;
+  projectSlug?: string;
+  conversations: ChatGPTConversationChoice[];
+}
+
+/** An existing worker-session choice for a project: already registered, or discovered and adoptable. */
+export type WorkerChoice =
+  | {
+      kind: 'registered';
+      runtimeId: string;
+      name: string;
+      status: RuntimeSessionStatus;
+      externalSessionId?: string | null;
+      paired: boolean;
+    }
+  | {
+      kind: 'discovered';
+      /** Authoritative `ses_*` id resolved via the shared service — adoptable. */
+      sessionId: string;
+      windowTitle?: string;
+      workspacePath?: string;
+      matchedVia?: string;
+    };
+
+export interface WorkerChoiceList {
+  ok: boolean;
+  error?: string;
+  projectPath?: string;
+  choices: WorkerChoice[];
+  /** Truthful discovery sub-result — failure never hides registered choices. */
+  discovery?: { ok: boolean; reason?: string; excludedUnverified?: number };
 }
 
 export interface IRelayApi {
@@ -152,6 +212,9 @@ export interface IRelayApi {
     diagnostics?: any;
     error?: string;
   }>;
+  enumerateChatGPTConversations(projectId: string): Promise<ChatGPTConversationChoiceList>;
+  enumerateWorkerChoices(projectId: string): Promise<WorkerChoiceList>;
+  adoptOpenCodeSession(projectId: string, sessionId: string, name?: string): Promise<UIRuntimeSession>;
   finalizeProjectSetup(setup: {
     name: string;
     description: string;
