@@ -50,7 +50,8 @@
 .light [class*="bg-red-950/20"],
 .light [class*="bg-red-950/30"],
 .light [class*="bg-red-950/40"],
-.light [class*="bg-red-950/60"] { background-color: #fee2e2 !important; }
+.light [class*="bg-red-950/60"],
+.light [class*="bg-red-950"] { background-color: #fee2e2 !important; }
 .light [class*="bg-red-500/10"],
 .light [class*="bg-red-500/20"],
 .light [class*="bg-red-600/10"],
@@ -59,7 +60,8 @@
 .light [class*="border-red-500/20"],
 .light [class*="border-red-500/40"],
 .light [class*="border-red-700/50"],
-.light [class*="border-red-800/40"] { border-color: #fda4af !important; }
+.light [class*="border-red-800/40"],
+.light [class*="border-red-800"] { border-color: #fda4af !important; }
 
 .light [class*="text-red-100"],
 .light [class*="text-red-200"],
@@ -92,6 +94,7 @@
 
 .light [class*="bg-emerald-950/30"],
 .light [class*="bg-emerald-950/40"],
+.light [class*="bg-emerald-950"],
 .light [class*="bg-emerald-500/10"],
 .light [class*="bg-emerald-500/20"],
 .light [class*="bg-emerald-600/20"] { background-color: #d1fae5 !important; }
@@ -101,7 +104,8 @@
 .light [class*="border-emerald-500/40"],
 .light [class*="border-emerald-500/50"],
 .light [class*="border-emerald-600/50"],
-.light [class*="border-emerald-800/40"] { border-color: #6ee7b7 !important; }
+.light [class*="border-emerald-800/40"],
+.light [class*="border-emerald-800"] { border-color: #6ee7b7 !important; }
 
 .light [class*="text-emerald-200"],
 .light [class*="text-emerald-300"],
