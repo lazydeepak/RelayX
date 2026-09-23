@@ -407,6 +407,13 @@ export const relayBridge: IRelayApi = {
     return getLocalFallbackService().discoverOpenCodeSessions(projectPath, gitRoot);
   },
 
+  createOpenCodeWorkerSession: async (projectId: string, name?: string) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.createOpenCodeWorkerSession(projectId, name);
+    }
+    return getLocalFallbackService().createOpenCodeWorkerSession(projectId, name);
+  },
+
   enumerateChatGPTConversations: async (projectId: string) => {
     if (typeof window !== 'undefined' && window.relayApi) {
       return window.relayApi.enumerateChatGPTConversations(projectId);

@@ -127,6 +127,9 @@ export function registerRelayIpcHandlers(service: RelayApiService): void {
   ipcMain.handle(RELAY_IPC_CHANNELS.ADOPT_OPENCODE_SESSION, (_event, projectId, sessionId, name) =>
     service.adoptOpenCodeSession(projectId, sessionId, name),
   );
+  ipcMain.handle(RELAY_IPC_CHANNELS.CREATE_OPENCODE_WORKER_SESSION, (_event, projectId, name) =>
+    service.createOpenCodeWorkerSession(projectId, name),
+  );
   ipcMain.handle(RELAY_IPC_CHANNELS.FINALIZE_PROJECT_SETUP, (_event, setup) =>
     service.finalizeProjectSetup(setup),
   );

@@ -106,6 +106,14 @@ export interface WorkerChoiceList {
   discovery?: { ok: boolean; reason?: string; excludedUnverified?: number };
 }
 
+export interface OpenCodeWorkerSessionCreationResult {
+  sessionId: string;
+  adopted: boolean;
+  runtime?: UIRuntimeSession;
+  partial?: boolean;
+  error?: string;
+}
+
 export interface IRelayApi {
   getAppStatus(): Promise<AppStatus>;
   getDashboardState(): Promise<DashboardState>;
@@ -215,6 +223,7 @@ export interface IRelayApi {
   enumerateChatGPTConversations(projectId: string): Promise<ChatGPTConversationChoiceList>;
   enumerateWorkerChoices(projectId: string): Promise<WorkerChoiceList>;
   adoptOpenCodeSession(projectId: string, sessionId: string, name?: string): Promise<UIRuntimeSession>;
+  createOpenCodeWorkerSession(projectId: string, name?: string): Promise<OpenCodeWorkerSessionCreationResult>;
   finalizeProjectSetup(setup: {
     name: string;
     description: string;

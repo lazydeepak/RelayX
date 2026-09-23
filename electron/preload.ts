@@ -114,6 +114,8 @@ const relayApi: IRelayApi = {
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.ENUMERATE_WORKER_CHOICES, projectId),
   adoptOpenCodeSession: (projectId: string, sessionId: string, name?: string) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.ADOPT_OPENCODE_SESSION, projectId, sessionId, name),
+  createOpenCodeWorkerSession: (projectId: string, name?: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.CREATE_OPENCODE_WORKER_SESSION, projectId, name),
   finalizeProjectSetup: (setup: any) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.FINALIZE_PROJECT_SETUP, setup),
 };

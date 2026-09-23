@@ -13,6 +13,7 @@ import {
   AppStatus,
   ChatGPTConversationChoice,
   ChatGPTConversationChoiceList,
+  OpenCodeWorkerSessionCreationResult,
   WorkerChoice,
   WorkerChoiceList,
 } from '../../types/relayApi.ts';
@@ -1377,6 +1378,160 @@ export class RelayApiService implements IRelayApi {
     const ui = list.find((s) => s.id === runtime.id);
     if (!ui) throw new Error('Failed to retrieve adopted runtime');
     return ui;
+  }
+
+  public async createOpenCodeWorkerSession(projectId: string, name?: string): Promise<OpenCodeWorkerSessionCreationResult> {
+    const proj = await this.db.projects.findById(projectId as ProjectId);
+    if (!proj) {
+      throw new Error('Project not found');
+    }
+    const workspacePath = proj.workerWorkspacePath ?? proj.canonicalPath ?? null;
+    if (!workspacePath) {
+      throw new Error('Project has no workspace path to scope the new OpenCode session');
+    }
+
+    // Resolve the shared service client (read-only) to find service URL/auth.
+    let provider: any = null;
+    try {
+      provider = this.engine.getProvider('opencode') as any;
+    } catch {
+      provider = null;
+    }
+    let serviceUrl: string | null = null;
+    let servicePassword: string | null = null;
+    try {
+      const discovery = await (provider as any)?.resolveSharedServiceClient?.();
+      if (discovery?.status === 'available' && discovery?.client) {
+        serviceUrl = discovery.client.baseUrl ?? null;
+        servicePassword = discovery.discovery?.registration?.password ?? null;
+      }
+    } catch {
+      // Fall back: read service.json directly.
+    }
+    if (!serviceUrl || !servicePassword) {
+      try {
+        const { discoverOpenCodeService, parseServiceRegistration, defaultServiceFilePath } = await import('../providers/opencodeSessionClient.ts');
+        const discovery = await discoverOpenCodeService({ serviceFile: defaultServiceFilePath() });
+        if (discovery.status === 'available') {
+          serviceUrl = discovery.registration.url;
+          servicePassword = discovery.registration.password;
+        }
+      } catch {
+        // Service unavailable — creation cannot proceed.
+        throw new Error('OpenCode shared service unavailable: cannot create new worker session');
+      }
+    }
+
+    const url = `${serviceUrl}/api/session`;
+    const authToken = Buffer.from(`opencode:${servicePassword}`).toString('base64');
+    const payload = {
+      id: null,
+      title: name?.trim() || 'OpenCode Worker Session',
+      agent: 'build',
+      model: null,
+      location: { directory: workspacePath },
+      metadata: null,
+      permissions: null,
+    };
+
+    let creationRes: { ok: boolean; status?: number; sessionId?: string; workspaceDir?: string; error?: string } = { ok: false };
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Basic ${authToken}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+      const bodyText = await response.text();
+      creationRes.status = response.status;
+      if (!response.ok) {
+        creationRes.ok = false;
+        creationRes.error = `Service returned HTTP ${response.status}: ${bodyText.slice(0, 400)}`;
+        return {
+          sessionId: '',
+          adopted: false,
+          partial: true,
+          error: creationRes.error,
+        };
+      }
+      let parsed: any = null;
+      try {
+        parsed = JSON.parse(bodyText);
+      } catch {
+        creationRes.ok = false;
+        creationRes.error = `Invalid JSON response from service: ${bodyText.slice(0, 200)}`;
+        return {
+          sessionId: '',
+          adopted: false,
+          partial: true,
+          error: creationRes.error,
+        };
+      }
+      const data = parsed?.data ?? parsed;
+      const sessionId = data?.id ?? null;
+      if (!sessionId || typeof sessionId !== 'string' || !sessionId.startsWith('ses_')) {
+        creationRes.ok = false;
+        creationRes.error = `Service did not return an authoritative session id (expected ses_*, got: ${String(sessionId).slice(0, 40)})`;
+        return {
+          sessionId: String(sessionId ?? ''),
+          adopted: false,
+          partial: true,
+          error: creationRes.error,
+        };
+      }
+      const workspaceDir = data?.location?.directory ?? workspacePath;
+      creationRes.ok = true;
+      creationRes.sessionId = sessionId;
+      creationRes.workspaceDir = workspaceDir;
+    } catch (err: any) {
+      creationRes.ok = false;
+      creationRes.error = err?.message ?? String(err);
+    }
+
+    // If the service creation failed, surface the recoverable partial result truthfully.
+    if (!creationRes.ok || !creationRes.sessionId) {
+      return {
+        sessionId: creationRes.sessionId ?? '',
+        adopted: false,
+        partial: true,
+        error: creationRes.error ?? 'OpenCode session creation returned no authoritative session id',
+      };
+    }
+
+    // Verify workspace ownership of the created session before adoption.
+    const sessionWorkspaceDir = creationRes.workspaceDir ?? workspacePath;
+    const normWorkspaceDir = normalizeWorkerProjectPath(sessionWorkspaceDir);
+    const normProjWorker = normalizeWorkerProjectPath(proj.workerWorkspacePath ?? null);
+    if (normWorkspaceDir && normProjWorker && normWorkspaceDir !== normProjWorker) {
+      return {
+        sessionId: creationRes.sessionId,
+        adopted: false,
+        partial: true,
+        error: `Created session workspace '${normWorkspaceDir}' does not match project workspace '${normProjWorker}'`,
+      };
+    }
+
+    // Adopt the newly created authoritative session.
+    try {
+      const adoptedUI = await this.adoptOpenCodeSession(projectId, creationRes.sessionId, name);
+      return {
+        sessionId: creationRes.sessionId,
+        adopted: true,
+        runtime: adoptedUI,
+      };
+    } catch (adoptErr: any) {
+      // Creation succeeded; adoption failed. Return partial result with the session id
+      // so pairing can resume without blindly creating another session.
+      return {
+        sessionId: creationRes.sessionId,
+        adopted: false,
+        partial: true,
+        error: adoptErr?.message ?? String(adoptErr),
+      };
+    }
   }
 
   public async discoverChatGPTPlanner(name: string): Promise<{
