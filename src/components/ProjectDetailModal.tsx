@@ -24,6 +24,10 @@ import type {
 import {
   selectProjectDetail,
   type ProjectBindingSide,
+  type ProjectChildSession,
+  type BindingVerificationStatus,
+  type SavedBinding,
+  type DiscoveredIdentity,
 } from './detailViewModels.ts';
 import { CopyButton, FieldRow, formatDateTime } from './detailPrimitives.tsx';
 
@@ -42,6 +46,85 @@ interface ProjectDetailModalProps {
   onOpenSessionDetail?: (sessionId: string) => void;
 }
 
+const VERIFICATION_META: Record<
+  BindingVerificationStatus,
+  { label: string; className: string }
+> = {
+  verified: {
+    label: 'Verified',
+    className: 'bg-emerald-950 text-emerald-300 border border-emerald-800',
+  },
+  mismatch: {
+    label: 'Mismatch',
+    className: 'bg-red-950 text-red-300 border border-red-800',
+  },
+  unverified: {
+    label: 'Unverified',
+    className: 'bg-slate-800 text-slate-300 border border-slate-700',
+  },
+  stale: {
+    label: 'Stale',
+    className: 'bg-amber-950 text-amber-300 border border-amber-800',
+  },
+  ambiguous: {
+    label: 'Ambiguous',
+    className: 'bg-violet-950 text-violet-300 border border-violet-800',
+  },
+  unavailable: {
+    label: 'No identity',
+    className: 'bg-slate-900 text-slate-500 border border-slate-800',
+  },
+};
+
+const VerificationBadge: React.FC<{ status: BindingVerificationStatus }> = ({ status }) => {
+  const meta = VERIFICATION_META[status];
+  return (
+    <span
+      className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase shrink-0 ${meta.className}`}
+      title={status}
+    >
+      {meta.label}
+    </span>
+  );
+};
+
+/** Renders the SAVED (persisted) binding value — never hidden by discovery failures. */
+const SavedBindingValue: React.FC<{ saved: SavedBinding }> = ({ saved }) => (
+  <div className="flex items-center gap-1.5 min-w-0">
+    <span className="text-slate-500 shrink-0">Saved</span>
+    <span className="font-mono text-[11px] text-slate-200 truncate select-text" title={saved.value}>
+      {saved.value}
+    </span>
+    <span className="text-[9px] uppercase text-slate-500 shrink-0">
+      {saved.source === 'project' ? 'project' : 'runtime'}
+    </span>
+  </div>
+);
+
+/** Renders the LATEST discovered identity with its authority marked. */
+const DiscoveredValue: React.FC<{ discovered: DiscoveredIdentity }> = ({ discovered }) => {
+  if (!discovered.reference) return null;
+  return (
+    <div className="flex items-center gap-1.5 min-w-0">
+      <span className="text-slate-500 shrink-0">Latest</span>
+      <span
+        className="font-mono text-[11px] text-slate-300 truncate select-text"
+        title={discovered.reference}
+      >
+        {discovered.reference}
+      </span>
+      {discovered.displayOnly && (
+        <span className="text-[9px] uppercase text-amber-500/80 shrink-0" title="Derived from a window/title parse; not verified authoritatively">
+          unverified
+        </span>
+      )}
+      {discovered.sessionIdSource === 'authoritative' && (
+        <span className="text-[9px] uppercase text-emerald-500/80 shrink-0">authoritative</span>
+      )}
+    </div>
+  );
+};
+
 const BindingSideRow: React.FC<{
   side: ProjectBindingSide;
   onOpenSessionDetail?: (sessionId: string) => void;
@@ -49,49 +132,95 @@ const BindingSideRow: React.FC<{
   const roleLabel = side.role === 'planner' ? 'Planner' : 'Worker';
   const accent = side.role === 'planner' ? 'text-purple-400' : 'text-emerald-400';
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 py-1.5">
+    <div className="py-1.5 border-b border-slate-800/60 last:border-0">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <Cpu className={`w-3.5 h-3.5 ${accent} shrink-0`} />
+          <span className={`text-[11px] font-semibold uppercase ${accent}`}>{roleLabel}</span>
+          <span className="text-xs text-slate-200 truncate">
+            {side.bound ? side.sessionName : 'Not bound'}
+          </span>
+        </div>
+        <div className="flex items-center gap-2 text-[11px] min-w-0">
+          <VerificationBadge status={side.verification.status} />
+          {side.bound && (
+            <>
+              {side.provider && (
+                <span className="font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+                  {side.provider}
+                </span>
+              )}
+              {side.runtimeStatus && (
+                <span className="font-mono text-slate-400">{side.runtimeStatus}</span>
+              )}
+              {side.sessionId && onOpenSessionDetail && (
+                <button
+                  type="button"
+                  onClick={() => onOpenSessionDetail(side.sessionId!)}
+                  className="text-blue-400 hover:text-blue-300"
+                  title="Open session details"
+                >
+                  <Eye className="w-3 h-3" />
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+
+      {side.bound ? (
+        <div className="mt-1 ml-6 space-y-0.5">
+          {side.savedBinding && <SavedBindingValue saved={side.savedBinding} />}
+          {side.discovered && <DiscoveredValue discovered={side.discovered} />}
+          {side.verification.status !== 'verified' && side.verification.note && (
+            <p className="text-[10px] text-slate-500">
+              {side.verification.status === 'mismatch' ? '⚠ ' : ''}
+              {side.verification.note}
+            </p>
+          )}
+        </div>
+      ) : (
+        <div className="mt-1 ml-6 space-y-0.5">
+          {side.savedBinding && <SavedBindingValue saved={side.savedBinding} />}
+          {side.verification.note && (
+            <p className="text-[10px] text-slate-500">{side.verification.note}</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const SessionChildRow: React.FC<{
+  session: ProjectChildSession;
+  onOpenSessionDetail?: (sessionId: string) => void;
+}> = ({ session, onOpenSessionDetail }) => {
+  const accent = session.role === 'planner' ? 'text-purple-400' : 'text-emerald-400';
+  return (
+    <li className="flex items-center justify-between gap-2 rounded bg-slate-900 border border-slate-800 px-2.5 py-1.5">
       <div className="flex items-center gap-2 min-w-0">
-        <Cpu className={`w-3.5 h-3.5 ${accent} shrink-0`} />
-        <span className={`text-[11px] font-semibold uppercase ${accent}`}>{roleLabel}</span>
-        <span className="text-xs text-slate-200 truncate">
-          {side.bound ? side.sessionName : 'Not bound'}
+        <Cpu className={`w-3 h-3 ${accent} shrink-0`} />
+        <span className={`text-[10px] font-semibold uppercase ${accent} shrink-0`}>
+          {session.role}
         </span>
+        <span className="text-xs text-slate-200 truncate">{session.sessionName}</span>
       </div>
       <div className="flex items-center gap-2 text-[11px] min-w-0">
-        {side.bound ? (
-          <>
-            {side.provider && (
-              <span className="font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
-                {side.provider}
-              </span>
-            )}
-            {side.runtimeStatus && (
-              <span className="font-mono text-slate-400">{side.runtimeStatus}</span>
-            )}
-            {side.reference && (
-              <span
-                className="font-mono text-slate-500 truncate max-w-[180px] select-text"
-                title={side.reference}
-              >
-                {side.reference}
-              </span>
-            )}
-            {side.sessionId && onOpenSessionDetail && (
-              <button
-                type="button"
-                onClick={() => onOpenSessionDetail(side.sessionId!)}
-                className="text-blue-400 hover:text-blue-300"
-                title="Open session details"
-              >
-                <Eye className="w-3 h-3" />
-              </button>
-            )}
-          </>
-        ) : (
-          <span className="text-slate-500 italic">Not bound</span>
+        <span className="font-mono text-slate-500 truncate max-w-[140px]">{session.provider}</span>
+        <span className="font-mono text-slate-400">{session.runtimeStatus}</span>
+        <VerificationBadge status={session.verification.status} />
+        {session.sessionId && onOpenSessionDetail && (
+          <button
+            type="button"
+            onClick={() => onOpenSessionDetail(session.sessionId)}
+            className="text-blue-400 hover:text-blue-300 shrink-0"
+            title="Open session details"
+          >
+            <Eye className="w-3 h-3" />
+          </button>
         )}
       </div>
-    </div>
+    </li>
   );
 };
 
@@ -229,6 +358,61 @@ export const ProjectDetailModal: React.FC<ProjectDetailModalProps> = ({
                     />
                   </div>
                 ))}
+              </div>
+            )}
+
+            {/* Project-level saved bindings (persisted at setup) */}
+            {(viewModel.savedBindings.planner || viewModel.savedBindings.worker) && (
+              <div className="mt-3 rounded bg-slate-900 border border-slate-800 p-3 space-y-1">
+                <span className="block text-[10px] font-semibold uppercase text-slate-400">
+                  Saved project bindings
+                </span>
+                {viewModel.savedBindings.planner && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] uppercase text-purple-400 w-16 shrink-0">
+                      Planner
+                    </span>
+                    <span
+                      className="font-mono text-[11px] text-slate-300 truncate select-text"
+                      title={viewModel.savedBindings.planner.value}
+                    >
+                      {viewModel.savedBindings.planner.value}
+                    </span>
+                    <CopyButton value={viewModel.savedBindings.planner.value} />
+                  </div>
+                )}
+                {viewModel.savedBindings.worker && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] uppercase text-emerald-400 w-16 shrink-0">
+                      Worker
+                    </span>
+                    <span
+                      className="font-mono text-[11px] text-slate-300 truncate select-text"
+                      title={viewModel.savedBindings.worker.value}
+                    >
+                      {viewModel.savedBindings.worker.value}
+                    </span>
+                    <CopyButton value={viewModel.savedBindings.worker.value} />
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Active bound sessions as child records */}
+            {viewModel.sessions.length > 0 && (
+              <div className="mt-3">
+                <span className="block text-[10px] font-semibold uppercase text-slate-400 mb-1.5">
+                  Bound sessions ({viewModel.sessions.length})
+                </span>
+                <ul className="space-y-1">
+                  {viewModel.sessions.map((sessionRecord) => (
+                    <SessionChildRow
+                      key={sessionRecord.sessionId}
+                      session={sessionRecord}
+                      onOpenSessionDetail={onOpenSessionDetail}
+                    />
+                  ))}
+                </ul>
               </div>
             )}
           </section>

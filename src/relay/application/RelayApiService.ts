@@ -3,7 +3,7 @@ import {
   BrowserOpenCodeProvider,
 } from '../providers/browserProviders.ts';
 import { parseChatGPTConversationUrl } from '../providers/adapters.ts';
-import { RuntimeSession } from '../domain/entities.ts';
+import { RuntimeSession, Project } from '../domain/entities.ts';
 import { IRelayRepositories } from '../persistence/interfaces.ts';
 import { RelayEngine } from './RelayEngine.ts';
 import {
@@ -186,27 +186,24 @@ export class RelayApiService implements IRelayApi {
 
   public async listProjects(): Promise<UIProject[]> {
     const projects = await this.db.projects.findAll();
-    return projects.map((p) => ({
-      id: p.id,
-      name: p.name,
-      description: p.description,
-      canonicalPath: p.canonicalPath,
-      gitRoot: p.gitRoot,
-      status: p.status || 'active',
-      createdAt: p.createdAt,
-      updatedAt: p.updatedAt,
-    }));
+    return projects.map((p) => this.mapProject(p));
   }
 
   public async getProject(id: string): Promise<UIProject | null> {
     const p = await this.db.projects.findById(id as ProjectId);
     if (!p) return null;
+    return this.mapProject(p);
+  }
+
+  private mapProject(p: Project): UIProject {
     return {
       id: p.id,
       name: p.name,
       description: p.description,
       canonicalPath: p.canonicalPath,
       gitRoot: p.gitRoot,
+      plannerProjectUrl: p.plannerProjectUrl,
+      workerWorkspacePath: p.workerWorkspacePath,
       status: p.status || 'active',
       createdAt: p.createdAt,
       updatedAt: p.updatedAt,
@@ -215,16 +212,7 @@ export class RelayApiService implements IRelayApi {
 
   public async createProject(name: string, description = ''): Promise<UIProject> {
     const p = await this.engine.createProject(name, description);
-    return {
-      id: p.id,
-      name: p.name,
-      description: p.description,
-      canonicalPath: p.canonicalPath,
-      gitRoot: p.gitRoot,
-      status: p.status || 'active',
-      createdAt: p.createdAt,
-      updatedAt: p.updatedAt,
-    };
+    return this.mapProject(p);
   }
 
   public async updateProject(
@@ -243,44 +231,17 @@ export class RelayApiService implements IRelayApi {
     }
 
     const p = await this.engine.updateProject(id as ProjectId, name, description);
-    return {
-      id: p.id,
-      name: p.name,
-      description: p.description,
-      canonicalPath: p.canonicalPath,
-      gitRoot: p.gitRoot,
-      status: p.status || 'active',
-      createdAt: p.createdAt,
-      updatedAt: p.updatedAt,
-    };
+    return this.mapProject(p);
   }
 
   public async archiveProject(id: string): Promise<UIProject> {
     const p = await this.engine.archiveProject(id as ProjectId);
-    return {
-      id: p.id,
-      name: p.name,
-      description: p.description,
-      canonicalPath: p.canonicalPath,
-      gitRoot: p.gitRoot,
-      status: p.status || 'active',
-      createdAt: p.createdAt,
-      updatedAt: p.updatedAt,
-    };
+    return this.mapProject(p);
   }
 
   public async unarchiveProject(id: string): Promise<UIProject> {
     const p = await this.engine.unarchiveProject(id as ProjectId);
-    return {
-      id: p.id,
-      name: p.name,
-      description: p.description,
-      canonicalPath: p.canonicalPath,
-      gitRoot: p.gitRoot,
-      status: p.status || 'active',
-      createdAt: p.createdAt,
-      updatedAt: p.updatedAt,
-    };
+    return this.mapProject(p);
   }
 
   public async canDeleteProject(id: string): Promise<{ canDelete: boolean; reasons: string[] }> {
@@ -617,6 +578,8 @@ export class RelayApiService implements IRelayApi {
       lastEvidence: r.lastEvidence,
       archivedAt: r.archivedAt,
       archiveReason: r.archiveReason,
+      externalSessionId: r.externalSessionId,
+      externalProjectRef: r.externalProjectRef,
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     };
@@ -647,6 +610,8 @@ export class RelayApiService implements IRelayApi {
       lastEvidence: r.lastEvidence,
       archivedAt: r.archivedAt,
       archiveReason: r.archiveReason,
+      externalSessionId: r.externalSessionId,
+      externalProjectRef: r.externalProjectRef,
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     };
@@ -711,6 +676,8 @@ export class RelayApiService implements IRelayApi {
       lastHeartbeatAt: runtime.lastHeartbeatAt,
       lastObservedAt: runtime.lastObservedAt,
       lastEvidence: runtime.lastEvidence,
+      externalSessionId: runtime.externalSessionId,
+      externalProjectRef: runtime.externalProjectRef,
       createdAt: runtime.createdAt,
       updatedAt: runtime.updatedAt,
     };
@@ -745,6 +712,8 @@ export class RelayApiService implements IRelayApi {
           lastHeartbeatAt: runtime.lastHeartbeatAt,
           lastObservedAt: runtime.lastObservedAt,
           lastEvidence: runtime.lastEvidence,
+          externalSessionId: runtime.externalSessionId,
+          externalProjectRef: runtime.externalProjectRef,
           createdAt: runtime.createdAt,
           updatedAt: runtime.updatedAt,
         },
@@ -1576,6 +1545,19 @@ export class RelayApiService implements IRelayApi {
         setup.gitRoot,
       );
 
+      // Persist the confirmed discovery results as the project's SAVED planner
+      // and worker bindings so later views can compare them against fresh
+      // discovery. A discovery failure after this point never erases these
+      // values — only an explicit user update may change them.
+      {
+        const workerWorkspace = setup.canonicalPath?.trim() || undefined;
+        const plannerUrl = setup.plannerUrl?.trim() || undefined;
+        if (workerWorkspace || plannerUrl) {
+          project.update(undefined, undefined, undefined, undefined, plannerUrl, workerWorkspace);
+          await this.db.projects.save(project);
+        }
+      }
+
       // 2. Register/Find Runtimes
       let plannerId: RuntimeSessionId | undefined;
       if (setup.plannerUrl) {
@@ -1590,8 +1572,11 @@ export class RelayApiService implements IRelayApi {
           timestamp: Date.now(),
           source: 'reconciliation_probe',
           windowTitle: `ChatGPT - ${setup.name}`,
-          details: { projectUrl: setup.plannerUrl },
+          details: { projectUrl: setup.plannerUrl, bindingRecorded: true },
         });
+        // Persist the project binding as the planner runtime's provider reference
+        // (session identity is unknown until a conversation URL is bound later).
+        planner.updateExternalIdentity(undefined, setup.plannerUrl);
         await this.db.runtimes.save(planner);
         plannerId = planner.id;
       }
@@ -1607,6 +1592,12 @@ export class RelayApiService implements IRelayApi {
         source: 'reconciliation_probe',
         details: { sessionId: setup.workerSessionId },
       });
+      // Persist the authoritative worker session id and its workspace so they
+      // survive a restart as the saved binding.
+      worker.updateExternalIdentity(
+        setup.workerSessionId,
+        setup.canonicalPath?.trim() || null,
+      );
       await this.db.runtimes.save(worker);
       const workerId = worker.id;
 

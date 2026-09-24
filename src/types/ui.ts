@@ -39,6 +39,10 @@ export interface UIProject {
   description: string;
   canonicalPath?: string;
   gitRoot?: string;
+  /** Persisted ChatGPT planner project binding (URL) set when the project was created. */
+  plannerProjectUrl?: string;
+  /** Persisted OpenCode/VS Code worker workspace binding (path) set when the project was created. */
+  workerWorkspacePath?: string;
   status: 'active' | 'archived';
   createdAt: number;
   updatedAt?: number;

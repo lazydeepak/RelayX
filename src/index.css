@@ -113,19 +113,25 @@
 
 .light [class*="bg-blue-500/10"],
 .light [class*="bg-blue-500/20"],
-.light [class*="bg-blue-600/20"] { background-color: #dbeafe !important; }
+.light [class*="bg-blue-600/20"],
+.light [class*="bg-blue-950"] { background-color: #dbeafe !important; }
 
 .light [class*="border-blue-500/20"],
-.light [class*="border-blue-500/30"] { border-color: #93c5fd !important; }
+.light [class*="border-blue-500/30"],
+.light [class*="border-blue-800"] { border-color: #93c5fd !important; }
 
+.light [class*="text-blue-300"],
 .light [class*="text-blue-400"] { color: #1e40af !important; }
 
 .light [class*="bg-purple-500/10"],
-.light [class*="bg-purple-500/20"] { background-color: #ede9fe !important; }
+.light [class*="bg-purple-500/20"],
+.light [class*="bg-violet-950"] { background-color: #ede9fe !important; }
 
-.light [class*="border-purple-500/20"] { border-color: #c4b5fd !important; }
+.light [class*="border-purple-500/20"],
+.light [class*="border-violet-800"] { border-color: #c4b5fd !important; }
 
-.light [class*="text-purple-400"] { color: #5b21b6 !important; }
+.light [class*="text-purple-400"],
+.light [class*="text-violet-300"] { color: #5b21b6 !important; }
 
 /* Section headers / icon accents (indigo) — AA ≥ 4.5:1 on light slate cards */
 .light [class*="text-indigo-400"] { color: #3730a3 !important; }
