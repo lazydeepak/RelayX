@@ -41,7 +41,7 @@ function setupTray(): void {
   try {
     const icon = createTrayIcon();
     tray = new Tray(icon);
-    tray.setToolTip('Relay — Control Plane Active');
+    tray.setToolTip('RelayX — Control Plane Active');
 
     const updateMenu = async () => {
       let activeCount = 0;
@@ -56,11 +56,11 @@ function setupTray(): void {
       }
 
       const contextMenu = Menu.buildFromTemplate([
-        { label: 'Relay Control Plane', enabled: false },
+        { label: 'RelayX Control Plane', enabled: false },
         { label: `Active Pairs: ${activeCount} | Working: ${workingWorkers}`, enabled: false },
         { type: 'separator' },
         {
-          label: 'Show Relay Window',
+          label: 'Show RelayX Window',
           click: () => {
             if (mainWindow) {
               if (mainWindow.isMinimized()) mainWindow.restore();
@@ -86,7 +86,7 @@ function setupTray(): void {
         },
         { type: 'separator' },
         {
-          label: 'Quit Relay',
+          label: 'Quit RelayX',
           click: () => {
             app.quit();
           },
@@ -107,7 +107,7 @@ function initializeEngine(): RelayApiService {
   fs.mkdirSync(userDataPath, { recursive: true });
 
   const dbPath = path.join(userDataPath, 'relay.sqlite');
-  console.log(`[Relay Engine] Initializing durable SQLite database at: ${dbPath}`);
+  console.log(`[RelayX Engine] Initializing durable SQLite database at: ${dbPath}`);
 
   sqliteDb = new SqliteRelayDatabase(dbPath);
   relayEngine = new RelayEngine(sqliteDb);
@@ -140,7 +140,7 @@ function createWindow(): void {
     height: 860,
     minWidth: 980,
     minHeight: 640,
-    title: 'Relay',
+    title: 'RelayX',
     titleBarStyle: isMac ? 'hiddenInset' : 'default',
     trafficLightPosition: isMac ? { x: 18, y: 18 } : undefined,
     backgroundColor: '#020617', // slate-950
@@ -170,16 +170,16 @@ function createWindow(): void {
   const devServerUrl = process.env.VITE_DEV_SERVER_URL;
 
   if (isDev && devServerUrl) {
-    console.log(`[Relay Electron] Starting in DEVELOPMENT mode, connecting to Vite dev server: ${devServerUrl}`);
+    console.log(`[RelayX Electron] Starting in DEVELOPMENT mode, connecting to Vite dev server: ${devServerUrl}`);
     mainWindow.loadURL(devServerUrl).catch((err) => {
-      console.warn(`[Relay Electron] Initial loadURL failed (${err.message}). Retrying with hostname fallback in 1s...`);
+      console.warn(`[RelayX Electron] Initial loadURL failed (${err.message}). Retrying with hostname fallback in 1s...`);
       const fallbackUrl = devServerUrl.includes('localhost')
         ? devServerUrl.replace('localhost', '127.0.0.1')
         : devServerUrl.replace('127.0.0.1', 'localhost');
       setTimeout(() => {
         mainWindow?.loadURL(devServerUrl).catch(() => {
           mainWindow?.loadURL(fallbackUrl).catch((retryErr) => {
-            console.error('[Relay Electron] Dev server connection failed:', retryErr);
+            console.error('[RelayX Electron] Dev server connection failed:', retryErr);
           });
         });
       }, 1000);
@@ -194,11 +194,11 @@ function createWindow(): void {
     const resolvedPath = candidatePaths.find((p) => fs.existsSync(p));
 
     if (resolvedPath) {
-      console.log(`[Relay Electron] Starting in PRODUCTION mode, loading local assets from: ${resolvedPath}`);
+      console.log(`[RelayX Electron] Starting in PRODUCTION mode, loading local assets from: ${resolvedPath}`);
       mainWindow.loadFile(resolvedPath);
     } else {
       console.error(
-        `[Relay Electron] Fatal: Could not locate compiled dist/index.html in any candidate path:\n${candidatePaths.join('\n')}`,
+        `[RelayX Electron] Fatal: Could not locate compiled dist/index.html in any candidate path:\n${candidatePaths.join('\n')}`,
       );
     }
   }
@@ -227,9 +227,9 @@ if (!gotSingleInstanceLock) {
     if (relayEngine) {
       try {
         const report = await relayEngine.recoverOnStartup();
-        console.log('[Relay Engine] Startup crash recovery complete:', report);
+        console.log('[RelayX Engine] Startup crash recovery complete:', report);
       } catch (err) {
-        console.error('[Relay Engine] Startup recovery error:', err);
+        console.error('[RelayX Engine] Startup recovery error:', err);
       }
 
       // Phase 8: Start continuous background supervision loop
@@ -265,9 +265,9 @@ if (!gotSingleInstanceLock) {
     if (sqliteDb && sqliteDb.db) {
       try {
         sqliteDb.db.close();
-        console.log('[Relay Engine] SQLite database closed gracefully.');
+        console.log('[RelayX Engine] SQLite database closed gracefully.');
       } catch (err) {
-        console.error('[Relay Engine] Error closing SQLite database:', err);
+        console.error('[RelayX Engine] Error closing SQLite database:', err);
       }
     }
   });

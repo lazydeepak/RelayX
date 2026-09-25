@@ -38,8 +38,8 @@ describe('UI pair-modal filter invariants', () => {
   });
 
   it('duplicate titles distinguishable by external snippet', () => {
-    const a = { name: 'Relay', externalSessionId: 'sess-abc-123' };
-    const b = { name: 'Relay', externalSessionId: 'sess-xyz-456' };
+    const a = { name: 'RelayX', externalSessionId: 'sess-abc-123' };
+    const b = { name: 'RelayX', externalSessionId: 'sess-xyz-456' };
     assert.notStrictEqual(a.externalSessionId, b.externalSessionId);
   });
 

@@ -152,7 +152,7 @@ export default function App() {
       setAttentionItems(attList);
       setAppStatus(status);
     } catch (err) {
-      console.error('Failed to load Relay state from bridge:', err);
+      console.error('Failed to load RelayX state from bridge:', err);
     }
   }, []);
 

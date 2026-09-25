@@ -229,7 +229,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <div className="p-3 rounded-lg bg-slate-950/40 backdrop-blur-sm border border-slate-800/80">
               <span className="font-semibold text-slate-200 block mb-1">Observable Evidence Rule</span>
               <p className="text-slate-400 text-[11px]">
-                Relay never infers success from an attempted click. Visible button states and response start are verified.
+                RelayX never infers success from an attempted click. Visible button states and response start are verified.
               </p>
             </div>
 

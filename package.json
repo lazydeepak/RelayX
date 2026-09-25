@@ -23,7 +23,7 @@
   },
   "build": {
     "appId": "com.relay.desktop",
-    "productName": "Relay",
+    "productName": "RelayX",
     "directories": {
       "output": "release"
     },

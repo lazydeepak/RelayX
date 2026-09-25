@@ -47,7 +47,7 @@ describe('Phase 8 & Phase 9 — Background Supervision & Crash/Restart Recovery'
           windowTitle: 'OpenCode — [sess_recover] /repo',
           isWorking: this.isWorking,
           isComplete: this.isComplete,
-          lastResponseSnippet: this.isComplete ? 'Feature refactored while Relay was offline.' : undefined,
+          lastResponseSnippet: this.isComplete ? 'Feature refactored while RelayX was offline.' : undefined,
           composerVisible: true,
           composerHasFocus: true,
           sendButtonVisible: true,
@@ -80,7 +80,7 @@ describe('Phase 8 & Phase 9 — Background Supervision & Crash/Restart Recovery'
     worker.recordObservationSuccess('working');
     await db.runtimes.save(worker);
 
-    // Worker completes while Relay is shut down!
+    // Worker completes while RelayX is shut down!
     provider1.isWorking = false;
     provider1.isComplete = true;
 
@@ -97,6 +97,6 @@ describe('Phase 8 & Phase 9 — Background Supervision & Crash/Restart Recovery'
     const handoffs = await db.handoffs.findByAssignmentId(assignment.id);
     assert.equal(handoffs.length, 1);
     assert.equal(handoffs[0].status, 'ready');
-    assert.equal(handoffs[0].resultSummary, 'Feature refactored while Relay was offline.');
+    assert.equal(handoffs[0].resultSummary, 'Feature refactored while RelayX was offline.');
   });
 });

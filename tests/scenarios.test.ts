@@ -5,7 +5,7 @@ import { RelayEngine } from '../src/relay/application/RelayEngine.ts';
 import { MockProvider } from './MockProvider.ts';
 import { RuntimeNotAvailableError } from '../src/relay/domain/errors.ts';
 
-describe('Relay Architectural Scenarios & Recovery Invariants', () => {
+describe('RelayX Architectural Scenarios & Recovery Invariants', () => {
   let db: SqliteRelayDatabase;
   let engine: RelayEngine;
   let mockWorker: MockProvider;
@@ -20,7 +20,7 @@ describe('Relay Architectural Scenarios & Recovery Invariants', () => {
     engine.registerProvider(mockPlanner);
   });
 
-  it('Scenario 1: Worker finishes while Relay is offline / between checks', async () => {
+  it('Scenario 1: Worker finishes while RelayX is offline / between checks', async () => {
     const project = await engine.createProject('Offline Recovery Project');
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner Alpha');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker Beta');

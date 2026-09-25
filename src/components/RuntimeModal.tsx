@@ -227,7 +227,7 @@ export const RuntimeModal: React.FC<RuntimeModalProps> = ({
             <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 space-y-1 text-slate-400 text-[11px]">
               <p>• Scans macOS system process table for running application instances</p>
               <p>• Queries Accessibility API to verify presence of chat/editor windows</p>
-              <p>• Automatically binds session to Relay local database if found</p>
+              <p>• Automatically binds session to RelayX local database if found</p>
             </div>
 
             {discoveredSession && (

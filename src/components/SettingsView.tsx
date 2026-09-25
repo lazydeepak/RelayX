@@ -21,7 +21,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         <div>
           <h1 className="text-xl font-bold text-slate-100 flex items-center gap-2">
             <Settings className="w-5 h-5 text-slate-400" />
-            <span>Relay Control Plane Configuration</span>
+            <span>RelayX Control Plane Configuration</span>
           </h1>
           <p className="text-xs text-slate-400 mt-1">
             Engine policies, runtime environment, supervisor intervals, and macOS accessibility bindings
@@ -37,7 +37,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <span>Appearance &amp; Theme</span>
           </div>
           <p className="text-slate-400">
-            Choose Relay user interface theme mode. System follows macOS appearance automatically.
+            Choose RelayX user interface theme mode. System follows macOS appearance automatically.
           </p>
           <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-800">
             <button
@@ -126,7 +126,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <span>Durable Persistence Engine</span>
           </div>
           <p className="text-slate-400">
-            Relay uses high-performance SQLite with WAL journaling and strict foreign key integrity.
+            RelayX uses high-performance SQLite with WAL journaling and strict foreign key integrity.
           </p>
           <div className="space-y-2 pt-2 border-t border-slate-800 text-slate-300">
             <div className="flex justify-between">
@@ -268,7 +268,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <ShieldAlert className="w-4 h-4 text-amber-300 shrink-0 mt-0.5" />
               <div className="text-xs">
                 <strong className="font-semibold block text-amber-50">System Settings authorization required:</strong>
-                To enable visible UI control and Stop button verification, grant Relay or your Terminal Accessibility permissions under:
+                To enable visible UI control and Stop button verification, grant RelayX or your Terminal Accessibility permissions under:
                 <div className="font-mono bg-amber-950/60 px-2 py-1 rounded mt-1 text-amber-100 border border-amber-700/50">
                   System Settings &gt; Privacy &amp; Security &gt; Accessibility
                 </div>

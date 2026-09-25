@@ -274,7 +274,7 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
               <div className="space-y-2">
                 <h4 className="text-sm font-semibold text-slate-100">Select Local Folder</h4>
                 <p className="text-xs text-slate-400 max-w-xs mx-auto">
-                  Relay will resolve the path, git root, and then guide you through independent
+                  RelayX will resolve the path, git root, and then guide you through independent
                   planner (ChatGPT) and worker (OpenCode) discovery.
                 </p>
               </div>

@@ -15,7 +15,7 @@ import {
   AttentionItem,
 } from '../src/relay/domain/entities.ts';
 
-describe('Relay SQLite Persistence & Restart Verification', () => {
+describe('RelayX SQLite Persistence & Restart Verification', () => {
   it('persists and recovers domain resources across clean restarts', async () => {
     const testDbPath = join(tmpdir(), `relay_restart_test_${Date.now()}.sqlite`);
     if (existsSync(testDbPath)) unlinkSync(testDbPath);
@@ -66,7 +66,7 @@ describe('Relay SQLite Persistence & Restart Verification', () => {
       });
       await db1.events.save(event);
 
-      const attention = AttentionItem.create('info', 'startup', 'System Initialized', 'Relay started cleanly');
+      const attention = AttentionItem.create('info', 'startup', 'System Initialized', 'RelayX started cleanly');
       await db1.attention.save(attention);
 
       // Close connection (simulating unexpected termination / shutdown)

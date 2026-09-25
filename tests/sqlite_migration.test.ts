@@ -8,7 +8,7 @@ import { SqliteRelayDatabase } from '../src/relay/persistence/sqlite/SqliteDatab
 import { Pair, Project, RuntimeSession } from '../src/relay/domain/entities.ts';
 import { ProviderType } from '../src/relay/domain/types.ts';
 
-describe('Relay SQLite Migration & Legacy Schema Upgrade', () => {
+describe('RelayX SQLite Migration & Legacy Schema Upgrade', () => {
   it('migrates an old Relay database schema (missing canonical_path, git_root, archived_at, etc.), preserves data, and supports Add Project', async () => {
     const testDbPath = join(tmpdir(), `relay_legacy_migration_test_${Date.now()}.sqlite`);
     if (existsSync(testDbPath)) unlinkSync(testDbPath);

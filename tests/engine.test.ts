@@ -5,7 +5,7 @@ import { RelayEngine } from '../src/relay/application/RelayEngine.ts';
 import { MockProvider } from './MockProvider.ts';
 import { AmbiguousDeliveryResendError } from '../src/relay/domain/errors.ts';
 
-describe('Relay Engine Application Lifecycle & Supervision', () => {
+describe('RelayX Engine Application Lifecycle & Supervision', () => {
   let db: SqliteRelayDatabase;
   let engine: RelayEngine;
   let mockProvider: MockProvider;

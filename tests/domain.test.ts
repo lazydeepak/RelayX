@@ -18,7 +18,7 @@ import {
 } from '../src/relay/domain/errors.ts';
 import { ObservableEvidence } from '../src/relay/domain/types.ts';
 
-describe('Relay Domain Model & Invariants', () => {
+describe('RelayX Domain Model & Invariants', () => {
   it('enforces single timeout transitions to suspended, NOT permanently terminated', () => {
     const runtime = RuntimeSession.create('opencode', 'Worker-1', 'com.opencode.desktop');
     runtime.recordObservationSuccess('working');

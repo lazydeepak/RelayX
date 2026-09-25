@@ -44,7 +44,7 @@ async function main() {
         const attention = await db.attention.findOpen();
         const assignments = await db.assignments.findActive();
 
-        console.log('\n--- Relay Engine Status ---');
+        console.log('\n--- RelayX Engine Status ---');
         console.log(`Database: ${dbPath}`);
         console.log(`Pairs: ${pairs.length} total (${pairs.filter((p) => p.status === 'active').length} active)`);
         console.log(`Runtimes: ${runtimes.length} registered (${runtimes.filter((r) => r.status === 'working').length} working)`);
@@ -61,7 +61,7 @@ async function main() {
       }
 
       case 'supervise': {
-        console.log('Running Relay supervision tick...');
+        console.log('Running RelayX supervision tick...');
         const result = await engine.runSupervisionTick();
         console.log('Supervision Tick Complete:');
         console.log(JSON.stringify(result, null, 2));

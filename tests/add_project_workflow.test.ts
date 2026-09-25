@@ -6,7 +6,7 @@ import { SqliteRelayDatabase } from '../src/relay/persistence/sqlite/SqliteDatab
 import { ChatGPTProvider, OpenCodeProvider, VSCodeProvider } from '../src/relay/providers/adapters.ts';
 import { ProjectId } from '../src/relay/domain/types.ts';
 
-describe('Relay Add Project Workflow Verification', () => {
+describe('RelayX Add Project Workflow Verification', () => {
   let db: SqliteRelayDatabase;
   let engine: RelayEngine;
   let service: RelayApiService;
