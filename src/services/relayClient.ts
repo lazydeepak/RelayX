@@ -102,27 +102,18 @@ class RelayService {
     await this.db.runtimes.save(vscodeWorker);
 
     // 3. Pairs
-    const pair1 = await this.engine.createPair(
+    // Seed runtimes are simulated and have no provider-verified pre-pair
+    // evidence. Keep the historical demo pairs unassigned rather than
+    // selecting or dispatching unverified sessions.
+    await this.engine.createPair(
       proj1.id,
       'Pair A: Architecture & Core Engine',
-      chatgptPlanner.id,
-      opencodeWorker.id,
     );
 
-    const pair2 = await this.engine.createPair(
+    await this.engine.createPair(
       proj2.id,
       'Pair B: UI & Integration Supervision',
-      chatgptPlanner.id,
-      vscodeWorker.id,
     );
-
-    // 4. Initial Seed Assignment on Pair 1
-    const asgn1 = await this.engine.createAssignment(
-      pair1.id,
-      'Implement SQLite Repository Unit of Work',
-      'Implement durable schema migrations, transaction commits, and write test coverage for crash restarts.',
-    );
-    await this.engine.dispatchAssignment(asgn1.id);
 
     this.initialized = true;
   }

@@ -54,20 +54,18 @@ describe('Project Binding Persistence', () => {
     assert.strictEqual(project.plannerProjectUrl, plannerUrl);
     assert.strictEqual(project.workerWorkspacePath, canonicalPath);
 
-    // Runtime identities are persisted on the registered sessions.
+    // Runtime identities are persisted on the registered sessions. Setup pairs
+    // nothing: the wizard's session id is caller input, not verified provider
+    // evidence, so pairing waits for the discovery/adoption path.
     const pairs = await db.pairs.findByProjectId(res.projectId as any);
-    assert.strictEqual(pairs.length, 1);
-    const pair = pairs[0];
+    assert.deepStrictEqual(pairs, []);
 
-    if (pair.plannerSessionId) {
-      const planner = await db.runtimes.findById(pair.plannerSessionId);
-      assert.ok(planner);
-      assert.strictEqual(planner.providerType, 'chatgpt');
-      assert.strictEqual(planner.externalProjectRef, plannerUrl);
-    }
+    const runtimes = await db.runtimes.findAll();
+    const planner = runtimes.find((r) => r.providerType === 'chatgpt');
+    assert.ok(planner);
+    assert.strictEqual(planner.externalProjectRef, plannerUrl);
 
-    assert.ok(pair.workerSessionId);
-    const worker = await db.runtimes.findById(pair.workerSessionId);
+    const worker = runtimes.find((r) => r.providerType === 'opencode');
     assert.ok(worker);
     assert.strictEqual(worker.providerType, 'opencode');
     assert.strictEqual(worker.externalSessionId, workerSessionId);

@@ -9,6 +9,7 @@ import {
   RuntimeTargetDescriptor,
 } from '../src/relay/providers/interfaces.ts';
 import { RuntimeSessionId } from '../src/relay/domain/types.ts';
+import { RuntimeProjectAssociation } from '../src/relay/domain/entities.ts';
 
 /**
  * Provider stub that lets a test inject identity-shaped evidence details into
@@ -152,9 +153,21 @@ describe('inspectRuntime persists identity only from an authoritative session ID
     const { runtime } = await engine.discoverRuntime('opencode');
     assert.equal(runtime.externalSessionId, 'ses_A');
 
-    // Bind it to a pair as the worker.
+    // Bind it to a pair as the worker. Pairing requires verified, project-scoped
+    // evidence, so record the evidence that adoption of this discovered session
+    // would have produced for the target project.
     const project = await engine.createProject('Identity Conflict Project');
     const planner = await engine.registerRuntimeSession('chatgpt', 'ChatGPT Planner');
+    await db.associations.save(
+      RuntimeProjectAssociation.create(
+        runtime.id,
+        project.id,
+        'ses_A',
+        'verified',
+        'adoption',
+        'opencode',
+      ),
+    );
     const pair = await engine.createPair(project.id, 'Default Pair', planner.id, runtime.id);
     assert.equal(pair.workerSessionId, runtime.id);
 

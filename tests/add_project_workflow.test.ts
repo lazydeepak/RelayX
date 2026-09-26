@@ -113,16 +113,18 @@ describe('RelayX Add Project Workflow Verification', () => {
       assert.strictEqual(project?.canonicalPath, projectPath);
       assert.strictEqual(project?.gitRoot, gitRoot);
 
-      // Verify Default Pair Bindings
+      // Setup registers the runtimes but must NOT pair them: the session ids in
+      // the wizard payload are caller input, not provider-verified evidence, so
+      // pairing is deferred to the discovery/adoption path.
       const pairs = await db.pairs.findByProjectId(res.projectId as ProjectId);
-      assert.strictEqual(pairs.length, 1);
-      const pair = pairs[0];
-      
-      const planner = await db.runtimes.findById(pair.plannerSessionId!);
+      assert.deepStrictEqual(pairs, []);
+
+      const runtimes = await db.runtimes.findAll();
+      const planner = runtimes.find((r) => r.providerType === 'chatgpt');
       assert.strictEqual(planner?.providerType, 'chatgpt');
       assert.strictEqual((planner?.lastEvidence?.details as any)?.projectUrl, 'https://chatgpt.com/p/alpha-id-1');
 
-      const worker = await db.runtimes.findById(pair.workerSessionId!);
+      const worker = runtimes.find((r) => r.providerType === 'opencode');
       assert.strictEqual(worker?.providerType, 'opencode');
       assert.strictEqual((worker?.lastEvidence?.details as any)?.sessionId, 'session_real_99');
     });
@@ -137,10 +139,10 @@ describe('RelayX Add Project Workflow Verification', () => {
       assert.ok(project);
       assert.strictEqual(project.canonicalPath, projectPath);
 
-      const pairs = await repos.pairs.findByProjectId(project.id);
-      assert.strictEqual(pairs.length, 1);
-      
-      const planner = await repos.runtimes.findById(pairs[0].plannerSessionId!);
+      // The registered runtimes survive the restart even though setup pairs
+      // nothing, so the saved bindings are readable without a pair.
+      const runtimes = await repos.runtimes.findAll();
+      const planner = runtimes.find((r) => r.providerType === 'chatgpt');
       assert.strictEqual((planner?.lastEvidence?.details as any)?.projectUrl, 'https://chatgpt.com/p/alpha-id-1');
     });
   });

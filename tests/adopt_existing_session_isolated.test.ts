@@ -5,6 +5,7 @@ import { RelayApiService } from '../src/relay/application/RelayApiService.ts';
 import { RelayEngine } from '../src/relay/application/RelayEngine.ts';
 import { Project, RuntimeSession } from '../src/relay/domain/entities.ts';
 import { ProjectId, ProviderType } from '../src/relay/domain/types.ts';
+import { makeConfirmingOpenCodeProvider } from './support/authoritativeProvider.ts';
 
 // Isolated workspace matching the service-tested workspace.
 const DISPOSABLE_WORKSPACE = '/tmp/opencode_disposable_workspace';
@@ -14,6 +15,9 @@ describe('adoptOpenCodeSession: isolated adoption of existing session', () => {
   it('binds the discovered session id to a runtime in an isolated DB and verifies persistence', async () => {
     const db = new MemoryRelayDatabase();
     const engine = new RelayEngine(db);
+    // Adoption needs a confirmation authority; this test targets identity
+    // semantics, so register a provider that confirms the session.
+    engine.registerProvider(makeConfirmingOpenCodeProvider());
     const api = new RelayApiService(db, engine);
 
     // Project aligned with the disposable workspace.
@@ -52,6 +56,9 @@ describe('adoptOpenCodeSession: isolated adoption of existing session', () => {
   it('rejects adoption when the session is already bound to a different workspace', async () => {
     const db = new MemoryRelayDatabase();
     const engine = new RelayEngine(db);
+    // Adoption needs a confirmation authority; this test targets identity
+    // semantics, so register a provider that confirms the session.
+    engine.registerProvider(makeConfirmingOpenCodeProvider());
     const api = new RelayApiService(db, engine);
 
     await db.projects.save(

@@ -6,6 +6,7 @@ import { RelayEngine } from '../src/relay/application/RelayEngine.ts';
 import { Project, Pair, RuntimeSession, RelayEvent } from '../src/relay/domain/entities.ts';
 import { ProjectId, ProviderType, RuntimeSessionId } from '../src/relay/domain/types.ts';
 import type { WorkerChoice } from '../src/types/relayApi.ts';
+import { makeConfirmingOpenCodeProvider } from './support/authoritativeProvider.ts';
 
 const makeDb = () => new MemoryRelayDatabase();
 
@@ -333,6 +334,9 @@ describe('adoptOpenCodeSession — register a discovered authoritative session a
   it('creates a runtime carrying the authoritative ses_ id and is idempotent', async () => {
     const db = makeDb();
     const engine = new RelayEngine(db);
+    // Adoption requires a confirmation authority; this test targets identity
+    // and idempotency, so register a provider that confirms the session.
+    engine.registerProvider(makeConfirmingOpenCodeProvider());
     const api = new RelayApiService(db, engine);
     await seedProject(db);
 

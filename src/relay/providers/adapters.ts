@@ -11,6 +11,7 @@ import {
   RuntimeTargetDescriptor,
   DeliveryInstructionRequest,
   DeliveryInstructionResult,
+  ProviderSessionConfirmation,
 } from './interfaces.ts';
 import {
   OpenCodeServiceError,
@@ -2858,7 +2859,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
   /**
    * Correlates authoritative session records with visible UI runtimes and
    * produces `RuntimeInspectionResult`s. UI correlation is presentation/focus
-   * evidence only — the accepted binding is always the authoritative id.
+   * evidence only — authoritative pairing requires a persisted/explicit session id.
    */
   private matchAuthoritativeSessions(
     authoritative: Array<{ id: string; directory?: string; projectId?: string }>,
@@ -2910,7 +2911,12 @@ export class OpenCodeProvider extends BaseMacOSProvider {
         rejectionReason = `Directory "${persDir}" does not match projectPath "${projectPath}" or gitRoot "${gitRoot}"`;
       }
 
-      const accepted = matchScore > 0;
+      const eligible = matchScore > 0;
+
+      // `eligible` = project/directory match only; NOT session pairing.
+      // Authoritative pairing requires an explicit selected session id
+      // (persisted pair or user adoption) — never inferred from ordering,
+      // recency, or score tie-breaking.
 
       // Correlate with UI runtimes (secondary presentation/focus surface)
       let correlatedRuntime: RuntimeInspectionResult | undefined;
@@ -2938,11 +2944,12 @@ export class OpenCodeProvider extends BaseMacOSProvider {
         hasUiCorrelation: !!correlatedRuntime,
         correlatedPid: correlatedRuntime?.applicationPid,
         correlatedWindowTitle: correlatedRuntime?.windowTitle,
-        accepted,
+        eligible,
+        resolutionStatus: eligible ? 'eligible' : (rejectionReason ? 'rejected' : 'unmatched'),
         rejectionReason,
       });
 
-      if (accepted) {
+      if (eligible) {
         const evidence: ObservableEvidence = correlatedRuntime?.evidence || {
           id: `ev_persisted_match_${Date.now()}`,
           timestamp: Date.now(),
@@ -3000,6 +3007,99 @@ export class OpenCodeProvider extends BaseMacOSProvider {
     const topTieCount = sortedResults.filter((r: any) => ((r.evidence?.details as any)?.matchScore || 0) === topScore).length;
     const ambiguous = topTieCount > 1 && sortedResults.length > 1;
     return { results: ambiguous ? [] : sortedResults, candidates, ambiguous };
+  }
+
+  /** CLI-backed session creation (correct auth mechanism for v2.0.16). */
+  public async createWorkerSession(
+    projectPath: string,
+    name?: string,
+  ): Promise<{ sessionId: string; workspaceDir: string; error?: string }> {
+    const cliPaths = [
+      '/Users/lazydeepak/Library/Application Support/ai.opencode.desktop/cli/2.0.16/opencode-cli',
+      'opencode-cli',
+    ];
+    const { spawnSync } = await import('child_process');
+    const fs = await import('fs');
+    const cli = cliPaths.find((p) => {
+      try { return fs.existsSync(p); } catch { return false; }
+    }) || 'opencode-cli';
+    const payload = JSON.stringify({
+      id: null,
+      title: name?.trim() || 'OpenCode Worker Session',
+      agent: 'build',
+      model: null,
+      location: { directory: projectPath },
+      metadata: null,
+      permissions: null,
+    });
+    try {
+      const { spawnSync } = await import('child_process');
+      const res = spawnSync(cli, ['api', 'POST', '/api/session', '-d', payload], {
+        encoding: 'utf8',
+        timeout: 30000,
+        maxBuffer: 10 * 1024 * 1024,
+        env: process.env,
+      });
+      if (res.error) {
+        return { sessionId: '', workspaceDir: '', error: res.error.message };
+      }
+      const stdout = res.stdout || '';
+      const parsed = JSON.parse(stdout);
+      const data = parsed?.data ?? parsed;
+      const sessionId = data?.id ?? '';
+      const workspaceDir = typeof data?.location?.directory === 'string' ? data.location.directory : projectPath;
+      if (!sessionId || typeof sessionId !== 'string' || !sessionId.startsWith('ses_')) {
+        return { sessionId: sessionId || '', workspaceDir, error: `Invalid session id: ${String(sessionId).slice(0, 40)}` };
+      }
+      return { sessionId, workspaceDir };
+    } catch (err: any) {
+      return { sessionId: '', workspaceDir: '', error: err?.message ?? String(err) };
+    }
+  }
+
+  /** CLI-backed confirmation (uses service-authenticated CLI instead of manual Basic). */
+  public async confirmSessionForProject(
+    sessionId: string,
+    projectPath: string,
+  ): Promise<ProviderSessionConfirmation> {
+    // CLI-backed verification (service-authenticated; avoids manual Basic 401)
+    const cliPaths = [
+      '/Users/lazydeepak/Library/Application Support/ai.opencode.desktop/cli/2.0.16/opencode-cli',
+      'opencode-cli',
+    ];
+    const { spawnSync } = await import('child_process');
+    const fs = await import('fs');
+    const cli = cliPaths.find((p) => {
+      try { return fs.existsSync(p); } catch { return false; }
+    }) || 'opencode-cli';
+    try {
+      const { spawnSync } = await import('child_process');
+      const res = spawnSync(cli, ['api', 'GET', `/api/session?directory=${encodeURIComponent(projectPath)}&limit=10`], {
+        encoding: 'utf8',
+        timeout: 15000,
+        maxBuffer: 5 * 1024 * 1024,
+        env: process.env,
+      });
+      if (res.error || res.status !== 0 || !res.stdout) {
+        return { confirmed: false };
+      }
+      const parsed = JSON.parse(res.stdout);
+      const sessions = parsed?.data ?? parsed?.sessions ?? parsed;
+      const exact = Array.isArray(sessions)
+        ? sessions.find((s: any) => s?.id === sessionId && ((s?.evidence?.details?.authoritativeSessionId === sessionId) || (s?.id === sessionId)))
+        : null;
+      if (exact) {
+        return {
+          confirmed: true,
+          externalSessionId: sessionId,
+          projectPath,
+          evidence: exact.evidence || { details: { authoritativeSessionId: sessionId } },
+        };
+      }
+      return { confirmed: false };
+    } catch {
+      return { confirmed: false };
+    }
   }
 
   /**
@@ -3089,7 +3189,10 @@ export class OpenCodeProvider extends BaseMacOSProvider {
           rejectionReason = `Directory "${persDir}" does not match projectPath "${projectPath}" or gitRoot "${gitRoot}"`;
         }
 
-        const accepted = matchScore > 0;
+        const eligible = matchScore > 0;
+
+        // `eligible` = project/directory match only; NOT session pairing.
+        // Authoritative pairing requires an explicit selected session id.
 
         // Correlate with UI runtimes (secondary presentation/focus surface)
         let correlatedRuntime: RuntimeInspectionResult | undefined;
@@ -3117,11 +3220,12 @@ export class OpenCodeProvider extends BaseMacOSProvider {
           hasUiCorrelation: !!correlatedRuntime,
           correlatedPid: correlatedRuntime?.applicationPid,
           correlatedWindowTitle: correlatedRuntime?.windowTitle,
-          accepted,
+          eligible,
+          resolutionStatus: eligible ? 'eligible' : (rejectionReason ? 'rejected' : 'unmatched'),
           rejectionReason,
         });
 
-        if (accepted) {
+        if (eligible) {
           const evidence: ObservableEvidence = correlatedRuntime?.evidence || {
             id: `ev_persisted_match_${Date.now()}`,
             timestamp: Date.now(),
@@ -3231,7 +3335,10 @@ export class OpenCodeProvider extends BaseMacOSProvider {
         }
       }
 
-      const accepted = matchScore > 0;
+      const eligible = matchScore > 0;
+
+      // `eligible` = workspace/project match only; window-derived ids are
+      // NON-authoritative and never establish pairing by themselves.
       candidates.push({
         sessionId: info.sessionId,
         windowTitle,
@@ -3241,11 +3348,12 @@ export class OpenCodeProvider extends BaseMacOSProvider {
         normGitRoot,
         matchScore,
         matchedVia,
-        accepted,
+        eligible,
+        resolutionStatus: eligible ? 'eligible' : (rejectionReason ? 'rejected' : 'unmatched'),
         rejectionReason,
       });
 
-      if (accepted) {
+      if (eligible) {
         session.evidence.details = {
           ...session.evidence.details,
           // Window titles are NON-authoritative evidence: record the observed

@@ -319,19 +319,21 @@ describe('independent planner/worker discovery stages', () => {
     assert.equal(res.success, true);
     assert.ok(res.projectId);
 
+    // Setup persists the discovered bindings as registered runtimes but pairs
+    // nothing: the ids arrive as wizard payload, and pairing requires a verified
+    // provider association, which the adoption path records.
     const pairs = await db.pairs.findByProjectId(res.projectId as any);
-    assert.equal(pairs.length, 1);
-    assert.ok(pairs[0].plannerSessionId, 'planner binding persisted');
-    assert.ok(pairs[0].workerSessionId, 'worker binding persisted');
+    assert.deepStrictEqual(pairs, []);
 
-    const persistedPlanner = await db.runtimes.findById(pairs[0].plannerSessionId!);
+    const runtimes = await db.runtimes.findAll();
+    const persistedPlanner = runtimes.find((r) => r.providerType === 'chatgpt');
     assert.equal(persistedPlanner?.providerType, 'chatgpt');
     assert.equal(
       (persistedPlanner?.lastEvidence?.details as any)?.projectUrl,
       PLANNER_URL,
     );
 
-    const persistedWorker = await db.runtimes.findById(pairs[0].workerSessionId!);
+    const persistedWorker = runtimes.find((r) => r.providerType === 'opencode');
     assert.equal(persistedWorker?.providerType, 'opencode');
     assert.equal(
       (persistedWorker?.lastEvidence?.details as any)?.sessionId,

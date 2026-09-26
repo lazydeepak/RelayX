@@ -42,6 +42,13 @@ export interface DeliveryInstructionResult {
   evidence: ObservableEvidence;
 }
 
+export interface ProviderSessionConfirmation {
+  confirmed: boolean;
+  externalSessionId?: string | null;
+  projectPath?: string | null;
+  evidence?: ObservableEvidence;
+}
+
 export interface IRuntimeProvider {
   readonly providerType: ProviderType;
   readonly integrationStatus: ProviderIntegrationStatus;
@@ -53,4 +60,23 @@ export interface IRuntimeProvider {
   detectWorkingState(sessionId: RuntimeSessionId): Promise<{ isWorking: boolean; evidence?: ObservableEvidence }>;
   detectCompletionState(sessionId: RuntimeSessionId): Promise<{ isComplete: boolean; responseSummary?: string; evidence?: ObservableEvidence }>;
   captureEvidence(sessionId: RuntimeSessionId, action: string): Promise<ObservableEvidence>;
+  /**
+   * Optional reconciliation of an uncertain delivery.
+   * Must not invent delivery state; must report evidence if available.
+   */
+  reconcileDispatch?(request: { sessionId: RuntimeSessionId; deliveryId?: string; instructionSnippet?: string; externalSessionId?: string | null; idempotencyKey?: string }): Promise<{ outcome: 'delivered' | 'not_delivered' | 'supporting_evidence_only' | 'unknown' | 'unsupported'; evidence?: ObservableEvidence; reason?: string }>;
+  /**
+   * Optional read-only capability for confirming that a caller-supplied
+   * session id exists in a specific provider workspace. A missing capability
+   * must not be treated as confirmation.
+   */
+  confirmSessionForProject?(
+    sessionId: string,
+    projectPath: string,
+  ): Promise<ProviderSessionConfirmation>;
+
+  createWorkerSession?(
+    projectPath: string,
+    name?: string,
+  ): Promise<{ sessionId: string; workspaceDir: string; error?: string }>;
 }

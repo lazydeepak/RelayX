@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import { MemoryRelayDatabase } from '../src/relay/persistence/memory/MemoryDatabase.ts';
 import { RelayApiService } from '../src/relay/application/RelayApiService.ts';
 import { RelayEngine } from '../src/relay/application/RelayEngine.ts';
-import { Project, Pair, RuntimeSession, RelayEvent } from '../src/relay/domain/entities.ts';
+import { Project, Pair, RuntimeSession, RelayEvent, RuntimeProjectAssociation } from '../src/relay/domain/entities.ts';
 import { ProjectId, ProviderType } from '../src/relay/domain/types.ts';
 import { normalizeChatProjectSlug } from '../src/relay/application/RelayApiService.ts';
 
@@ -38,6 +38,30 @@ const makeRuntime = async (
   return r;
 };
 
+/**
+ * Records verified provider evidence for a session, as discovery/adoption
+ * would. Pairing requires this: a runtime's own fields are not proof of
+ * project membership.
+ */
+const authorize = async (
+  db: MemoryRelayDatabase,
+  projectId: ProjectId,
+  runtime: RuntimeSession,
+  externalSessionId: string,
+  providerType: ProviderType,
+) => {
+  await db.associations.save(
+    RuntimeProjectAssociation.create(
+      runtime.id,
+      projectId,
+      externalSessionId,
+      'verified',
+      'adoption',
+      providerType,
+    ),
+  );
+};
+
 describe('existing/existing pairing flow (project-owned registry + manual fallback)', () => {
   it('selects an existing registry conversation URL and an existing OpenCode session, creates pair, and reloads both', async () => {
     const db = new MemoryRelayDatabase();
@@ -55,6 +79,10 @@ describe('existing/existing pairing flow (project-owned registry + manual fallba
       sessionId: 'ses_flow_1',
       projectRef: '/dev/flow',
     });
+    // Both sessions are already known to this project, so record the evidence
+    // that authorizes pairing them.
+    await authorize(db, 'proj-flow' as ProjectId, planner, 'conv-flow-1', 'chatgpt');
+    await authorize(db, 'proj-flow' as ProjectId, worker, 'ses_flow_1', 'opencode');
 
     // Registry observation: same conversation also seen in event evidence.
     const evt = RelayEvent.create('runtime', planner.id, 'runtime.observed', {
@@ -116,6 +144,7 @@ describe('existing/existing pairing flow (project-owned registry + manual fallba
       sessionId: 'ses_flow_1',
       projectRef: '/dev/flow',
     });
+    await authorize(db, 'proj-flow' as ProjectId, worker, 'ses_flow_1', 'opencode');
 
     // A different conversation is only observed (in event evidence), not bound.
     const evtObserved = RelayEvent.create('runtime', planner.id, 'runtime.observed', {
@@ -166,6 +195,7 @@ describe('existing/existing pairing flow (project-owned registry + manual fallba
       sessionId: 'ses_flow_1',
       projectRef: '/dev/flow',
     });
+    await authorize(db, 'proj-flow' as ProjectId, worker, 'ses_flow_1', 'opencode');
 
     // Registry empty (planner bound but no conversation id → no bound conversation, no events).
     const registry = await api.enumerateChatGPTConversations('proj-flow');
@@ -259,6 +289,7 @@ describe('existing/existing pairing flow (project-owned registry + manual fallba
       sessionId: 'ses_flow_2',
       projectRef: '/dev/flow',
     });
+    await authorize(db, 'proj-flow' as ProjectId, worker, 'ses_flow_2', 'opencode');
 
     const registry = await api.enumerateChatGPTConversations('proj-flow');
     // Registry reports truthfully: planner bound to conv-manual2 → 1 entry.

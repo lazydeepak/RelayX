@@ -116,9 +116,13 @@ describe('Electron IPC & RelayApiService Integration Tests', () => {
     const paused = await api.pausePair(targetPair.id);
     assert.equal(paused.status, 'paused');
 
-    // Resume pair
+    // Resume pair. The demo pair deliberately selects no runtime sessions, so
+    // it has no active assignment and resumes to 'idle' rather than 'active':
+    // a pair with no adopted worker cannot carry work.
     const resumed = await api.resumePair(targetPair.id);
-    assert.equal(resumed.status, 'active');
+    assert.equal(resumed.status, 'idle');
+    assert.equal(resumed.plannerSessionId, undefined);
+    assert.equal(resumed.workerSessionId, undefined);
 
     // Run supervision tick
     const tickResult = await api.runSupervisionTick();
