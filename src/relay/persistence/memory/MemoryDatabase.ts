@@ -323,6 +323,12 @@ export class MemoryDeliveryRepository implements IDeliveryRepository {
     return Array.from(this.items.values()).filter((d) => d.status === 'ambiguous');
   }
 
+  async findUnresolved(): Promise<Delivery[]> {
+    return Array.from(this.items.values())
+      .filter((d) => d.status === 'pending' || d.status === 'delivering')
+      .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
   async save(delivery: Delivery): Promise<void> {
     this.items.set(delivery.id, delivery);
   }

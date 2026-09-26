@@ -77,6 +77,17 @@ export interface IDeliveryRepository {
   findById(id: DeliveryId): Promise<Delivery | null>;
   findByAssignmentId(assignmentId: AssignmentId): Promise<Delivery[]>;
   findAmbiguous(): Promise<Delivery[]>;
+  /**
+   * Deliveries whose dispatch intent is durable but whose outcome was never recorded.
+   *
+   * These are the records stranded by a crash between the committed dispatch intent and
+   * the committed outcome. They are NOT yet known to be delivered, failed, or ambiguous —
+   * that is precisely what reconciliation must determine from provider evidence.
+   *
+   * A delivery leaves this set exactly once, when reconciliation commits a terminal
+   * disposition, which is what makes repeated reconciliation passes no-ops.
+   */
+  findUnresolved(): Promise<Delivery[]>;
   save(delivery: Delivery): Promise<void>;
 }
 

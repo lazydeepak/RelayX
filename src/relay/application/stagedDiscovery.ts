@@ -208,7 +208,7 @@ export function reduceOpenCodeDiscovery(
     }))
     .filter((s) => s.sessionId.length > 0);
 
-  if (result.success && workers.length > 0) {
+  if (result.success && workers.length > 0 && result.diagnostics?.ambiguous !== true) {
     const best = workers[0];
     return {
       ...prev,
@@ -223,6 +223,18 @@ export function reduceOpenCodeDiscovery(
         matchedVia: best.matchedVia,
         recordedAt: Date.now(),
       },
+    };
+  }
+
+  if (result.success && workers.length > 0 && result.diagnostics?.ambiguous === true) {
+    return {
+      ...prev,
+      status: 'failed',
+      workers,
+      selectedSessionId: undefined,
+      error: 'Multiple OpenCode sessions matched. Select one to confirm.',
+      diagnostics: result.diagnostics,
+      evidence: undefined,
     };
   }
 

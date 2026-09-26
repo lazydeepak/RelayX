@@ -53,6 +53,41 @@ const AUTHORITATIVE_ASSOCIATION_PROVENANCES: ReadonlySet<string> = new Set([
   'setup',
 ]);
 
+/** How a stranded dispatch intent was resolved. */
+export type DispatchReconciliationDispositionName =
+  | 'delivered_confirmed'
+  | 'not_delivered_confirmed'
+  | 'ambiguous_raised';
+
+export interface DispatchReconciliationDispositionRecord {
+  deliveryId: DeliveryId;
+  attemptId: AttemptId;
+  assignmentId: AssignmentId;
+  disposition: DispatchReconciliationDispositionName;
+  attentionItemId?: AttentionItemId;
+}
+
+export interface DispatchReconciliationReport {
+  examined: number;
+  deliveredConfirmed: number;
+  notDeliveredConfirmed: number;
+  ambiguousRaised: number;
+  dispositions: DispatchReconciliationDispositionRecord[];
+}
+
+/**
+ * The provider's answer about a stranded dispatch, normalized to three cases.
+ *
+ * `insufficient` deliberately covers EVERY non-authoritative answer, including a
+ * missing hook, an unregistered provider, and a thrown probe. A provider that cannot
+ * answer has not thereby proven anything, so an unresolved durable dispatch intent
+ * stays unresolved and becomes operator-visible rather than silently persisting.
+ */
+type DispatchProbeOutcome =
+  | { kind: 'delivered'; evidence: ObservableEvidence; reason?: string }
+  | { kind: 'not_delivered'; evidence?: ObservableEvidence; reason?: string }
+  | { kind: 'insufficient'; reason: string; evidence?: ObservableEvidence };
+
 export class RelayEngine {
   private readonly providers: Map<ProviderType, IRuntimeProvider> = new Map();
   private isSupervising = false;
@@ -860,6 +895,17 @@ export class RelayEngine {
     attempt: Attempt;
     delivery: Delivery;
   }> {
+    // NOTE: pre-dispatch reconciliation is deliberately NOT done here.
+    //
+    // `dispatchAssignment` is the generic send primitive, and T6 in core_slice1 pins its
+    // contract: given a stranded `delivering` record, it MUST refuse with
+    // DuplicateDeliveryAttemptError and MUST NOT call the provider. Reconciling inline
+    // would rewrite that record to a terminal state first and change a pinned contract.
+    //
+    // Reconciliation instead runs at the two points where new work is actually selected:
+    // `recoverOnStartup` (before any runtime observation) and `dispatchPlanFirstUnit`
+    // (before a Plan-First unit is sent). Both are engine-level, not controller-level.
+
     // ---- Phase 1: durable dispatch intent, COMMITTED before the external send ----
     // ATTEMPT_LIFECYCLE.md Case 1: if RelayX crashes during the provider call, the
     // prepared Attempt + delivering Delivery must already be durable, so recovery can
@@ -1406,6 +1452,307 @@ export class RelayEngine {
     return this.supervisionTimer !== null;
   }
 
+  /* --- Dispatch-Intent Reconciliation -------------------------------------
+   *
+   * The invariant implemented here:
+   *
+   *   Every durable dispatch intent must eventually reach a terminal,
+   *   operator-visible disposition. A Delivery must not remain `delivering`
+   *   indefinitely after process interruption without either being resolved
+   *   from authoritative evidence or surfaced as ambiguity requiring attention.
+   *
+   * ## The window this closes
+   *
+   * `dispatchAssignment` is deliberately three-phase (ATTEMPT_LIFECYCLE.md Case 1/2):
+   *
+   *   Phase 1  txn   prepared Attempt + Delivery(pending -> delivering)   COMMIT
+   *   Phase 2  ---   provider.deliverInstruction()   <-- EXTERNAL SIDE EFFECT
+   *   Phase 3  txn   confirmDelivered | markAmbiguous | markFailed      COMMIT
+   *
+   * A crash inside Phase 2 leaves `Attempt = prepared` and `Delivery = delivering`
+   * while the external worker may or may not have received the instruction. The
+   * duplicate-dispatch guards then correctly refuse to resend — which is safe, but on
+   * its own leaves the assignment wedged forever with no operator signal. Nothing
+   * previously resolved that state. `recoverOnStartup` inspected runtimes, never
+   * deliveries, and the provider's `reconcileDispatch` hook existed but was never called.
+   *
+   * ## Why this is an engine concern, not a controller concern
+   *
+   * The Plan-First controller deliberately observes a `prepared | running` attempt and
+   * never advances it (PLAN_FIRST_DOMAIN_FREEZE.md section G step 6). That is correct:
+   * the controller must not guess. Resolving dispatch ground truth is a different
+   * question from deciding whether work is complete, so it lives here, in the engine,
+   * and the controller is untouched.
+   *
+   * ## Why it is idempotent
+   *
+   * Idempotency is a consequence of the state machine, not a separate mechanism. A
+   * delivery is examined only while it is unresolved. Its terminal disposition and the
+   * Attention item (if any) are committed in ONE transaction, so the item can never be
+   * written twice, and once terminal the delivery is no longer returned by
+   * `findUnresolved()`. Repeated passes are therefore no-ops. Provider probes are
+   * read-only, so re-probing after a rolled-back transaction is safe.
+   *
+   * ## What it never does
+   *
+   * It never resends. It never creates an Assignment or an Attempt. It never advances a
+   * WorkUnit and never produces a VerificationResult. Completion remains reachable only
+   * through the normal worker-evidence plus verification path.
+   */
+
+  /**
+   * Drives every unresolved durable dispatch intent to a terminal disposition.
+   *
+   * @param options.assignmentId scope to one assignment (used before dispatching more work)
+   */
+  public async reconcileUnresolvedDispatches(
+    options: { assignmentId?: AssignmentId } = {},
+  ): Promise<DispatchReconciliationReport> {
+    const dispositions: DispatchReconciliationDispositionRecord[] = [];
+
+    const candidates = options.assignmentId
+      ? (await this.repos.deliveries.findByAssignmentId(options.assignmentId)).filter(
+          (d) => d.status === 'pending' || d.status === 'delivering',
+        )
+      : await this.repos.deliveries.findUnresolved();
+
+    for (const delivery of candidates) {
+      // Re-read under the current transaction boundary: another pass may have
+      // already driven this delivery terminal.
+      const current = await this.repos.deliveries.findById(delivery.id);
+      if (!current || (current.status !== 'pending' && current.status !== 'delivering')) {
+        continue;
+      }
+
+      const outcome = await this.probeDispatchOutcome(current);
+      const record = await this.commitDispatchDisposition(current, outcome);
+      dispositions.push(record);
+    }
+
+    return {
+      examined: candidates.length,
+      deliveredConfirmed: dispositions.filter((d) => d.disposition === 'delivered_confirmed').length,
+      notDeliveredConfirmed: dispositions.filter((d) => d.disposition === 'not_delivered_confirmed').length,
+      ambiguousRaised: dispositions.filter((d) => d.disposition === 'ambiguous_raised').length,
+      dispositions,
+    };
+  }
+
+  /**
+   * Asks the authoritative provider whether a stranded dispatch actually landed.
+   *
+   * Every failure mode here — absent runtime, unregistered provider, missing hook, or a
+   * thrown probe — resolves to `insufficient`. A provider that cannot answer has NOT
+   * thereby proven anything, and an unanswered question about a durable dispatch intent
+   * is itself unresolved work that an operator must see.
+   */
+  private async probeDispatchOutcome(delivery: Delivery): Promise<DispatchProbeOutcome> {
+    const attempt = await this.repos.attempts.findById(delivery.attemptId);
+    if (!attempt) {
+      return {
+        kind: 'insufficient',
+        reason: `Dispatch intent ${delivery.id} references missing attempt ${delivery.attemptId}`,
+      };
+    }
+
+    const runtime = await this.repos.runtimes.findById(delivery.targetRuntimeId);
+    if (!runtime) {
+      return {
+        kind: 'insufficient',
+        reason: `Dispatch intent ${delivery.id} targets unknown runtime ${delivery.targetRuntimeId}`,
+      };
+    }
+    if (runtime.status === 'terminated') {
+      return {
+        kind: 'insufficient',
+        reason: `Dispatch intent ${delivery.id} targets terminated runtime ${delivery.targetRuntimeId}`,
+      };
+    }
+
+    let provider: IRuntimeProvider;
+    try {
+      provider = this.getProvider(runtime.providerType);
+    } catch {
+      return {
+        kind: 'insufficient',
+        reason: `No provider registered for '${runtime.providerType}' to reconcile dispatch ${delivery.id}`,
+      };
+    }
+
+    if (typeof provider.reconcileDispatch !== 'function') {
+      return {
+        kind: 'insufficient',
+        reason: `Provider '${runtime.providerType}' exposes no dispatch reconciliation probe`,
+      };
+    }
+
+    try {
+      const result = await provider.reconcileDispatch({
+        sessionId: runtime.id,
+        deliveryId: delivery.id,
+        instructionSnippet: delivery.instructionSnippet,
+        // Frozen authority is preferred over the live runtime field: the attempt records
+        // what dispatch was actually authorized against (EXECUTION_AUTHORITY.md).
+        externalSessionId: attempt.externalSessionId ?? runtime.externalSessionId ?? null,
+        idempotencyKey: delivery.idempotencyKey,
+      });
+
+      // `delivered` is only admissible WITH verified observable evidence. Delivery
+      // requires verified observable evidence (entities.ts confirmDelivered), so a bare
+      // `delivered` with no evidence is not authoritative and must not be trusted.
+      if (result.outcome === 'delivered') {
+        if (!result.evidence) {
+          return {
+            kind: 'insufficient',
+            reason: result.reason ?? 'Provider reported delivered without observable evidence',
+          };
+        }
+        return { kind: 'delivered', evidence: result.evidence, reason: result.reason };
+      }
+
+      if (result.outcome === 'not_delivered') {
+        return { kind: 'not_delivered', evidence: result.evidence, reason: result.reason };
+      }
+
+      // supporting_evidence_only | unknown | unsupported — all insufficient.
+      return {
+        kind: 'insufficient',
+        evidence: result.evidence,
+        reason:
+          result.reason ??
+          `Provider reconciliation for ${delivery.id} was '${result.outcome}', which is not authoritative`,
+      };
+    } catch (err) {
+      return {
+        kind: 'insufficient',
+        reason: `Dispatch reconciliation probe failed for ${delivery.id}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      };
+    }
+  }
+
+  /**
+   * Commits one terminal disposition atomically.
+   *
+   * The Delivery, the Attempt, the Attention item and the events land in ONE
+   * transaction, so a crash mid-way can never leave an Attention item without its
+   * Delivery, or a terminal Delivery that no pass will ever revisit.
+   */
+  private async commitDispatchDisposition(
+    delivery: Delivery,
+    outcome: DispatchProbeOutcome,
+  ): Promise<DispatchReconciliationDispositionRecord> {
+    return this.repos.runInTransaction(async () => {
+      const attempt = await this.repos.attempts.findById(delivery.attemptId);
+
+      if (outcome.kind === 'delivered') {
+        // Outcome A — authoritative evidence says it landed.
+        // Same Assignment, same Attempt, same Delivery. No resend, no advancement.
+        delivery.confirmDelivered(outcome.evidence!);
+        await this.repos.deliveries.save(delivery);
+
+        if (attempt && attempt.status === 'prepared') {
+          // startRunning() is legal only from `prepared`; a `running` attempt is
+          // already in the executing state and must not be disturbed.
+          attempt.startRunning();
+          await this.repos.attempts.save(attempt);
+        }
+
+        await this.emitEvent('delivery', delivery.id, 'delivery.confirmed', {
+          actor: 'reconciler',
+          previousState: 'delivering',
+          newState: 'delivered',
+          evidence: outcome.evidence,
+          details: { attemptId: delivery.attemptId, reason: outcome.reason },
+        });
+
+        return {
+          deliveryId: delivery.id,
+          attemptId: delivery.attemptId,
+          assignmentId: delivery.assignmentId,
+          disposition: 'delivered_confirmed',
+        };
+      }
+
+      if (outcome.kind === 'not_delivered') {
+        // Outcome B — proven absent. The Attempt deliberately stays `prepared`
+        // (ATTEMPT_LIFECYCLE.md Case 1: intent stored, external send not performed).
+        // Reconciliation establishes truth; it does NOT resend. Normal dispatch
+        // machinery mints a fresh attempt with a fresh attemptNumber later.
+        delivery.markFailed(outcome.reason ?? 'Provider confirmed the dispatch did not occur', outcome.evidence);
+        await this.repos.deliveries.save(delivery);
+
+        await this.emitEvent('delivery', delivery.id, 'delivery.failed', {
+          actor: 'reconciler',
+          previousState: 'delivering',
+          newState: 'failed',
+          evidence: outcome.evidence,
+          details: { attemptId: delivery.attemptId, reason: outcome.reason, reconciled: true },
+        });
+
+        return {
+          deliveryId: delivery.id,
+          attemptId: delivery.attemptId,
+          assignmentId: delivery.assignmentId,
+          disposition: 'not_delivered_confirmed',
+        };
+      }
+
+      // Outcome C — insufficient evidence. Conservative, operator-visible, no resend.
+      const reason = outcome.reason ?? 'Dispatch outcome could not be established';
+      delivery.markAmbiguous(reason, outcome.evidence);
+      await this.repos.deliveries.save(delivery);
+
+      const assignment = await this.repos.assignments.findById(delivery.assignmentId);
+      const pair = assignment ? await this.repos.pairs.findById(assignment.pairId) : null;
+      const runtime = await this.repos.runtimes.findById(delivery.targetRuntimeId);
+
+      // AttentionItem carries only pairId/assignmentId, so the remaining durable
+      // context is recorded in the message, matching the existing ambiguous path.
+      const attention = AttentionItem.create(
+        'critical',
+        'ambiguous_delivery',
+        'Unresolved dispatch intent after restart',
+        [
+          `RelayX could not determine whether a dispatched instruction reached the worker.`,
+          `Project: ${pair?.projectId ?? 'unknown'}.`,
+          `Assignment: ${delivery.assignmentId}.`,
+          `Attempt: ${delivery.attemptId} (status ${attempt?.status ?? 'unknown'}).`,
+          `Delivery: ${delivery.id}.`,
+          `Target runtime: ${delivery.targetRuntimeId}${runtime ? ` (${runtime.name}, ${runtime.providerType})` : ''}.`,
+          `Idempotency key: ${delivery.idempotencyKey}.`,
+          `Reason: ${reason}.`,
+          `No instruction was resent. Confirm the worker state before any further dispatch.`,
+        ].join(' '),
+        {
+          pairId: pair?.id,
+          assignmentId: delivery.assignmentId,
+          suggestedAction:
+            'Inspect the worker session and determine whether the instruction was received, then confirm delivery or reset the attempt. Automated resend stays blocked.',
+          suggestedTier: 'tier_1_deterministic',
+        },
+      );
+      await this.repos.attention.save(attention);
+
+      await this.emitEvent('delivery', delivery.id, 'delivery.ambiguous', {
+        actor: 'reconciler',
+        previousState: 'delivering',
+        newState: 'ambiguous',
+        evidence: outcome.evidence,
+        details: { attemptId: delivery.attemptId, reason, attentionItemId: attention.id },
+      });
+
+      return {
+        deliveryId: delivery.id,
+        attemptId: delivery.attemptId,
+        assignmentId: delivery.assignmentId,
+        disposition: 'ambiguous_raised',
+        attentionItemId: attention.id,
+      };
+    });
+  }
+
   /**
    * Recovers state upon application startup or following an unexpected restart (Phase 9).
    * Reconciles in-flight assignments and runtimes against active desktop processes.
@@ -1414,7 +1761,14 @@ export class RelayEngine {
     reconciledAssignments: number;
     suspendedRuntimes: number;
     recoveredHandoffs: number;
+    dispatchIntents: DispatchReconciliationReport;
   }> {
+    // Dispatch ground truth is established FIRST. Reconciliation of a stranded
+    // delivery decides whether work is already in flight, so it must not be
+    // influenced by — or race with — runtime observation below, which can create
+    // handoffs and change assignment state.
+    const dispatchIntents = await this.reconcileUnresolvedDispatches();
+
     let reconciledAssignments = 0;
     let suspendedRuntimes = 0;
     let recoveredHandoffs = 0;
@@ -1469,7 +1823,7 @@ export class RelayEngine {
       }
     }
 
-    return { reconciledAssignments, suspendedRuntimes, recoveredHandoffs };
+    return { reconciledAssignments, suspendedRuntimes, recoveredHandoffs, dispatchIntents };
   }
 
   /* ================================================================== *
@@ -1532,6 +1886,17 @@ export class RelayEngine {
     }
 
     // --- 5/6. Derive the current unit. No stored cursor exists.
+    //
+    // Pre-dispatch reconciliation runs here, at the engine boundary, BEFORE any new work
+    // is selected for execution. This is the "before new dispatch selection" hook: a
+    // dispatch intent stranded by a previous crash is resolved to a terminal disposition
+    // first, so the engine never accumulates fresh work on top of an unresolved one.
+    //
+    // It is intentionally NOT inside the Plan-First domain and NOT inside
+    // `dispatchAssignment`. This is engine/dispatch reliability, and the Plan-First
+    // controller's own handling of `prepared | running` below is untouched.
+    await this.reconcileUnresolvedDispatches();
+
     const inFlight = units.find((u) => u.status === 'in_progress');
     if (inFlight) {
       if (!inFlight.assignmentId) {

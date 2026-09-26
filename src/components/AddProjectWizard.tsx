@@ -233,9 +233,15 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
   const opencodeStatusDot = () => {
     if (opencode.status === 'discovered') return <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />;
     if (opencode.status === 'discovering') return <Loader2 className="w-4 h-4 text-blue-400 shrink-0 animate-spin" />;
+    if (opencodeAmbiguous) return <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />;
     if (opencode.status === 'failed') return <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />;
     return <AlertCircle className="w-4 h-4 text-slate-600 shrink-0" />;
   };
+
+  const opencodeAmbiguous =
+    typeof opencode.diagnostics === 'object' &&
+    opencode.diagnostics !== null &&
+    (opencode.diagnostics as { ambiguous?: boolean }).ambiguous === true;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
@@ -427,9 +433,9 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
                 )}
 
                 {opencode.status === 'failed' && (
-                  <div className="p-2 rounded bg-red-950/60 border border-red-700/50 text-xs font-medium text-red-100 space-y-1">
+                  <div className={`p-2 rounded border text-xs font-medium space-y-1 ${opencodeAmbiguous ? 'bg-amber-950/40 border-amber-700/50 text-amber-100' : 'bg-red-950/60 border-red-700/50 text-red-100'}`}>
                     <p className="flex items-start gap-1.5">
-                      <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-red-300" />
+                      <AlertCircle className={`w-3.5 h-3.5 shrink-0 mt-0.5 ${opencodeAmbiguous ? 'text-amber-300' : 'text-red-300'}`} />
                       <span>{opencode.error || 'OpenCode discovery failed.'}</span>
                     </p>
                   </div>
@@ -522,7 +528,7 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
                     ) : (
                       <Play className="w-3 h-3" />
                     )}
-                    <span>{opencode.status === 'discovered' ? 'Re-Discover' : opencode.status === 'failed' ? 'Retry' : 'Discover OpenCode'}</span>
+                    <span>{opencode.status === 'discovered' ? 'Re-Discover' : opencodeAmbiguous ? 'Select a Session' : opencode.status === 'failed' ? 'Retry' : 'Discover OpenCode'}</span>
                   </button>
                   {opencode.status === 'discovered' && (
                     <button

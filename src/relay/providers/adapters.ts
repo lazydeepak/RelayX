@@ -2739,7 +2739,9 @@ export class OpenCodeProvider extends BaseMacOSProvider {
 
       if (output) {
         const parsed = JSON.parse(output);
-        const sessions = Array.isArray(parsed) ? parsed : (parsed.sessions || []);
+        const sessions = Array.isArray(parsed)
+          ? parsed
+          : (parsed.data ?? parsed.sessions ?? []);
         return {
           success: true,
           sessions,
@@ -2867,7 +2869,12 @@ export class OpenCodeProvider extends BaseMacOSProvider {
     projectPath: string,
     gitRoot: string | undefined,
     options: { allowMissingDirectory: boolean; directoryScopedMatchedVia: string },
-  ): { results: RuntimeInspectionResult[]; candidates: any[]; ambiguous?: boolean } {
+  ): {
+    results: RuntimeInspectionResult[];
+    eligibleResults: RuntimeInspectionResult[];
+    candidates: any[];
+    ambiguous?: boolean;
+  } {
     const normProjPath = projectPath.toLowerCase().replace(/\/$/, '');
     const normGitRoot = gitRoot ? gitRoot.toLowerCase().replace(/\/$/, '') : undefined;
 
@@ -3006,7 +3013,12 @@ export class OpenCodeProvider extends BaseMacOSProvider {
     const topScore = sortedResults.length > 0 ? (sortedResults[0].evidence?.details as any)?.matchScore || 0 : 0;
     const topTieCount = sortedResults.filter((r: any) => ((r.evidence?.details as any)?.matchScore || 0) === topScore).length;
     const ambiguous = topTieCount > 1 && sortedResults.length > 1;
-    return { results: ambiguous ? [] : sortedResults, candidates, ambiguous };
+    return {
+      results: ambiguous ? [] : sortedResults,
+      eligibleResults: sortedResults,
+      candidates,
+      ambiguous,
+    };
   }
 
   /** CLI-backed session creation (correct auth mechanism for v2.0.16). */
@@ -3138,7 +3150,9 @@ export class OpenCodeProvider extends BaseMacOSProvider {
       // ambiguity only blocks automatic single-session selection, not enumeration.
       return {
         success: true,
-        sessions: authRes.results,
+        // Ambiguity blocks automatic binding, but the wizard still needs the
+        // eligible rows so the user can explicitly choose one.
+        sessions: authRes.ambiguous ? authRes.eligibleResults : authRes.results,
         diagnostics: {
           source: 'opencode_shared_service',
           projectPath,

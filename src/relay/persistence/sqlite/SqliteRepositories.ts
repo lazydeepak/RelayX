@@ -512,6 +512,13 @@ export class SqliteDeliveryRepository implements IDeliveryRepository {
     return rows.map((r) => this.mapRow(r));
   }
 
+  async findUnresolved(): Promise<Delivery[]> {
+    const rows = this.db
+      .prepare("SELECT * FROM deliveries WHERE status IN ('pending', 'delivering') ORDER BY created_at ASC")
+      .all() as Array<Record<string, unknown>>;
+    return rows.map((r) => this.mapRow(r));
+  }
+
   async save(delivery: Delivery): Promise<void> {
     const stmt = this.db.prepare(`
       INSERT INTO deliveries (
