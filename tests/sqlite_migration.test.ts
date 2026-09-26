@@ -81,9 +81,19 @@ describe('RelayX SQLite Migration & Legacy Schema Upgrade', () => {
       assert.ok(foundByPath, 'Project must be queryable by canonical_path on migrated DB');
       assert.strictEqual(foundByPath.id, newProject.id);
 
-      // Verify user_version is updated
+      // Verify user_version is updated.
+      // v3 is the Plan-First execution-domain schema version
+      // (PLAN_FIRST_DOMAIN_FREEZE.md §E.5); a v0 database must migrate all the way up.
       const versionCheck = db.db.prepare('PRAGMA user_version').get() as { user_version: number };
-      assert.strictEqual(versionCheck.user_version, 2);
+      assert.strictEqual(versionCheck.user_version, 3);
+
+      // The Plan-First tables must exist after migrating from v0.
+      const pfTables = (
+        db.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]
+      ).map((t) => t.name);
+      for (const table of ['contract_revisions', 'plan_first_runs', 'work_units']) {
+        assert.ok(pfTables.includes(table), `${table} must exist after migration to v3`);
+      }
 
       db.close();
     } finally {
@@ -166,11 +176,19 @@ describe('RelayX SQLite Migration & Legacy Schema Upgrade', () => {
     }
   });
 
-  it('fresh database creation completes the v0->v2 migration (version, triggers, index)', async () => {
+  it('fresh database creation completes the full migration chain (version, triggers, index, Plan-First schema)', async () => {
     const db = new SqliteRelayDatabase(':memory:');
 
     const version = (db.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    assert.strictEqual(version, 2);
+    assert.strictEqual(version, 3);
+
+    // Plan-First schema must be present on a fresh database too.
+    const pfTables = (
+      db.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]
+    ).map((t) => t.name);
+    for (const table of ['contract_revisions', 'plan_first_runs', 'work_units']) {
+      assert.ok(pfTables.includes(table), `${table} must exist on a fresh database`);
+    }
 
     const triggerNames = (
       db.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger'").all() as { name: string }[]
@@ -233,7 +251,7 @@ describe('RelayX SQLite Migration & Legacy Schema Upgrade', () => {
       const db = new SqliteRelayDatabase(testDbPath);
 
       const version = (db.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-      assert.strictEqual(version, 2);
+      assert.strictEqual(version, 3);
 
       const triggerNames = (
         db.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger'").all() as { name: string }[]
