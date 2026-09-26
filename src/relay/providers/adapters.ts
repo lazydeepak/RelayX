@@ -1761,13 +1761,6 @@ export class ChatGPTProvider extends BaseMacOSProvider {
       // best-effort close; not required for success
     }
 
-    // Bring Relay back to the foreground.
-    try {
-      this.runAppleScript('tell application "Relay" to activate', 1500);
-    } catch {
-      // best-effort
-    }
-
     return {
       success: true,
       projectName: name.trim(),
@@ -2864,7 +2857,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
    * evidence only — authoritative pairing requires a persisted/explicit session id.
    */
   private matchAuthoritativeSessions(
-    authoritative: Array<{ id: string; directory?: string; projectId?: string }>,
+    authoritative: Array<{ id: string; directory?: string; projectId?: string; title?: string }>,
     uiRuntimes: RuntimeInspectionResult[],
     projectPath: string,
     gitRoot: string | undefined,
@@ -2944,6 +2937,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
 
       candidates.push({
         sessionId: persId,
+        sessionTitle: pers.title,
         directory: persDir,
         projectId: pers.projectId,
         matchScore,
@@ -2971,6 +2965,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
           ...evidence.details,
           parsedSessionId: persId,
           authoritativeSessionId: persId,
+          sessionTitle: pers.title,
           workspacePath: persDir || projectPath,
           openCodeProjectId: pers.projectId,
           matchScore,
@@ -3140,6 +3135,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
           id: s.sessionId,
           directory: s.directory,
           projectId: s.projectId,
+          title: s.title,
         })),
         uiRuntimes,
         projectPath,
@@ -3227,6 +3223,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
 
         candidates.push({
           sessionId: persId,
+          sessionTitle: pers.title,
           directory: persDir,
           projectId: pers.projectId,
           matchScore,
@@ -3254,6 +3251,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
             ...evidence.details,
             parsedSessionId: persId,
             authoritativeSessionId: persId,
+            sessionTitle: pers.title,
             workspacePath: persDir || projectPath,
             openCodeProjectId: pers.projectId,
             matchScore,

@@ -205,6 +205,17 @@ describe('PairModal enumeration choice labels (observed registry + discovered wo
     assert.match(label, /… — RelayX — sessions$/);
   });
 
+  it('uses the OpenCode session title as the human-facing worker label', () => {
+    const label = describeDiscoveredWorkerChoice({
+      kind: 'discovered',
+      sessionId: 'ses_abcdef1234567890',
+      sessionTitle: 'Fix worker discovery',
+      windowTitle: 'RelayX — sessions',
+    });
+    assert.match(label, /^Fix worker discovery — ses_abcdef/);
+    assert.doesNotMatch(label, /RelayX — sessions/);
+  });
+
   it('falls back to the full id when the window title is absent', () => {
     const label = describeDiscoveredWorkerChoice({
       kind: 'discovered',

@@ -92,6 +92,8 @@ export type WorkerChoice =
       kind: 'discovered';
       /** Authoritative `ses_*` id resolved via the shared service — adoptable. */
       sessionId: string;
+      /** Human-readable title supplied by OpenCode for this session. */
+      sessionTitle?: string;
       windowTitle?: string;
       workspacePath?: string;
       matchedVia?: string;
@@ -206,6 +208,8 @@ export interface IRelayApi {
       sessionId?: string; 
       /** Authoritative `ses_*` id resolved via the shared service or persisted store. */
       authoritativeSessionId?: string;
+      /** Human-readable title supplied by OpenCode for this session. */
+      sessionTitle?: string;
       /** Window-derived id — display/telemetry only, never a binding. */
       observedWindowSessionId?: string;
       /** True only when `sessionId` came from an authoritative source. */

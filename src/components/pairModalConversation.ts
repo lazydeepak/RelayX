@@ -154,5 +154,6 @@ export function describeConversationChoice(choice: Pick<ChatGPTConversationChoic
 /** Select-option label for a discovered (adoptable) OpenCode worker session. */
 export function describeDiscoveredWorkerChoice(choice: Extract<WorkerChoice, { kind: 'discovered' }>): string {
   const short = shortenExternalId(choice.sessionId, 14) ?? choice.sessionId;
+  if (choice.sessionTitle) return `${choice.sessionTitle} — ${short}`;
   return choice.windowTitle ? `${short} — ${choice.windowTitle}` : short;
 }

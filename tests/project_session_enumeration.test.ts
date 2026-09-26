@@ -241,7 +241,7 @@ describe('enumerateWorkerChoices — existing/new worker sessions per project', 
     registerFakeOpenCodeProvider(
       engine,
       [
-        { windowTitle: 'RelayX — sessions', details: { authoritativeSessionId: 'ses_new1', workspacePath: '/dev/RelayX', matchedVia: 'shared_service' } },
+        { windowTitle: 'RelayX — sessions', details: { authoritativeSessionId: 'ses_new1', sessionTitle: 'Implement worker selection', workspacePath: '/dev/RelayX', matchedVia: 'shared_service' } },
         { windowTitle: 'RelayX — sessions', details: { parsedSessionId: 'ses_unverified', workspacePath: '/dev/RelayX' } },
         { windowTitle: 'RelayX — sessions', details: { authoritativeSessionId: 'ses_registered', workspacePath: '/dev/RelayX' } },
       ],
@@ -268,6 +268,7 @@ describe('enumerateWorkerChoices — existing/new worker sessions per project', 
     assert.deepStrictEqual(discoveries[0], {
       kind: 'discovered',
       sessionId: 'ses_new1',
+      sessionTitle: 'Implement worker selection',
       windowTitle: 'RelayX — sessions',
       workspacePath: '/dev/RelayX',
       matchedVia: 'shared_service',

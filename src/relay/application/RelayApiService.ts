@@ -1217,6 +1217,7 @@ export class RelayApiService implements IRelayApi {
           return {
             sessionId: authoritativeSessionId,
             authoritativeSessionId,
+            sessionTitle: details.sessionTitle,
             observedWindowSessionId: details.observedWindowSessionId,
             authoritative: !!authoritativeSessionId,
             windowTitle: m.windowTitle,
@@ -1383,6 +1384,7 @@ export class RelayApiService implements IRelayApi {
             choices.push({
               kind: 'discovered',
               sessionId,
+              sessionTitle: details.sessionTitle,
               windowTitle: m?.windowTitle,
               workspacePath: details.workspacePath,
               matchedVia: details.matchedVia,

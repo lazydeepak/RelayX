@@ -41,6 +41,7 @@ export interface PlannerDiscoveryState {
 
 export interface OpenCodeWorkerCandidate {
   sessionId: string;
+  sessionTitle?: string;
   windowTitle?: string;
   workspacePath?: string;
   matchScore?: number;
@@ -51,6 +52,7 @@ export interface OpenCodeWorkerCandidate {
 
 export interface OpenCodeDiscoveryEvidence {
   sessionId?: string;
+  sessionTitle?: string;
   windowTitle?: string;
   matchedVia?: string;
   recordedAt: number;
@@ -199,6 +201,7 @@ export function reduceOpenCodeDiscovery(
   const workers: OpenCodeWorkerCandidate[] = (result.sessions || [])
     .map((s: any) => ({
       sessionId: typeof s.sessionId === 'string' ? s.sessionId.trim() : '',
+      sessionTitle: s.sessionTitle,
       windowTitle: s.windowTitle,
       workspacePath: s.workspacePath,
       matchScore: s.matchScore,
@@ -219,6 +222,7 @@ export function reduceOpenCodeDiscovery(
       diagnostics: result.diagnostics,
       evidence: {
         sessionId: best.sessionId,
+        sessionTitle: best.sessionTitle,
         windowTitle: best.windowTitle,
         matchedVia: best.matchedVia,
         recordedAt: Date.now(),
@@ -289,6 +293,7 @@ export function selectOpenCodeWorker(
     error: undefined,
     evidence: {
       sessionId: worker.sessionId,
+      sessionTitle: worker.sessionTitle,
       windowTitle: worker.windowTitle,
       matchedVia: worker.matchedVia,
       recordedAt: Date.now(),

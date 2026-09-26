@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain } from 'electron';
 import { RELAY_IPC_CHANNELS } from './contracts.ts';
 import { RelayApiService } from '../../src/relay/application/RelayApiService.ts';
 
@@ -109,9 +109,19 @@ export function registerRelayIpcHandlers(service: RelayApiService): void {
 
   // Add Project Workflow
   ipcMain.handle(RELAY_IPC_CHANNELS.SELECT_PROJECT_FOLDER, () => service.selectProjectFolder());
-  ipcMain.handle(RELAY_IPC_CHANNELS.RESOLVE_CHATGPT_PROJECT, (_event, name) =>
-    service.resolveChatGPTProject(name),
-  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.RESOLVE_CHATGPT_PROJECT, async (event, name) => {
+    try {
+      return await service.resolveChatGPTProject(name);
+    } finally {
+      const window = BrowserWindow.fromWebContents(event.sender);
+      if (window && !window.isDestroyed()) {
+        if (window.isMinimized()) window.restore();
+        window.show();
+        window.focus();
+        if (process.platform === 'darwin') app.focus({ steal: true });
+      }
+    }
+  });
   ipcMain.handle(RELAY_IPC_CHANNELS.DISCOVER_CHATGPT_PLANNER, (_event, name) =>
     service.discoverChatGPTPlanner(name),
   );

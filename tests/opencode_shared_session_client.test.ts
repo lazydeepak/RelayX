@@ -375,7 +375,7 @@ describe('OpenCode provider shared-service discovery integration', () => {
     const { fetchImpl } = makeFetch(() => ({
       body: {
         data: [
-          { id: 'ses_service_authoritative', projectID: 'proj_relay', location: { directory: '/Users/relay/alpha' } },
+          { id: 'ses_service_authoritative', projectID: 'proj_relay', title: 'Fix worker discovery', location: { directory: '/Users/relay/alpha' } },
         ],
       },
     }));
@@ -385,6 +385,7 @@ describe('OpenCode provider shared-service discovery integration', () => {
     assert.equal(res.success, true);
     assert.equal(res.sessions.length, 1);
     assert.equal((res.sessions[0].evidence.details as any).authoritativeSessionId, 'ses_service_authoritative');
+    assert.equal((res.sessions[0].evidence.details as any).sessionTitle, 'Fix worker discovery');
     assert.equal(res.diagnostics.source, 'opencode_shared_service');
     // Shared service is authoritative, so the CLI fallback is never consulted.
     assert.equal(provider.cliCalled, false);

@@ -422,6 +422,9 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
 
                 {opencode.status === 'discovered' && opencode.evidence && (
                   <div className="p-2 rounded bg-emerald-950/30 border border-emerald-800/40 text-[10px] font-mono text-emerald-300 space-y-0.5">
+                    {opencode.evidence.sessionTitle && (
+                      <p className="truncate font-sans text-[11px] font-semibold text-emerald-100">{opencode.evidence.sessionTitle}</p>
+                    )}
                     <p className="truncate">✔ Session: <span className="text-emerald-200">{opencode.selectedSessionId}</span></p>
                     {opencode.evidence.windowTitle && (
                       <p className="text-emerald-300/70 truncate">window: {opencode.evidence.windowTitle}</p>
@@ -488,8 +491,11 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
                           }`}
                         >
                           <div className="min-w-0 flex-1">
+                            {w.sessionTitle && (
+                              <p className="text-[11px] font-semibold text-slate-100 truncate">{w.sessionTitle}</p>
+                            )}
                             <div className="flex items-center gap-1.5">
-                              <span className="font-mono text-[10px] font-semibold text-slate-200 truncate">{w.sessionId}</span>
+                              <span className={`font-mono text-[10px] truncate ${w.sessionTitle ? 'text-slate-400' : 'font-semibold text-slate-200'}`}>{w.sessionId}</span>
                               {w.matchedVia && (
                                 <span className="text-[8px] px-1 py-0.2 rounded bg-slate-800 text-slate-400 border border-slate-700">
                                   {w.matchedVia}

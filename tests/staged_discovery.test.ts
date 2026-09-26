@@ -43,6 +43,7 @@ const openCodeSuccess = (sessionId = WORKER_SESSION, windowTitle = 'OpenCode —
   sessions: [
     {
       sessionId,
+      sessionTitle: 'Implement project workflow',
       windowTitle,
       workspacePath: '/workspaces/alpha',
       matchedVia: 'exact_path',
@@ -96,6 +97,8 @@ describe('independent planner/worker discovery stages', () => {
     assert.equal(opencode.status, 'discovered');
     assert.equal(opencode.selectedSessionId, WORKER_SESSION);
     assert.equal(opencode.evidence?.sessionId, WORKER_SESSION);
+    assert.equal(opencode.evidence?.sessionTitle, 'Implement project workflow');
+    assert.equal(opencode.workers[0].sessionTitle, 'Implement project workflow');
     assert.ok(isOpenCodeBindingValid(opencode), 'worker binding should be valid');
 
     assert.equal(areBothBindingsValid(planner, opencode), false);
