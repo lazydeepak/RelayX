@@ -16,7 +16,14 @@ export type DeliveryId = Brand<string, 'DeliveryId'>;
 export type HandoffId = Brand<string, 'HandoffId'>;
 export type EventId = Brand<string, 'EventId'>;
 export type AttentionItemId = Brand<string, 'AttentionItemId'>;
+export type AssociationId = Brand<string, 'AssociationId'>;
 export type RecoveryActionId = Brand<string, 'RecoveryActionId'>;
+
+/* --- Plan-First identifiers (PLAN_FIRST_DOMAIN_FREEZE.md §A) --- */
+export type ContractRevisionId = Brand<string, 'ContractRevisionId'>;
+export type PlanFirstRunId = Brand<string, 'PlanFirstRunId'>;
+export type WorkUnitId = Brand<string, 'WorkUnitId'>;
+export type VerificationResultId = Brand<string, 'VerificationResultId'>;
 
 export const createId = <T extends Brand<string, string>>(prefix: string): T => {
   const rand = Math.random().toString(36).substring(2, 10);
@@ -45,9 +52,9 @@ export type AssignmentStatus =
   | 'cancelled';
 
 export type AttemptStatus =
+  | 'prepared'
   | 'running'
-  | 'completed'
-  | 'failed'
+  | 'completed_physical'
   | 'interrupted';
 
 export type RuntimeSessionStatus =
@@ -83,6 +90,10 @@ export type RecoveryTier = 'tier_1_deterministic' | 'tier_2_planner_assisted' | 
 export type ProviderType = 'chatgpt' | 'opencode' | 'vscode' | 'generic_ui';
 
 export type ProviderIntegrationStatus = 'real' | 'partial' | 'unsupported';
+
+export type VerificationState = 'verified' | 'unverified' | 'manual' | 'stale';
+
+export type AssociationProvenance = 'discovery' | 'adoption' | 'manual_registration' | 'pair_binding' | 'setup';
 
 /* --- Observable UI Evidence Model --- */
 
@@ -126,3 +137,24 @@ export interface FilesystemSignalingHeartbeat {
   source: string;
   processPid?: number;
 }
+
+export type VerificationStatus = 'not_run' | 'passed' | 'failed' | 'blocked';
+
+export type PlannerActionResult = 'pending' | 'applied' | 'rejected_stale' | 'rejected_unauthorized' | 'rejected_invalid_transition' | 'duplicate';
+export type PlannerAssistanceStatus = 'open' | 'resolved' | 'stale';
+
+/* --- Plan-First lifecycle states (PLAN_FIRST_DOMAIN_FREEZE.md §C) --- */
+
+/** draft -> approved (terminal). Content is immutable from creation. */
+export type ContractRevisionStatus = 'draft' | 'approved';
+
+export const PLAN_FIRST_RUN_TERMINAL_STATES: readonly PlanFirstRunStatus[] = [
+  'completed',
+  'cancelled',
+] as const;
+
+export type PlanFirstRunStatus = 'ready' | 'running' | 'blocked' | 'completed' | 'cancelled';
+
+export const WORK_UNIT_TERMINAL_STATES: readonly WorkUnitStatus[] = ['completed'] as const;
+
+export type WorkUnitStatus = 'pending' | 'in_progress' | 'blocked' | 'completed';

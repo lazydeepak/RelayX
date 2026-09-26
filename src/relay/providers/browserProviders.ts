@@ -117,6 +117,10 @@ export abstract class BaseBrowserProvider implements IRuntimeProvider {
     };
   }
 
+  async reconcileDispatch(request: { sessionId: RuntimeSessionId; deliveryId?: string; instructionSnippet?: string; externalSessionId?: string | null; idempotencyKey?: string }): Promise<{ outcome: 'delivered' | 'not_delivered' | 'supporting_evidence_only' | 'unknown' | 'unsupported'; evidence?: ObservableEvidence; reason?: string }> {
+    return { outcome: 'unsupported' as const, reason: 'Provider does not provide deterministic reconciliation', evidence: { id: `ev_recon_${this.providerType}_${Date.now()}`, timestamp: Date.now(), source: 'reconciliation_probe' as const, details: { providerType: this.providerType, level: 'LEVEL_0' } } };
+  }
+
   async captureEvidence(sessionId: RuntimeSessionId, action: string): Promise<ObservableEvidence> {
     return {
       id: `ev_cap_${Date.now()}`,

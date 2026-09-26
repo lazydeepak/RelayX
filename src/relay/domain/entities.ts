@@ -10,6 +10,7 @@ import {
   RuntimeSessionId,
   EventId,
   AttentionItemId,
+  AssociationId,
   RecoveryActionId,
   ProjectStatus,
   PairStatus,
@@ -571,7 +572,33 @@ export class Handoff {
 }
 
 /* --- Attempt Entity --- */
-export interface AttemptProps {
+/**
+ * Execution authority frozen at dispatch (EXECUTION_AUTHORITY.md §2).
+ *
+ * CONFIRMED: sessionPairId, workerSessionId.
+ * REVISED-ADD: externalSessionId (RuntimeSession.updateExternalIdentity() is mutable,
+ * so the internal id alone is not sufficient to identify the external session).
+ * REJECTED: providerType (redundant with the immutable RuntimeSession record),
+ *           frozenAt (audit metadata only, never part of identity comparison),
+ *           execution_epoch (all stale cases are covered by identity + lifecycle).
+ *
+ * All three are nullable because the `attempts` table columns are nullable and
+ * SqliteAttemptRepository maps them as `| undefined`. Production dispatch ALWAYS
+ * supplies the full tuple; see hasFrozenAuthority().
+ */
+export interface AttemptAuthority {
+  sessionPairId?: PairId;
+  workerSessionId?: RuntimeSessionId;
+  externalSessionId: string | null;
+}
+
+export const NO_ATTEMPT_AUTHORITY: AttemptAuthority = {
+  sessionPairId: undefined,
+  workerSessionId: undefined,
+  externalSessionId: null,
+};
+
+export interface AttemptProps extends AttemptAuthority {
   id: AttemptId;
   assignmentId: AssignmentId;
   attemptNumber: number;
@@ -582,6 +609,22 @@ export interface AttemptProps {
   evidence?: ObservableEvidence;
 }
 
+/**
+ * An Attempt is ONE PHYSICAL EXECUTION INSTANCE (ATTEMPT_LIFECYCLE.md §0, §5).
+ *
+ * `status` is Dimension A (physical execution state) ONLY. Verification is a separate
+ * linked record (Dimension B) and must never move this field. Dispatch uncertainty is
+ * carried by Delivery (Dimension C). Assignment resolution is derived (Dimension D).
+ *
+ * Legal transitions:
+ *   prepared  -> running             (startRunning)      delivery confirmed
+ *   running   -> completed_physical  (completePhysical)  worker physically finished
+ *   prepared|running -> interrupted  (interrupt)         runtime lost / physical failure
+ *
+ * There is deliberately NO `failed` state. A completed-but-wrong result is
+ * `completed_physical` + verification_failed, NOT a failed attempt (ATTEMPT_LIFECYCLE.md
+ * §5 Case 4, explicitly REJECTED). A crashed/timeout attempt is `interrupted` (Case 5).
+ */
 export class Attempt {
   public readonly id: AttemptId;
   public readonly assignmentId: AssignmentId;
@@ -591,6 +634,12 @@ export class Attempt {
   public finishedAt?: number;
   public failureReason?: string;
   public evidence?: ObservableEvidence;
+  /** Immutable once created. */
+  public readonly sessionPairId?: PairId;
+  /** Immutable once created. */
+  public readonly workerSessionId?: RuntimeSessionId;
+  /** Immutable once created. */
+  public readonly externalSessionId: string | null;
 
   constructor(props: AttemptProps) {
     this.id = props.id;
@@ -601,35 +650,95 @@ export class Attempt {
     this.finishedAt = props.finishedAt;
     this.failureReason = props.failureReason;
     this.evidence = props.evidence;
+    this.sessionPairId = props.sessionPairId;
+    this.workerSessionId = props.workerSessionId;
+    this.externalSessionId = props.externalSessionId ?? null;
   }
 
-  public static create(assignmentId: AssignmentId, attemptNumber: number): Attempt {
+  /**
+   * prepareAttempt() — freeze authority, enter `prepared`.
+   * Durable dispatch intent is recorded by the caller (Delivery) and must be COMMITTED
+   * before the external send (ATTEMPT_LIFECYCLE.md Case 1).
+   */
+  public static create(
+    assignmentId: AssignmentId,
+    attemptNumber: number,
+    authority: AttemptAuthority = NO_ATTEMPT_AUTHORITY,
+  ): Attempt {
     return new Attempt({
       id: createId<AttemptId>('att'),
       assignmentId,
       attemptNumber,
-      status: 'running',
+      status: 'prepared',
       startedAt: Date.now(),
+      sessionPairId: authority.sessionPairId,
+      workerSessionId: authority.workerSessionId,
+      externalSessionId: authority.externalSessionId ?? null,
     });
   }
 
-  public complete(evidence?: ObservableEvidence): void {
-    this.status = 'completed';
+  /** True when the full dispatch-time authority tuple is present. */
+  public hasFrozenAuthority(): boolean {
+    return (
+      this.sessionPairId !== undefined &&
+      this.workerSessionId !== undefined &&
+      this.externalSessionId !== null
+    );
+  }
+
+  /**
+   * Case 6 — evidence originating from obsolete execution authority must not mutate
+   * current state. Returns true when the supplied identities match this attempt's
+   * frozen authority. An attempt with no frozen authority rejects all evidence.
+   */
+  public matchesAuthority(authority: {
+    sessionPairId?: PairId;
+    workerSessionId?: RuntimeSessionId;
+    externalSessionId?: string | null;
+  }): boolean {
+    if (!this.hasFrozenAuthority()) return false;
+    return (
+      this.sessionPairId === authority.sessionPairId &&
+      this.workerSessionId === authority.workerSessionId &&
+      this.externalSessionId === (authority.externalSessionId ?? null)
+    );
+  }
+
+  /** confirmDispatch() — external delivery acknowledged; physical execution begins. */
+  public startRunning(): void {
+    if (this.status !== 'prepared') {
+      throw new InvalidStateTransitionError(this.status, 'running', 'Attempt');
+    }
+    this.status = 'running';
+  }
+
+  /**
+   * recordExecutionCompleted() — Dimension A only.
+   * Must be reachable regardless of verification or planner review timelines
+   * (ATTEMPT_LIFECYCLE.md Case 3). Verification never calls this and never moves
+   * physical state.
+   */
+  public completePhysical(evidence?: ObservableEvidence): void {
+    if (this.status !== 'running') {
+      throw new InvalidStateTransitionError(this.status, 'completed_physical', 'Attempt');
+    }
+    this.status = 'completed_physical';
     this.finishedAt = Date.now();
     if (evidence) this.evidence = evidence;
   }
 
-  public fail(reason: string, evidence?: ObservableEvidence): void {
-    this.status = 'failed';
-    this.finishedAt = Date.now();
-    this.failureReason = reason;
-    if (evidence) this.evidence = evidence;
-  }
-
-  public interrupt(reason: string): void {
+  /**
+   * interruptionAttempt() — runtime/process lost mid-work. Execution is suspended;
+   * repository mutations survive and are NOT rolled back (I11, Case 5).
+   */
+  public interrupt(reason: string, evidence?: ObservableEvidence): void {
+    if (this.status === 'completed_physical') {
+      throw new InvalidStateTransitionError(this.status, 'interrupted', 'Attempt');
+    }
     this.status = 'interrupted';
     this.finishedAt = Date.now();
     this.failureReason = reason;
+    if (evidence) this.evidence = evidence;
   }
 }
 
@@ -886,3 +995,81 @@ export class AttentionItem {
     this.resolvedAt = Date.now();
   }
 }
+
+/* --- RuntimeProjectAssociation Entity --- */
+export interface RuntimeProjectAssociationProps {
+  id: AssociationId;
+  runtimeSessionId: RuntimeSessionId;
+  projectId: ProjectId;
+  providerType?: ProviderType | null;
+  externalSessionId?: string | null;
+  verificationState: 'verified' | 'unverified' | 'stale';
+  provenance: 'discovery' | 'adoption' | 'setup' | 'manual_registration' | 'pair_binding';
+  createdAt: number;
+  updatedAt: number;
+}
+
+export class RuntimeProjectAssociation {
+  public readonly id: AssociationId;
+  public readonly runtimeSessionId: RuntimeSessionId;
+  public readonly projectId: ProjectId;
+  public providerType?: ProviderType | null;
+  public externalSessionId?: string | null;
+  public readonly verificationState: RuntimeProjectAssociationProps['verificationState'];
+  public readonly provenance: RuntimeProjectAssociationProps['provenance'];
+  public readonly createdAt: number;
+  public updatedAt: number;
+
+  constructor(props: RuntimeProjectAssociationProps) {
+    this.id = props.id;
+    this.runtimeSessionId = props.runtimeSessionId;
+    this.projectId = props.projectId;
+    this.providerType = props.providerType ?? null;
+    this.externalSessionId = props.externalSessionId ?? null;
+    this.verificationState = props.verificationState;
+    this.provenance = props.provenance;
+    this.createdAt = props.createdAt;
+    this.updatedAt = props.updatedAt;
+  }
+
+  public static create(
+    runtimeSessionId: RuntimeSessionId,
+    projectId: ProjectId,
+    externalSessionId: string | null,
+    verificationState: RuntimeProjectAssociationProps['verificationState'] = 'verified',
+    provenance: RuntimeProjectAssociationProps['provenance'] = 'adoption',
+    providerType?: ProviderType | null,
+  ): RuntimeProjectAssociation {
+    return new RuntimeProjectAssociation({
+      id: createId<AssociationId>('assoc'),
+      runtimeSessionId,
+      projectId,
+      providerType,
+      externalSessionId,
+      verificationState,
+      provenance,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+  }
+}
+
+/* --- Plan-First execution domain ---
+ * Implemented in its own module (PLAN_FIRST_DOMAIN_FREEZE.md §B) and re-exported here so
+ * that a single `entities.ts` import surface remains available to callers and tests.
+ */
+export {
+  ContractRevision,
+  WorkUnit,
+  PlanFirstRun,
+  canonicalizeSemanticFields,
+  digestCanonicalText,
+  deriveCurrentWorkUnit,
+  allWorkUnitsCompleted,
+} from './planFirst.ts';
+export type {
+  ContractRevisionProps,
+  WorkUnitProps,
+  PlanFirstRunProps,
+  DerivedCursor,
+} from './planFirst.ts';

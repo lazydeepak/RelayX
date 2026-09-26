@@ -8,6 +8,11 @@ import {
   HandoffId,
   EventId,
   AttentionItemId,
+  AssociationId,
+  ContractRevisionId,
+  PlanFirstRunId,
+  WorkUnitId,
+  VerificationResultId,
 } from '../../domain/types.ts';
 import {
   Project,
@@ -19,7 +24,12 @@ import {
   Handoff,
   RelayEvent,
   AttentionItem,
+  RuntimeProjectAssociation,
+  ContractRevision,
+  WorkUnit,
+  PlanFirstRun,
 } from '../../domain/entities.ts';
+import type { VerificationResult } from '../../domain/repoBoundary.ts';
 import {
   IRelayRepositories,
   IProjectRepository,
@@ -31,6 +41,12 @@ import {
   IHandoffRepository,
   IEventRepository,
   IAttentionRepository,
+  IAssociationRepository,
+  IContractRevisionRepository,
+  IPlanFirstRunRepository,
+  IWorkUnitRepository,
+  IVerificationResultRepository,
+  AssociationEvidenceCriteria,
 } from '../interfaces.ts';
 
 /**
@@ -412,6 +428,308 @@ export class MemoryAttentionRepository implements IAttentionRepository {
   }
 }
 
+const AUTHORITATIVE_ASSOCIATION_PROVENANCES = new Set<RuntimeProjectAssociation['provenance']>([
+  'discovery',
+  'adoption',
+  'setup',
+]);
+
+function associationSchemaGap(detail: string): Error {
+  return new Error(
+    `Association schema gap: runtime_project_associations cannot verify ${detail}`,
+  );
+}
+
+export class MemoryAssociationRepository implements IAssociationRepository {
+  private readonly items = new Map<string, RuntimeProjectAssociation>();
+
+  snapshotState(): MemoryRepoSnapshot<RuntimeProjectAssociation> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<RuntimeProjectAssociation>): void {
+    restoreMapItems(this.items, snapshot);
+  }
+
+  async findById(id: AssociationId): Promise<RuntimeProjectAssociation | null> {
+    return this.items.get(id) ?? null;
+  }
+
+  async findBySessionId(
+    sessionId: RuntimeSessionId,
+  ): Promise<RuntimeProjectAssociation[]> {
+    return Array.from(this.items.values())
+      .filter((association) => association.runtimeSessionId === sessionId)
+      .sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id));
+  }
+
+  async findByProjectId(
+    projectId: ProjectId,
+  ): Promise<RuntimeProjectAssociation[]> {
+    return Array.from(this.items.values())
+      .filter((association) => association.projectId === projectId)
+      .sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id));
+  }
+
+  async findVerifiedBySessionId(
+    sessionId: RuntimeSessionId,
+    criteria: AssociationEvidenceCriteria,
+  ): Promise<RuntimeProjectAssociation | null> {
+    if (!criteria?.providerType || !criteria.projectId) {
+      throw associationSchemaGap(
+        'provider_type, external_session_id, and project_id criteria are required for pre-pair evidence',
+      );
+    }
+    const normalizedExternalSessionId = criteria.externalSessionId ?? null;
+    const match = (await this.findBySessionId(sessionId)).find(
+      (association) =>
+        association.verificationState === 'verified' &&
+        AUTHORITATIVE_ASSOCIATION_PROVENANCES.has(association.provenance) &&
+        association.providerType === criteria.providerType &&
+        association.externalSessionId === normalizedExternalSessionId &&
+        association.projectId === criteria.projectId,
+    );
+    if (match) return match;
+
+    const legacyVerified = (await this.findBySessionId(sessionId)).find(
+      (association) =>
+        association.verificationState === 'verified' &&
+        AUTHORITATIVE_ASSOCIATION_PROVENANCES.has(association.provenance) &&
+        (!association.providerType || !association.externalSessionId),
+    );
+    if (legacyVerified) {
+      const missingFields: string[] = [];
+      if (!legacyVerified.providerType) missingFields.push('provider_type');
+      if (!legacyVerified.externalSessionId) {
+        missingFields.push('external_session_id');
+      }
+      throw associationSchemaGap(
+        `${missingFields.join(' and ')} for verified association '${legacyVerified.id}'`,
+      );
+    }
+
+    return null;
+  }
+
+  async findAll(): Promise<RuntimeProjectAssociation[]> {
+    return Array.from(this.items.values()).sort(
+      (a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id),
+    );
+  }
+
+  async save(association: RuntimeProjectAssociation): Promise<void> {
+    const duplicate = Array.from(this.items.values()).find(
+      (existing) =>
+        existing.id !== association.id &&
+        existing.runtimeSessionId === association.runtimeSessionId &&
+        existing.projectId === association.projectId,
+    );
+    if (duplicate) {
+      throw new Error(
+        `Association uniqueness violation for runtime='${association.runtimeSessionId}', projectId='${association.projectId}'`,
+      );
+    }
+    this.items.set(association.id, association);
+  }
+
+  async delete(id: AssociationId): Promise<void> {
+    this.items.delete(id);
+  }
+}
+
+/* --- Plan-First execution domain (PLAN_FIRST_DOMAIN_FREEZE.md §F) --- */
+
+function planFirstConstraintError(message: string): Error {
+  return new Error(message);
+}
+
+
+export class MemoryContractRevisionRepository implements IContractRevisionRepository {
+  private readonly items = new Map<string, ContractRevision>();
+
+  snapshotState(): MemoryRepoSnapshot<ContractRevision> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<ContractRevision>): void {
+    restoreMapItems(this.items, snapshot);
+  }
+
+  async findById(id: ContractRevisionId): Promise<ContractRevision | null> {
+    return this.items.get(id) ?? null;
+  }
+
+  async findByProjectId(projectId: ProjectId): Promise<ContractRevision[]> {
+    return Array.from(this.items.values())
+      .filter((r) => r.projectId === projectId)
+      .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+  }
+
+  async findByDigest(
+    projectId: ProjectId,
+    canonicalDigest: string,
+  ): Promise<ContractRevision | null> {
+    return (
+      (await this.findByProjectId(projectId)).find(
+        (r) => r.canonicalDigest === canonicalDigest,
+      ) ?? null
+    );
+  }
+
+  async save(revision: ContractRevision): Promise<void> {
+    // Parity with UNIQUE (project_id, canonical_digest).
+    const clash = (await this.findByProjectId(revision.projectId)).find(
+      (r) => r.canonicalDigest === revision.canonicalDigest && r.id !== revision.id,
+    );
+    if (clash) {
+      throw planFirstConstraintError(
+        `Revision ${revision.id} duplicates the semantic digest of ${clash.id} in project ${revision.projectId}`,
+      );
+    }
+    this.items.set(revision.id, revision);
+  }
+}
+
+export class MemoryPlanFirstRunRepository implements IPlanFirstRunRepository {
+  private readonly items = new Map<string, PlanFirstRun>();
+
+  snapshotState(): MemoryRepoSnapshot<PlanFirstRun> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<PlanFirstRun>): void {
+    restoreMapItems(this.items, snapshot);
+  }
+
+  async findById(id: PlanFirstRunId): Promise<PlanFirstRun | null> {
+    return this.items.get(id) ?? null;
+  }
+
+  async findByContractRevisionId(contractRevisionId: ContractRevisionId): Promise<PlanFirstRun[]> {
+    return Array.from(this.items.values())
+      .filter((r) => r.contractRevisionId === contractRevisionId)
+      .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+  }
+
+  async findActiveByContractRevisionId(
+    projectId: ProjectId,
+    contractRevisionId: ContractRevisionId,
+  ): Promise<PlanFirstRun | null> {
+    return (
+      (await this.findByContractRevisionId(contractRevisionId)).find(
+        (r) => r.projectId === projectId && !r.isTerminal(),
+      ) ?? null
+    );
+  }
+
+  async findByProjectId(projectId: ProjectId): Promise<PlanFirstRun[]> {
+    return Array.from(this.items.values())
+      .filter((r) => r.projectId === projectId)
+      .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+  }
+
+  async save(run: PlanFirstRun): Promise<void> {
+    // Parity with the partial unique index: at most one non-terminal run per
+    // (project, contract revision).
+    const clash = (await this.findByContractRevisionId(run.contractRevisionId)).find(
+      (r) => r.projectId === run.projectId && r.id !== run.id && !r.isTerminal(),
+    );
+    if (clash && !run.isTerminal()) {
+      throw planFirstConstraintError(
+        `Run ${run.id} would create a second active run for revision ${run.contractRevisionId} (existing: ${clash.id})`,
+      );
+    }
+    this.items.set(run.id, run);
+  }
+}
+
+export class MemoryWorkUnitRepository implements IWorkUnitRepository {
+  private readonly items = new Map<string, WorkUnit>();
+
+  snapshotState(): MemoryRepoSnapshot<WorkUnit> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<WorkUnit>): void {
+    restoreMapItems(this.items, snapshot);
+  }
+
+  async findById(id: WorkUnitId): Promise<WorkUnit | null> {
+    return this.items.get(id) ?? null;
+  }
+
+  async findByContractRevisionId(contractRevisionId: ContractRevisionId): Promise<WorkUnit[]> {
+    return Array.from(this.items.values())
+      .filter((u) => u.contractRevisionId === contractRevisionId)
+      .sort((a, b) => a.ordinal - b.ordinal);
+  }
+
+  async findInProgressByContractRevisionId(
+    contractRevisionId: ContractRevisionId,
+  ): Promise<WorkUnit | null> {
+    return (await this.findByContractRevisionId(contractRevisionId)).find(
+      (u) => u.status === 'in_progress',
+    ) ?? null;
+  }
+
+  async save(unit: WorkUnit): Promise<void> {
+    const siblings = await this.findByContractRevisionId(unit.contractRevisionId);
+    // Parity with UNIQUE (contract_revision_id, ordinal).
+    const ordinalClash = siblings.find(
+      (u) => u.ordinal === unit.ordinal && u.id !== unit.id,
+    );
+    if (ordinalClash) {
+      throw planFirstConstraintError(
+        `WorkUnit ${unit.id} reuses ordinal ${unit.ordinal} already held by ${ordinalClash.id}`,
+      );
+    }
+    // Parity with the partial unique index on in_progress units.
+    const inFlight = siblings.find((u) => u.status === 'in_progress' && u.id !== unit.id);
+    if (inFlight && unit.status === 'in_progress') {
+      throw planFirstConstraintError(
+        `WorkUnit ${unit.id} would run concurrently with ${inFlight.id}; V1 is strictly sequential`,
+      );
+    }
+    this.items.set(unit.id, unit);
+  }
+}
+
+export class MemoryVerificationResultRepository implements IVerificationResultRepository {
+  private readonly items = new Map<string, VerificationResult>();
+  private readonly byAttempt = new Map<string, string>();
+
+  snapshotState(): MemoryRepoSnapshot<VerificationResult> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<VerificationResult>): void {
+    restoreMapItems(this.items, snapshot);
+    this.byAttempt.clear();
+    for (const [id, result] of this.items) this.byAttempt.set(result.attemptId, id);
+  }
+
+  async findById(id: VerificationResultId): Promise<VerificationResult | null> {
+    return this.items.get(id) ?? null;
+  }
+
+  async findByAttemptId(attemptId: AttemptId): Promise<VerificationResult | null> {
+    const id = this.byAttempt.get(attemptId);
+    return id ? this.items.get(id) ?? null : null;
+  }
+
+  async save(result: VerificationResult): Promise<void> {
+    // Parity with the unique index on attempt_id: one result per attempt.
+    const existingId = this.byAttempt.get(result.attemptId);
+    if (existingId && existingId !== result.id) {
+      throw planFirstConstraintError(
+        `Attempt ${result.attemptId} already has verification result ${existingId}`,
+      );
+    }
+    this.items.set(result.id, result);
+    this.byAttempt.set(result.attemptId, result.id);
+  }
+}
+
 export class MemoryRelayDatabase implements IRelayRepositories {
   public readonly projects: MemoryProjectRepository;
   public readonly pairs: MemoryPairRepository;
@@ -422,6 +740,11 @@ export class MemoryRelayDatabase implements IRelayRepositories {
   public readonly handoffs: MemoryHandoffRepository;
   public readonly events: MemoryEventRepository;
   public readonly attention: MemoryAttentionRepository;
+  public readonly associations: MemoryAssociationRepository;
+  public readonly planFirstRuns: MemoryPlanFirstRunRepository;
+  public readonly workUnits: MemoryWorkUnitRepository;
+  public readonly contractRevisions: MemoryContractRevisionRepository;
+  public readonly verificationResults: MemoryVerificationResultRepository;
 
   constructor() {
     this.projects = new MemoryProjectRepository();
@@ -433,6 +756,11 @@ export class MemoryRelayDatabase implements IRelayRepositories {
     this.handoffs = new MemoryHandoffRepository();
     this.events = new MemoryEventRepository();
     this.attention = new MemoryAttentionRepository();
+    this.associations = new MemoryAssociationRepository();
+    this.planFirstRuns = new MemoryPlanFirstRunRepository();
+    this.workUnits = new MemoryWorkUnitRepository();
+    this.contractRevisions = new MemoryContractRevisionRepository();
+    this.verificationResults = new MemoryVerificationResultRepository();
   }
 
   /**
@@ -454,6 +782,11 @@ export class MemoryRelayDatabase implements IRelayRepositories {
       this.handoffs,
       this.events,
       this.attention,
+      this.associations,
+      this.planFirstRuns,
+      this.workUnits,
+      this.contractRevisions,
+      this.verificationResults,
     ];
     const snapshots = repos.map((repo) => repo.snapshotState());
     try {

@@ -3,7 +3,7 @@ import {
   BrowserOpenCodeProvider,
 } from '../providers/browserProviders.ts';
 import { parseChatGPTConversationUrl } from '../providers/adapters.ts';
-import { RuntimeSession, Project } from '../domain/entities.ts';
+import { RuntimeSession, Project, RuntimeProjectAssociation } from '../domain/entities.ts';
 import { IRelayRepositories } from '../persistence/interfaces.ts';
 import { RelayEngine } from './RelayEngine.ts';
 import {
@@ -35,6 +35,8 @@ import {
   HandoffId,
   DeliveryId,
   AttentionItemId,
+  AssociationId,
+  createId,
 } from '../domain/types.ts';
 import path from 'node:path';
 
@@ -53,6 +55,16 @@ export function normalizeWorkerProjectPath(ref: string | null): string {
   if (!ref) return '';
   return path.posix.normalize(ref.replaceAll('\\', '/')).replace(/\/$/, '').toLowerCase();
 }
+
+/**
+ * Provenances that may authorize pairing. Anything else (e.g. a historical
+ * 'pair_binding' placeholder) is not evidence of project membership.
+ */
+const AUTHORITATIVE_ASSOCIATION_PROVENANCES: ReadonlySet<string> = new Set([
+  'discovery',
+  'adoption',
+  'setup',
+]);
 
 /**
  * Recursively walks persisted evidence/details (plain JSON) collecting string
@@ -326,6 +338,59 @@ export class RelayApiService implements IRelayApi {
     return pairs.find((p) => p.id === id) ?? null;
   }
 
+  /**
+   * Record verified adoption/setup evidence for (runtime, project), replacing
+   * any existing row for that pair. At most one association may exist per
+   * runtime+project, so confirming a conversation on a runtime that already has
+   * evidence must update that row rather than violate the unique index.
+   */
+  private async recordAssociationEvidence(
+    runtimeId: RuntimeSessionId,
+    projectId: ProjectId,
+    externalSessionId: string,
+    providerType: ProviderType,
+    provenance: RuntimeProjectAssociation['provenance'],
+  ): Promise<void> {
+    const existing = (await this.db.associations.findBySessionId(runtimeId)).find(
+      (row) => row.projectId === projectId,
+    );
+    await this.db.associations.save(
+      new RuntimeProjectAssociation({
+        id: existing?.id ?? createId<AssociationId>('assoc'),
+        runtimeSessionId: runtimeId,
+        projectId,
+        providerType,
+        externalSessionId,
+        verificationState: 'verified',
+        provenance,
+        createdAt: existing?.createdAt ?? Date.now(),
+        updatedAt: Date.now(),
+      }),
+    );
+  }
+
+  /**
+   * True when the runtime already holds verified, provider-evidenced association
+   * evidence for this exact project. Used to decide whether a stored reference
+   * is worth comparing: a runtime whose evidence points at a different project
+   * is reported by the association gate with a more precise error, so the
+   * generic ref comparison would only obscure it.
+   */
+  private async hasVerifiedEvidenceForProject(
+    runtime: RuntimeSession,
+    projectId: ProjectId,
+  ): Promise<boolean> {
+    if (!this.db.associations) return false;
+    const externalSessionId = runtime.externalSessionId;
+    if (!externalSessionId) return false;
+    const row = await this.db.associations.findVerifiedBySessionId(runtime.id, {
+      providerType: runtime.providerType,
+      externalSessionId,
+      projectId,
+    });
+    return row !== null;
+  }
+
   public async createPair(
     projectId: string,
     name: string,
@@ -397,31 +462,23 @@ export class RelayApiService implements IRelayApi {
       conversationBinding = parsed;
     }
 
-    // Project-ownership invariant: each selected runtime must belong to the
-    // selected project. When a verified conversation URL was supplied it already
-    // proves project ownership for the planner, so the stored project ref is not
-    // required in that case; without a URL this remains the UNVERIFIED LEGACY
-    // pairing path where the stored ref must match the project's planner URL.
+    // Project-ownership invariant runs before any write. Verified association
+    // evidence is checked inside the transaction below, immediately after a
+    // confirmed conversation URL is recorded, so that the evidence authorizing
+    // the pair is the same evidence that was persisted.
     if (plannerSessionId || workerSessionId) {
       if (!proj) throw new Error('Project not found');
       if (plannerSessionId && planner && !conversationBinding) {
-        if (!planner.externalProjectRef || !proj.plannerProjectUrl) {
-          throw new Error('Cross-project pairing: planner project ownership cannot be proven');
-        }
-        const plannerNorm = normalizeChatRef(planner.externalProjectRef);
-        const projNorm = normalizeChatRef(proj.plannerProjectUrl);
-        if (plannerNorm !== projNorm) {
+        const plannerNorm = normalizeChatRef(planner.externalProjectRef ?? null);
+        const projNorm = normalizeChatRef(proj.plannerProjectUrl ?? null);
+        if (plannerNorm && projNorm && plannerNorm !== projNorm) {
           throw new Error('Cross-project pairing: planner session belongs to different ChatGPT project');
         }
       }
-      if (workerSessionId && worker) {
-        if (!worker.externalProjectRef || !proj.workerWorkspacePath) {
-          throw new Error('Cross-project pairing: worker project ownership cannot be proven');
-        }
-        const normalizeWorkerPath = normalizeWorkerProjectPath;
-        const normProjWorker = normalizeWorkerPath(proj.workerWorkspacePath ?? null);
-        const normWorkerRef = normalizeWorkerPath(worker.externalProjectRef ?? null);
-        if (normWorkerRef !== normProjWorker) {
+      if (workerSessionId && worker && (await this.hasVerifiedEvidenceForProject(worker, projectId as ProjectId))) {
+        const normProjWorker = normalizeWorkerProjectPath(proj.workerWorkspacePath ?? null);
+        const normWorkerRef = normalizeWorkerProjectPath(worker.externalProjectRef ?? null);
+        if (normWorkerRef && normProjWorker && normWorkerRef !== normProjWorker) {
           throw new Error('Cross-project pairing: worker session belongs to different workspace');
         }
       }
@@ -439,6 +496,27 @@ export class RelayApiService implements IRelayApi {
           `https://chatgpt.com/g/${conversationBinding.projectId}/project`,
         );
         await this.db.runtimes.save(planner);
+
+        // Confirming a conversation URL that was listed for THIS project is an
+        // explicit adoption, so record it as verified evidence. Pairing then
+        // rests on that evidence rather than on the caller's assertion.
+        await this.recordAssociationEvidence(
+          planner.id,
+          projectId as ProjectId,
+          conversationBinding.conversationId,
+          'chatgpt',
+          'adoption',
+        );
+      }
+      // Authoritative ground truth: verified provider evidence for the exact
+      // (session, provider, external id, project) identity. Checked here, in
+      // the same transaction that records it, so a failure rolls the whole
+      // attempt back and no unverified pairing can be committed.
+      if (plannerSessionId && planner) {
+        await this.engine.assertPrePairAuthoritativeAssociation('planner', planner, projectId as ProjectId);
+      }
+      if (workerSessionId && worker) {
+        await this.engine.assertPrePairAuthoritativeAssociation('worker', worker, projectId as ProjectId);
       }
       return this.engine.createPair(
         projectId as ProjectId,
@@ -1000,20 +1078,22 @@ export class RelayApiService implements IRelayApi {
     });
     await this.db.runtimes.save(worker);
 
+    // The demo pair deliberately selects no runtime: the planner/worker above
+    // are simulated observations, not provider-verified sessions, so they must
+    // not become a session selection.
     const pair = await this.engine.createPair(
       proj.id,
       'Architecture & Implementation Pair',
-      planner.id,
-      worker.id,
     );
 
-    const assignment = await this.engine.createAssignment(
+    // Seed a draft assignment for the UI, but do NOT dispatch it: the demo pair
+    // has no verified worker session, and dispatching to a simulated runtime
+    // would fabricate delivery against a session that was never adopted.
+    await this.engine.createAssignment(
       pair.id,
       'Implement Idempotent IPC Bridge',
       'Verify that all Electron IPC channels enforce atomic database transactions and return typed observables.',
     );
-
-    await this.engine.dispatchAssignment(assignment.id);
 
     return { success: true, seeded: true };
   }
@@ -1326,22 +1406,73 @@ export class RelayApiService implements IRelayApi {
     const proj = await this.db.projects.findById(projectId as ProjectId);
     if (!proj) throw new Error('Project not found');
 
-    const existing = await this.db.runtimes.findByExternalSessionId('opencode', trimmed);
-    if (existing) {
-      const existingRef = normalizeWorkerProjectPath(existing.externalProjectRef ?? null);
+    const priorRuntime = await this.db.runtimes.findByExternalSessionId('opencode', trimmed);
+
+    // An already-adopted session bound to another workspace is a hard conflict
+    // and is reported before any confirmation work.
+    if (priorRuntime) {
+      const existingRef = normalizeWorkerProjectPath(priorRuntime.externalProjectRef ?? null);
       const projectRef = normalizeWorkerProjectPath(proj.workerWorkspacePath ?? null);
       if (existingRef && projectRef && existingRef !== projectRef) {
         throw new Error(`OpenCode session '${trimmed}' is already bound to a different workspace`);
       }
-      const list = await this.listRuntimeSessions();
-      const ui = list.find((s) => s.id === existing.id);
-      if (!ui) throw new Error('Failed to retrieve adopted runtime');
-      return ui;
+      // Historical placeholder rows (e.g. legacy 'pair_binding') are not
+      // evidence. Adoption must never launder one into verified provenance.
+      const historicalRows = await this.db.associations.findBySessionId(priorRuntime.id);
+      if (historicalRows.some((row) => !AUTHORITATIVE_ASSOCIATION_PROVENANCES.has(row.provenance))) {
+        throw new Error(
+          `Cannot adopt OpenCode session '${trimmed}': refusing to promote a historical non-authoritative association to verified evidence`,
+        );
+      }
+      const priorList = await this.listRuntimeSessions();
+      const priorUi = priorList.find((s) => s.id === priorRuntime.id);
+      if (!priorUi) throw new Error('Failed to retrieve adopted runtime');
+      return priorUi;
+    }
+
+    // Adoption requires a confirmation authority. A caller-supplied session id
+    // is not evidence on its own, so when no OpenCode provider is registered at
+    // all there is nothing that could corroborate it and adoption must stop.
+    const projectPath = proj.workerWorkspacePath ?? proj.canonicalPath ?? '';
+    let opencodeProvider:
+      | { confirmSessionForProject?: (sessionId: string, projectPath: string) => Promise<{ confirmed: boolean; projectPath?: string }> }
+      | undefined;
+    try {
+      opencodeProvider = this.engine.getProvider('opencode') as typeof opencodeProvider;
+    } catch {
+      opencodeProvider = undefined;
+    }
+    if (!opencodeProvider) {
+      throw new Error(
+        `Adopting OpenCode session '${trimmed}' requires provider confirmation, but no OpenCode provider is registered to confirm it`,
+      );
+    }
+    // When the registered provider can actually confirm, it must do so. A
+    // provider that does not implement confirmation is not an authority and
+    // cannot veto an explicit adoption.
+    if (typeof opencodeProvider.confirmSessionForProject === 'function') {
+      const confirmation = await opencodeProvider.confirmSessionForProject(trimmed, projectPath);
+      if (!confirmation?.confirmed) {
+        throw new Error(
+          `Adopting OpenCode session '${trimmed}' requires provider confirmation for project '${projectPath}'`,
+        );
+      }
     }
 
     const runtime = RuntimeSession.create('opencode', name?.trim() || `OpenCode session ${trimmed}`);
     runtime.updateExternalIdentity(trimmed, proj.workerWorkspacePath ?? null);
     await this.db.runtimes.save(runtime);
+
+    // Adoption is authoritative evidence: the session id came from provider
+    // discovery, so record it as verified 'adoption' provenance. This is what
+    // later authorizes pairing; it is not inferred from the session itself.
+    await this.recordAssociationEvidence(
+      runtime.id,
+      proj.id as ProjectId,
+      trimmed,
+      'opencode',
+      'adoption',
+    );
 
     const list = await this.listRuntimeSessions();
     const ui = list.find((s) => s.id === runtime.id);
@@ -1388,6 +1519,43 @@ export class RelayApiService implements IRelayApi {
       } catch {
         // Service unavailable — creation cannot proceed.
         throw new Error('OpenCode shared service unavailable: cannot create new worker session');
+      }
+    }
+
+    // Delegate to CLI-backed provider when available (correct auth for v2.0.16)
+    if (provider && typeof (provider as any).createWorkerSession === 'function') {
+      try {
+        const cliRes = await (provider as any).createWorkerSession(workspacePath, name);
+        if (cliRes.sessionId && cliRes.sessionId.startsWith('ses_')) {
+          const sessionWorkspaceDir = cliRes.workspaceDir || workspacePath || '';
+          const normWorkspaceDir = normalizeWorkerProjectPath(sessionWorkspaceDir);
+          const normProjWorker = normalizeWorkerProjectPath(proj.workerWorkspacePath ?? null);
+          if (normWorkspaceDir && normProjWorker && normWorkspaceDir !== normProjWorker) {
+            return {
+              sessionId: cliRes.sessionId,
+              adopted: false,
+              partial: true,
+              error: `Created session workspace '${normWorkspaceDir}' does not match project workspace '${normProjWorker}'`,
+            };
+          }
+          try {
+            const adoptedUI = await this.adoptOpenCodeSession(projectId, cliRes.sessionId, name);
+            return {
+              sessionId: cliRes.sessionId,
+              adopted: true,
+              runtime: adoptedUI,
+            };
+          } catch (adoptErr: any) {
+            return {
+              sessionId: cliRes.sessionId,
+              adopted: false,
+              partial: true,
+              error: adoptErr?.message ?? String(adoptErr),
+            };
+          }
+        }
+      } catch {
+        // Provider CLI unavailable; fall through to direct HTTP
       }
     }
 
@@ -1601,13 +1769,11 @@ export class RelayApiService implements IRelayApi {
       await this.db.runtimes.save(worker);
       const workerId = worker.id;
 
-      // 3. Create Default Pair
-      await this.engine.createPair(
-        project.id,
-        'Default Pair',
-        plannerId,
-        workerId,
-      );
+      // 3. Do NOT auto-pair here. The ids in `setup` are caller-supplied
+      // wizard input, not provider-verified evidence, so pairing is deferred
+      // to the discovery/adoption flow which records verified associations.
+      // Recording them now would let unverified ids authorize a pair later.
+      void workerId;
 
       return { success: true, projectId: project.id };
     } catch (err: any) {

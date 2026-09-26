@@ -12,6 +12,13 @@ import {
   ObservableEvidence,
   ProviderType,
   PairStatus,
+  ContractRevisionId,
+  PlanFirstRunId,
+  WorkUnitId,
+  VerificationResultId,
+  ContractRevisionStatus,
+  PlanFirstRunStatus,
+  WorkUnitStatus,
 } from '../../domain/types.ts';
 import {
   Project,
@@ -23,7 +30,11 @@ import {
   Handoff,
   RelayEvent,
   AttentionItem,
+  ContractRevision,
+  WorkUnit,
+  PlanFirstRun,
 } from '../../domain/entities.ts';
+import type { VerificationResult } from '../../domain/repoBoundary.ts';
 import {
   IProjectRepository,
   IPairRepository,
@@ -34,6 +45,10 @@ import {
   IHandoffRepository,
   IEventRepository,
   IAttentionRepository,
+  IContractRevisionRepository,
+  IPlanFirstRunRepository,
+  IWorkUnitRepository,
+  IVerificationResultRepository,
 } from '../interfaces.ts';
 
 /* Helper functions for JSON safety */
@@ -411,6 +426,9 @@ export class SqliteAttemptRepository implements IAttemptRepository {
       finishedAt: row.finished_at ? Number(row.finished_at) : undefined,
       failureReason: row.failure_reason as string | undefined,
       evidence: safeJsonParse<ObservableEvidence>(row.evidence_json),
+      sessionPairId: row.session_pair_id as PairId | undefined,
+      workerSessionId: row.worker_session_id as RuntimeSessionId | undefined,
+      externalSessionId: (row.external_session_id as string | null) ?? null,
     });
   }
 
@@ -429,10 +447,14 @@ export class SqliteAttemptRepository implements IAttemptRepository {
     const stmt = this.db.prepare(`
       INSERT INTO attempts (
         id, assignment_id, attempt_number, status,
+        session_pair_id, worker_session_id, external_session_id,
         started_at, finished_at, failure_reason, evidence_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         status = excluded.status,
+        session_pair_id = excluded.session_pair_id,
+        worker_session_id = excluded.worker_session_id,
+        external_session_id = excluded.external_session_id,
         finished_at = excluded.finished_at,
         failure_reason = excluded.failure_reason,
         evidence_json = excluded.evidence_json
@@ -442,6 +464,9 @@ export class SqliteAttemptRepository implements IAttemptRepository {
       attempt.assignmentId,
       attempt.attemptNumber,
       attempt.status,
+      attempt.sessionPairId ?? null,
+      attempt.workerSessionId ?? null,
+      attempt.externalSessionId ?? null,
       attempt.startedAt,
       attempt.finishedAt ?? null,
       attempt.failureReason ?? null,
@@ -718,5 +743,299 @@ export class SqliteAttentionRepository implements IAttentionRepository {
       item.acknowledge();
       await this.save(item);
     }
+  }
+}
+/* --- Plan-First execution domain repositories (PLAN_FIRST_DOMAIN_FREEZE.md §F) --- */
+
+/**
+ * Replaces the former `SqlitePlanFirstRunRepository implements any`, which could not
+ * compile (TS2864) and returned raw snake_case rows instead of a domain entity.
+ */
+export class SqliteContractRevisionRepository implements IContractRevisionRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  private mapRow(row: Record<string, unknown>): ContractRevision {
+    return new ContractRevision({
+      id: row.id as ContractRevisionId,
+      projectId: row.project_id as ProjectId,
+      canonicalText: row.canonical_text as string,
+      canonicalDigest: row.canonical_digest as string,
+      status: row.status as ContractRevisionStatus,
+      sourceRef: (row.source_ref as string | null) ?? null,
+      approvedBy: (row.approved_by as string | null) ?? null,
+      approvedAt: row.approved_at != null ? Number(row.approved_at) : null,
+      createdAt: Number(row.created_at),
+    });
+  }
+
+  async findById(id: ContractRevisionId): Promise<ContractRevision | null> {
+    const row = this.db
+      .prepare('SELECT * FROM contract_revisions WHERE id = ?')
+      .get(id) as Record<string, unknown> | undefined;
+    return row ? this.mapRow(row) : null;
+  }
+
+  async findByProjectId(projectId: ProjectId): Promise<ContractRevision[]> {
+    const rows = this.db
+      .prepare('SELECT * FROM contract_revisions WHERE project_id = ? ORDER BY created_at ASC, id ASC')
+      .all(projectId) as Array<Record<string, unknown>>;
+    return rows.map((r) => this.mapRow(r));
+  }
+
+  async findByDigest(
+    projectId: ProjectId,
+    canonicalDigest: string,
+  ): Promise<ContractRevision | null> {
+    const row = this.db
+      .prepare('SELECT * FROM contract_revisions WHERE project_id = ? AND canonical_digest = ?')
+      .get(projectId, canonicalDigest) as Record<string, unknown> | undefined;
+    return row ? this.mapRow(row) : null;
+  }
+
+  async save(revision: ContractRevision): Promise<void> {
+    // The UNIQUE (project_id, canonical_digest) constraint is the authority for
+    // "the same semantic intent must not exist as two revisions".
+    this.db
+      .prepare(
+        `INSERT INTO contract_revisions (
+           id, project_id, canonical_text, canonical_digest, status,
+           source_ref, approved_by, approved_at, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           status = excluded.status,
+           approved_by = excluded.approved_by,
+           approved_at = excluded.approved_at`,
+      )
+      .run(
+        revision.id,
+        revision.projectId,
+        revision.canonicalText,
+        revision.canonicalDigest,
+        revision.status,
+        revision.sourceRef ?? null,
+        revision.approvedBy ?? null,
+        revision.approvedAt ?? null,
+        revision.createdAt,
+      );
+  }
+}
+
+export class SqlitePlanFirstRunRepository implements IPlanFirstRunRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  private mapRow(row: Record<string, unknown>): PlanFirstRun {
+    return new PlanFirstRun({
+      id: row.id as PlanFirstRunId,
+      projectId: row.project_id as ProjectId,
+      contractRevisionId: row.contract_revision_id as ContractRevisionId,
+      contractDigest: row.contract_digest as string,
+      sessionPairId: row.session_pair_id as PairId,
+      status: row.status as PlanFirstRunStatus,
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    });
+  }
+
+  async findById(id: PlanFirstRunId): Promise<PlanFirstRun | null> {
+    const row = this.db
+      .prepare('SELECT * FROM plan_first_runs WHERE id = ?')
+      .get(id) as Record<string, unknown> | undefined;
+    return row ? this.mapRow(row) : null;
+  }
+
+  async findByContractRevisionId(contractRevisionId: ContractRevisionId): Promise<PlanFirstRun[]> {
+    const rows = this.db
+      .prepare('SELECT * FROM plan_first_runs WHERE contract_revision_id = ? ORDER BY created_at ASC, id ASC')
+      .all(contractRevisionId) as Array<Record<string, unknown>>;
+    return rows.map((r) => this.mapRow(r));
+  }
+
+  async findActiveByContractRevisionId(
+    projectId: ProjectId,
+    contractRevisionId: ContractRevisionId,
+  ): Promise<PlanFirstRun | null> {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM plan_first_runs
+         WHERE project_id = ? AND contract_revision_id = ?
+           AND status NOT IN ('completed','cancelled')
+         ORDER BY created_at ASC, id ASC LIMIT 1`,
+      )
+      .get(projectId, contractRevisionId) as Record<string, unknown> | undefined;
+    return row ? this.mapRow(row) : null;
+  }
+
+  async findByProjectId(projectId: ProjectId): Promise<PlanFirstRun[]> {
+    const rows = this.db
+      .prepare('SELECT * FROM plan_first_runs WHERE project_id = ? ORDER BY created_at ASC, id ASC')
+      .all(projectId) as Array<Record<string, unknown>>;
+    return rows.map((r) => this.mapRow(r));
+  }
+
+  async save(run: PlanFirstRun): Promise<void> {
+    // Only `status` and `updated_at` are mutable. project_id, contract_revision_id,
+    // contract_digest and session_pair_id are immutable in the domain AND deliberately
+    // absent from the update set, so a bug cannot silently re-point a run.
+    this.db
+      .prepare(
+        `INSERT INTO plan_first_runs (
+           id, project_id, contract_revision_id, contract_digest, session_pair_id,
+           status, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           status = excluded.status,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        run.id,
+        run.projectId,
+        run.contractRevisionId,
+        run.contractDigest,
+        run.sessionPairId,
+        run.status,
+        run.createdAt,
+        run.updatedAt,
+      );
+  }
+}
+
+export class SqliteWorkUnitRepository implements IWorkUnitRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  private mapRow(row: Record<string, unknown>): WorkUnit {
+    return new WorkUnit({
+      id: row.id as WorkUnitId,
+      contractRevisionId: row.contract_revision_id as ContractRevisionId,
+      ordinal: Number(row.ordinal),
+      objective: row.objective as string,
+      instruction: row.instruction as string,
+      status: row.status as WorkUnitStatus,
+      assignmentId: (row.assignment_id as AssignmentId | null) ?? null,
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    });
+  }
+
+  async findById(id: WorkUnitId): Promise<WorkUnit | null> {
+    const row = this.db
+      .prepare('SELECT * FROM work_units WHERE id = ?')
+      .get(id) as Record<string, unknown> | undefined;
+    return row ? this.mapRow(row) : null;
+  }
+
+  async findByContractRevisionId(contractRevisionId: ContractRevisionId): Promise<WorkUnit[]> {
+    // `ordinal` is the only ordering primitive in V1 — never created_at (freeze §D.2).
+    const rows = this.db
+      .prepare('SELECT * FROM work_units WHERE contract_revision_id = ? ORDER BY ordinal ASC')
+      .all(contractRevisionId) as Array<Record<string, unknown>>;
+    return rows.map((r) => this.mapRow(r));
+  }
+
+  async findInProgressByContractRevisionId(
+    contractRevisionId: ContractRevisionId,
+  ): Promise<WorkUnit | null> {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM work_units WHERE contract_revision_id = ? AND status = 'in_progress'
+         ORDER BY ordinal ASC LIMIT 1`,
+      )
+      .get(contractRevisionId) as Record<string, unknown> | undefined;
+    return row ? this.mapRow(row) : null;
+  }
+
+  async save(unit: WorkUnit): Promise<void> {
+    // Immutable: id, contract_revision_id, ordinal, objective, instruction, created_at.
+    // Mutable: status, assignment_id (written once), updated_at.
+    this.db
+      .prepare(
+        `INSERT INTO work_units (
+           id, contract_revision_id, ordinal, objective, instruction,
+           status, assignment_id, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           status = excluded.status,
+           assignment_id = excluded.assignment_id,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        unit.id,
+        unit.contractRevisionId,
+        unit.ordinal,
+        unit.objective,
+        unit.instruction,
+        unit.status,
+        unit.assignmentId ?? null,
+        unit.createdAt,
+        unit.updatedAt,
+      );
+  }
+}
+
+/**
+ * Verification results are a separate linked record (ATTEMPT_LIFECYCLE.md Dimension B);
+ * they never mutate Attempt physical state. One row per attempt, enforced by a unique
+ * index, so the controller's verification-resume guard can rely on findByAttemptId.
+ */
+export class SqliteVerificationResultRepository implements IVerificationResultRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  private mapRow(row: Record<string, unknown>): VerificationResult {
+    return {
+      id: row.id as string,
+      attemptId: row.attempt_id as string,
+      checkId: (row.check_id as string | null) ?? undefined,
+      result: row.result as VerificationResult['result'],
+      evidence: safeJsonParse<Record<string, unknown>>(row.evidence_json) ?? undefined,
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  async findById(id: VerificationResultId): Promise<VerificationResult | null> {
+    const row = this.db
+      .prepare('SELECT * FROM verification_results WHERE id = ?')
+      .get(id) as Record<string, unknown> | undefined;
+    return row ? this.mapRow(row) : null;
+  }
+
+  async findByAttemptId(attemptId: AttemptId): Promise<VerificationResult | null> {
+    const row = this.db
+      .prepare('SELECT * FROM verification_results WHERE attempt_id = ? ORDER BY created_at ASC LIMIT 1')
+      .get(attemptId) as Record<string, unknown> | undefined;
+    return row ? this.mapRow(row) : null;
+  }
+
+  /**
+   * Records the verification verdict for an attempt.
+   *
+   * Deliberately a PLAIN INSERT, not an upsert. Freeze §E.4.1 requires
+   * `UNIQUE (attempt_id)` so that "two conflicting results" for one attempt are
+   * impossible and the resume path is deterministic. An `ON CONFLICT(attempt_id)
+   * DO UPDATE` would satisfy the row count while silently ERASING the first verdict,
+   * which is the very conflict the constraint exists to prevent: a re-evaluation would
+   * destroy the audit record of what was actually verified, with no trace.
+   *
+   * The controller never needs an update: `verifyPlanFirstUnit` checks
+   * `findByAttemptId` first and, on a crash between "result written" and "unit
+   * completed", RESUMES from the stored result instead of re-evaluating (freeze §G
+   * step 10). A rejection here therefore means a caller genuinely tried to record a
+   * second verdict for one attempt, which must be a loud failure.
+   */
+  async save(result: VerificationResult): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO verification_results (
+           id, attempt_id, check_id, result, evidence_json, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        result.id,
+        result.attemptId,
+        result.checkId ?? null,
+        result.result,
+        result.evidence ? safeJsonStringify(result.evidence) : null,
+        result.createdAt,
+        result.updatedAt,
+      );
   }
 }
