@@ -4,6 +4,14 @@ import {
   ObservableEvidence,
   ProviderType,
   ProviderIntegrationStatus,
+  SideObservationReading,
+  SideExistenceState,
+  SideReachabilityState,
+  SideUiPresenceState,
+  SideActivityState,
+  SideMessageEvidenceState,
+  SideMessageEvidence,
+  PROVISIONAL_OBSERVATION_VALIDITY_MS,
 } from '../domain/types.ts';
 import {
   IRuntimeProvider,
@@ -14,6 +22,7 @@ import {
   ProviderSessionConfirmation,
   SideIdentityRequest,
   SideIdentityResolution,
+  SideObservationRequest,
 } from './interfaces.ts';
 import {
   OpenCodeServiceError,
@@ -23,6 +32,144 @@ import {
   type OpenCodeSessionSummary,
   type ServiceDiscoveryFailure,
 } from './opencodeSessionClient.ts';
+
+/**
+ * S2 observation helpers.
+ *
+ * These are pure functions over already-parsed JSON, kept module-level so the
+ * dimension logic is readable and independently testable. They never throw: a
+ * read that cannot be understood becomes `unknown` with a reason (I-6).
+ */
+
+/** A reading that could not be established at all, with every dimension unknown. */
+function unreadable(now: number, validUntil: number, reason: string): SideObservationReading {
+  return {
+    reachabilityState: 'unknown',
+    uiPresenceState: 'unknown',
+    activityState: 'unknown',
+    messageEvidenceState: 'unknown',
+    message: { ref: null, role: null, text: null, truncated: false, ordinal: null },
+    observationCapability: 'opencode_cli_session_status_transcript',
+    observedAt: now,
+    validUntil,
+    reason,
+    evidence: null,
+  };
+}
+
+/** `asRecord`-style helpers, duplicated locally to avoid touching shared code. */
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+function asRecordList(value: unknown): Record<string, unknown>[] | null {
+  if (Array.isArray(value)) return value as Record<string, unknown>[];
+  const inner = asRecord(value)?.data ?? asRecord(value)?.sessions;
+  return Array.isArray(inner) ? (inner as Record<string, unknown>[]) : null;
+}
+function firstReason(
+  ...results: Array<{ ok: boolean; reason?: string }>
+): string {
+  for (const r of results) if (!r.ok && r.reason) return r.reason;
+  return 'no reason reported';
+}
+
+/**
+ * S2 — the latest MEANINGFUL message, per the provider's own classification.
+ *
+ * ## "Meaningful" means the provider called it a conversational turn
+ *
+ * `roleFromType` in the session client maps `user`/`assistant` to themselves,
+ * `system`/`synthetic` to `system`, and EVERYTHING ELSE — reasoning parts, tool
+ * calls, and any future type — to `other`. So selecting only
+ * `user | assistant | system` is not a RelayX guess about what matters; it is
+ * RelayX honouring the provider's own classification and declining to present a
+ * reasoning or tool fragment as a user-visible response (C-8, §9 of the S2 brief).
+ *
+ * ## Ordering is the provider's, and only within this one session
+ *
+ * A message is orderable only if the provider gave it a `time.created`. Messages
+ * are ranked ascending by `(createdAt, providerArrayIndex)` — the index tie-break
+ * makes the rank total and deterministic, so the same provider response always
+ * yields the same ordinal. The resulting `ordinal` is therefore monotonic within
+ * ONE provider and ONE session, and S2 compares nothing across providers (I-7).
+ *
+ * If no message is orderable the answer is `unknown` with a reason, never
+ * `none`: "no message carries a provider timestamp" is not the same claim as
+ * "the session has no messages" (I-6).
+ */
+function readLatestMeaningfulMessage(transcript: {
+  ok: boolean;
+  data?: unknown;
+  reason?: string;
+}): { state: SideMessageEvidenceState; evidence: SideMessageEvidence; reason: string | null } {
+  const empty: SideMessageEvidence = { ref: null, role: null, text: null, truncated: false, ordinal: null };
+  if (!transcript.ok) {
+    return {
+      state: 'unknown',
+      evidence: empty,
+      reason: `The transcript read did not complete: ${transcript.reason ?? 'no reason reported'}`,
+    };
+  }
+  const rows = asRecordList(transcript.data);
+  if (rows === null) {
+    return { state: 'unknown', evidence: empty, reason: 'The transcript response was not a message list' };
+  }
+
+  const conversational = new Set(['user', 'assistant', 'system']);
+  const orderable: Array<{ createdAt: number; index: number; row: Record<string, unknown> }> = [];
+  for (const [index, row] of rows.entries()) {
+    const type = asString(asRecord(row)?.type);
+    const role = type === 'user' ? 'user' : type === 'assistant' ? 'assistant' : type === 'system' || type === 'synthetic' ? 'system' : 'other';
+    if (!conversational.has(role)) continue;
+    const created = asRecord(asRecord(row)?.time)?.created;
+    const createdAt = typeof created === 'number' ? created : undefined;
+    // Only provider-timestamped messages are orderable; an undated one cannot be
+    // ranked without inventing an ordering the provider did not give.
+    if (createdAt === undefined) continue;
+    orderable.push({ createdAt, index, row: { ...row, __role: role } });
+  }
+
+  if (orderable.length === 0) {
+    return {
+      state: rows.length === 0 ? 'none' : 'unknown',
+      evidence: empty,
+      reason:
+        rows.length === 0
+          ? null
+          : 'The session has messages, but none is both a conversational turn and provider-timestamped, so the latest one cannot be established',
+    };
+  }
+
+  orderable.sort((a, b) => a.createdAt - b.createdAt || a.index - b.index);
+  const latest = orderable[orderable.length - 1];
+  const content = Array.isArray(latest.row.content) ? latest.row.content : [];
+  const text = content
+    .map((part) => {
+      const p = asRecord(part);
+      return p && p.type === 'text' ? (asString(p.text) ?? '') : '';
+    })
+    .filter((t) => t.length > 0)
+    .join('\n');
+
+  return {
+    state: 'observed',
+    evidence: {
+      ref: asString(latest.row.id) ?? null,
+      role: (latest.row.__role as SideMessageEvidence['role']) ?? 'other',
+      text: text.length > 0 ? text : null,
+      // Truncation is recorded, never hidden (C-8, §10.3).
+      truncated: rows.length > 200,
+      // The rank in the provider's own ordering of THIS session.
+      ordinal: orderable.length - 1,
+    },
+    reason: null,
+  };
+}
 
 /**
  * Foundation for macOS Native Automation & Process Probing.
@@ -3257,6 +3404,188 @@ export class OpenCodeProvider extends BaseMacOSProvider {
         details: { authoritativeSessionId: resolvedId },
       },
     };
+  }
+
+  /**
+   * S2 — read-only observation of ONE exact bound session (dimensions 4-7).
+   *
+   * ## ef6185b / I-16 preservation
+   *
+   * This is a NEW private CLI helper plus a NEW public method. It shares no code
+   * with, and refactors nothing in, `confirmSessionForProject`,
+   * `matchSessionsByPath`, `discoverSessionsViaSharedService`,
+   * `discoverPersistedSessions`, `matchAuthoritativeSessions` or
+   * `createWorkerSession`. Those remain byte-identical, because each is an
+   * executable preservation gate in OPENCODE_SESSION_DISCOVERY.md. Reusing one of
+   * them to save a few lines would mean editing protected behaviour.
+   *
+   * ## Read-only
+   *
+   * Every call below is `GET`. There is no POST, no prompt, no keystroke, and no
+   * state-changing endpoint. Exact Planner transport is S11 (§9.4) and is absent.
+   *
+   * ## I-11
+   *
+   * Addressed by the provider's own `ses_*` id. No title match, no window match,
+   * no workspace-basename match, no frontmost tab. A session is located by its id
+   * or not at all.
+   *
+   * ## Per-dimension independence
+   *
+   * §5.2 requires the dimensions to be distinguishable, so each read is attempted
+   * independently and a failure in one leaves only that dimension unknown. A dead
+   * transcript endpoint must not erase a successful existence check, and neither
+   * may report a negative: a failed read is "could not check" (I-6).
+   */
+  public async observeSide(request: SideObservationRequest): Promise<SideObservationReading> {
+    const now = Date.now();
+    const validUntil = now + PROVISIONAL_OBSERVATION_VALIDITY_MS;
+
+    // No id means no exact session to address. I-11 forbids substituting a name.
+    if (!request.externalSessionId) {
+      return unreadable(
+        now,
+        validUntil,
+        'No external session id was supplied, so there is no exact session to observe (I-11).',
+      );
+    }
+
+    const sessionId = request.externalSessionId;
+
+    // Three independent reads. `undefined` means "this read did not complete".
+    const [sessions, active, transcript] = await Promise.all([
+      this.s2CliGet(`/api/session?limit=200`),
+      this.s2CliGet('/api/session/active'),
+      this.s2CliGet(`/api/session/${encodeURIComponent(sessionId)}/message?limit=200`),
+    ]);
+
+    const reachable = Boolean(sessions.ok || active.ok || transcript.ok);
+
+    // Dimension 4. The provider surface answered at least one query.
+    const reachabilityState: SideReachabilityState = reachable ? 'reachable' : 'unreachable';
+
+    // Dimension 3, reported inside the reading because the session list is also
+    // the only proof the session is still there. `not_resolved`/`absent` split is
+    // preserved from S4 rather than collapsed.
+    let existence: SideExistenceState = 'unknown';
+    if (!sessions.ok) {
+      existence = 'unknown';
+    } else if (sessions.data === null) {
+      existence = 'unknown';
+    } else {
+      const rows = asRecordList(sessions.data);
+      if (rows === null) {
+        existence = 'unknown';
+      } else {
+        const exact = rows.find((row) => {
+          const record = asRecord(row);
+          return (
+            asString(record?.id) === sessionId ||
+            asString(asRecord(asRecord(record?.evidence)?.details)?.authoritativeSessionId) === sessionId
+          );
+        });
+        existence = exact ? 'present' : 'absent';
+      }
+    }
+
+    // Dimension 6. `unknown` stays unknown: OpenCode reports an explicit
+    // `unknown` state for a session it has no activity record for, and that is
+    // NOT the same as idle.
+    let activityState: SideActivityState = 'unknown';
+    if (active.ok && active.data !== null) {
+      const byId = asRecord(asRecord(active.data)?.data) ?? asRecord(asRecord(active.data)?.byId);
+      const raw = byId ? asString(byId[sessionId]) : undefined;
+      activityState =
+        raw === 'running' ? 'working' : raw === 'idle' ? 'idle' : raw === 'error' ? 'error' : 'unknown';
+    }
+
+    // Dimension 7.
+    const message = readLatestMeaningfulMessage(transcript);
+
+    // Dimension 5. Honest gap: the service API exposes no per-session UI surface,
+    // so RelayX cannot report presence or absence of one. `absent` would be a
+    // fabricated negative (I-6, C-8).
+    const uiPresenceState: SideUiPresenceState = 'unknown';
+
+    const reasons: string[] = [];
+    if (!reachable) reasons.push(`The OpenCode read surface did not answer: ${firstReason(sessions, active, transcript)}`);
+    if (existence === 'unknown') reasons.push('Session existence could not be established from the session list');
+    if (activityState === 'unknown') reasons.push('OpenCode reported no activity state for this session');
+    if (message.state === 'unknown') reasons.push(message.reason ?? 'No latest meaningful message could be established');
+    reasons.push(
+      'OpenCode exposes no per-session UI surface through this API, so UI presence is unknown rather than absent',
+    );
+
+    return {
+      reachabilityState,
+      uiPresenceState,
+      activityState,
+      messageEvidenceState: message.state,
+      message: message.evidence,
+      observationCapability: 'opencode_cli_session_status_transcript',
+      observedAt: now,
+      validUntil,
+      reason: reasons.length > 0 ? reasons.join('; ') : null,
+      evidence: {
+        id: `ev_side_obs_${now}`,
+        timestamp: now,
+        source: 'reconciliation_probe',
+        details: {
+          authoritativeSessionId: sessionId,
+          reachability: reachabilityState,
+          messageRef: message.evidence.ref,
+          messageOrdinal: message.evidence.ordinal,
+        },
+      },
+    };
+  }
+
+  /**
+   * S2's own GET-only CLI helper. Deliberately separate from the S4 helper: S4's
+   * helper is a frozen read path, and sharing one would edit protected behaviour
+   * to save lines (the same reasoning as S4 not refactoring the confirmation path).
+   */
+  private async s2CliGet(
+    query: string,
+  ): Promise<{ ok: true; data: unknown } | { ok: false; reason: string }> {
+    const { spawnSync } = await import('child_process');
+    const fs = await import('fs');
+    const cli = [
+      '/Users/lazydeepak/Library/Application Support/ai.opencode.desktop/cli/2.0.16/opencode-cli',
+      'opencode-cli',
+    ].find((p: string) => {
+      try {
+        return fs.existsSync(p);
+      } catch {
+        return false;
+      }
+    });
+    if (!cli) return { ok: false, reason: 'No OpenCode CLI is available' };
+
+    let res: { error?: Error; status?: number | null; stdout?: string; stderr?: string };
+    try {
+      res = spawnSync(cli, ['api', 'GET', query], {
+        encoding: 'utf8',
+        timeout: 15000,
+        maxBuffer: 5 * 1024 * 1024,
+        env: process.env,
+      }) as any;
+    } catch (err: any) {
+      return { ok: false, reason: `read threw: ${err?.message ?? String(err)}` };
+    }
+    if (res.error || res.status !== 0 || !res.stdout) {
+      return {
+        ok: false,
+        reason: `read did not complete (status ${res.status ?? 'none'}${
+          res.error ? `, ${res.error.message}` : ''
+        })`,
+      };
+    }
+    try {
+      return { ok: true, data: JSON.parse(res.stdout) };
+    } catch {
+      return { ok: false, reason: 'response was not parseable JSON' };
+    }
   }
 
   /**

@@ -645,6 +645,7 @@ describe('S6 closure group I — the provider-contact surface cannot grow silent
       'RelayEngine.ts:inspectRuntime': 'runSupervisionTick / recoverOnStartup continue-guard, and reconcileAndRecoverRuntime shared guard',
       'RelayEngine.ts:reconcileDispatch': 'probeDispatchOutcome via attempt.sessionPairId',
       'RelayEngine.ts:detectWorkingState': 'reconcileInFlightPlanFirstUnit via run.sessionPairId',
+      'RelayEngine.ts:observeSide': 'S2: pair.isProviderContactPermitted() checked inside observeSide before getProvider is ever resolved',
       'RelayApiService.ts:inspectRuntime': 'engine.assertRuntimeProviderContactPermitted()',
     };
     // Exempt by documented classification, not by omission.

@@ -149,16 +149,18 @@ export type SideVerificationCapability = 'exact_session_verifiable' | 'not_verif
 export const NO_IDENTITY_CAPABILITY = 'none';
 
 /**
- * The durable, per-side record of what S5 established (the S5 subset of the
- * §10.3 `side_observations` proposal: dimensions 1-3, plus the mandatory
- * dimensions 8 and 9).
+ * The durable, per-side record of what RelayX most recently and TRUTHFULLY
+ * observed of one exact bound external session.
  *
- * Dimension 8 (`sourceCapability`) and dimension 9 (`observedAt`) are ALWAYS
- * populated — §5.2 `[FROZEN]`: "An observation with no source or no time is
- * invalid and must be rejected, not defaulted."
+ * History: S5 landed dimensions 1-3 + 8 + 9; S2 adds dimensions 4-7 and the
+ * §5.4 validity window. This is the §10.3 `side_observations` record, on one row
+ * per (pair, side), held by the `UNIQUE (session_pair_id, side_role)` constraint.
  *
- * There is deliberately no `readiness` field. I-5 forbids a persisted readiness
- * value, and S8 has not landed.
+ * There are deliberately no `readiness` (I-5), no `advanceState` (§6.3), and no
+ * `checkpoint` field. §6.4 is `[FROZEN]`: "Observing a side does not advance its
+ * durable checkpoint", so a checkpoint cannot live on a record that observation
+ * overwrites — the two must be separately stored, and the checkpoint is the
+ * later continuity tranche, not S2.
  */
 export interface PairSideIdentity {
   /** Owning Pair. The natural key together with `sideRole`. */
@@ -181,9 +183,21 @@ export interface PairSideIdentity {
   /** §9.5: whether this provider can be verified at all, per side. */
   capability: SideVerificationCapability;
 
-  /** Dimension 8. Always populated; names the capability, not just the provider. */
+  /**
+   * S2. Dimensions 4-7 plus their own dimension 8/9 and §5.4 validity window.
+   *
+   * `null` means S2 has never observed this side — an honest absence, distinct
+   * from an observation that reported every dimension `unknown`. The two are
+   * different facts: "we never looked" versus "we looked and could not tell".
+   * A row written by S5 therefore reads back with `null` here, and the
+   * repository maps that to a reasoned "not observed by S2" rather than
+   * fabricating `unknown` readings that no provider ever returned.
+   */
+  observation: SideObservationReading | null;
+
+  /** Dimension 8 for dimensions 1-3. Always populated; names the capability. */
   sourceCapability: string;
-  /** Dimension 9. Always populated. */
+  /** Dimension 9 for dimensions 1-3. Always populated. */
   observedAt: number;
 
   /** Human-readable explanation, especially for every `unknown`. */
@@ -210,6 +224,49 @@ export interface PairActivationResult {
    * single pair-level badge (§9.5).
    */
   fullyVerified: boolean;
+  reason: string | null;
+}
+
+/**
+ * S2 — the outcome of `observeSide(pairId, sideRole)`.
+ *
+ * §11.2 requires the operation to be truthful about what it did, so this
+ * distinguishes the three real outcomes rather than collapsing them:
+ *
+ *   - `observed`  a reading was PERSISTED as this side's latest-observed record.
+ *                 Note this does not by itself imply a provider was contacted: a
+ *                 provider that exposes no observation capability yields a
+ *                 durable all-`unknown` reading, which is true and worth keeping
+ *                 (I-6, §5.3), and it is persisted without any contact.
+ *   - `stale`     a reading WAS obtained, but it was OLDER than the durable
+ *                 record under the provider's own ordering, so the existing
+ *                 record was kept. Reported, never hidden: an out-of-order read
+ *                 that silently overwrote a newer marker is exactly the failure
+ *                 this separation exists to prevent.
+ *   - `refused`   nothing was written. Either no provider was contacted at all
+ *                 (I-2, or there was no exact session to address), or the
+ *                 provider was not registered. The returned `record` is the
+ *                 existing last-known evidence, unmodified.
+ *
+ * `providerContacted` is a SEPARATE, authoritative flag for the contact question,
+ * because `outcome` alone cannot answer it: an `observed` outcome with a LEVEL 0
+ * provider has `providerContacted === false`. Assert the I-2 property from
+ * `providerContacted`, never from the outcome.
+ */
+export type SideObservationOutcome = 'observed' | 'stale' | 'refused';
+
+export interface SideObservationResult {
+  pairId: PairId;
+  sideRole: PairSideRole;
+  outcome: SideObservationOutcome;
+  /** I-2: false for a refusal, true only when the provider was actually read. */
+  providerContacted: boolean;
+  /**
+   * The durable record as it stands AFTER this operation. On `stale` this is the
+   * PREVIOUS record, because the newer one was deliberately preserved.
+   */
+  record: PairSideIdentity;
+  /** What this operation changed, and what it deliberately did not. */
   reason: string | null;
 }
 
@@ -247,6 +304,8 @@ export interface PairActivationResult {
  * provider?". The decision carries exactly what a caller legitimately needs to
  * report — who governs it, and in what state — and the state is captured at
  * resolution time rather than re-read later, so it cannot go stale mid-check.
+ *
+ * S6 CLOSURE — the authoritative ownership decision for a RUNTIME-ADDRESSED
  */
 export type RuntimePairGovernance =
   | { kind: 'unpaired' }
@@ -258,6 +317,145 @@ export const RUNTIME_PAIR_NOT_ACTIVE = 'PAIR_OPERATIONAL_STATE_IDLE';
 
 /** S6 closure error code: a runtime is bound to more than one Pair. Fails closed. */
 export const RUNTIME_PAIR_OWNERSHIP_AMBIGUOUS = 'PAIR_OWNERSHIP_AMBIGUOUS';
+
+/* ========================================================================== *
+ * S2 — the provider-neutral observation model (freeze §5.2 dimensions 4-7)
+ *
+ * S5 landed dimensions 1-3 (identity, verification, existence) plus the two
+ * mandatory dimensions 8-9, and `PairSideIdentity` documents itself as "the S5
+ * subset of the §10.3 `side_observations` proposal". S2 completes that same
+ * record with the remaining four dimensions rather than introducing a SECOND
+ * table for the same natural key. Two tables keyed on (pair, side) would create
+ * two competing "latest observed" authorities for one subject, which is the
+ * duplicate-authority defect the S1-S6 foundation exists to prevent.
+ * ========================================================================== */
+
+/**
+ * Dimension 4 — Reachability (§5.2): "can RelayX currently reach the provider
+ * surface at all?"
+ *
+ * This is NOT a restatement of dimension 3. `unreachable` means the provider
+ * surface itself could not be contacted, so dimensions 1-3, 5-7 are necessarily
+ * unknown too — "we could not look" is a strictly weaker fact than "it is gone".
+ */
+export type SideReachabilityState = 'reachable' | 'unreachable' | 'unknown';
+
+/**
+ * Dimension 5 — UI presence (§5.2): "is the session's surface present and
+ * visible?"
+ *
+ * Distinct from existence. A session can exist in the provider's store while no
+ * surface for it is on screen. A provider with no user-addressable surface (an
+ * HTTP session service) reports `unknown` here rather than `absent`, because
+ * "no such UI concept" is a capability gap, not an observation (I-6, C-8).
+ */
+export type SideUiPresenceState = 'present' | 'absent' | 'unknown';
+
+/**
+ * Dimension 6 — Activity state (§5.2): "is work in progress right now?"
+ *
+ * `unknown` is the honest value for a provider that exposes no activity signal.
+ * It is never coerced to `idle`: "not working" and "we cannot tell" are the
+ * different facts I-6 exists to keep apart, and collapsing them would make an
+ * unobservable side look like a finished one.
+ */
+export type SideActivityState = 'working' | 'idle' | 'error' | 'unknown';
+
+/**
+ * Dimension 7 — Message evidence state (§5.2): "what is the latest observable
+ * message, if any?"
+ *
+ * `none` means CHECKED and there is no meaningful message. `unknown` means it
+ * could not be established.
+ */
+export type SideMessageEvidenceState = 'observed' | 'none' | 'unknown';
+
+/**
+ * Dimension 7's payload — the durable latest-observed message marker.
+ *
+ * Every field is optional because the providers genuinely differ, and S2 must not
+ * fabricate a value a provider does not expose (§5.2, C-8):
+ *
+ *   - `ref`      a provider-stable message identifier. OpenCode supplies
+ *                `messageId`, which is also the LEVEL 1 comparison primitive the
+ *                continuity model needs (freeze §6.3, I-7). A LEVEL 0 provider
+ *                supplies none, and `ref` stays null. §5.3/I-7 forbid inventing
+ *                one.
+ *   - `ordinal`  the message's position in the PROVIDER's own ordering of that
+ *                one session's messages. This is what makes a monotonic
+ *                comparison possible WITHOUT a synthetic global sequence: it is
+ *                the provider's order, scoped to one provider and one session, so
+ *                it can never compare a planner timestamp against a worker one
+ *                (I-7, §4 of the S2 brief).
+ *   - `truncated` recorded, never hidden (C-8, §10.3): a bounded extract that
+ *                clipped the text must say so rather than imply a complete body.
+ */
+export interface SideMessageEvidence {
+  ref: string | null;
+  role: 'user' | 'assistant' | 'system' | 'other' | null;
+  text: string | null;
+  truncated: boolean;
+  /** Position in the provider's own ordering; null when the provider has none. */
+  ordinal: number | null;
+}
+
+/**
+ * The one capability name used when a provider exposes no observation capability.
+ *
+ * Dimension 8 (§5.2) requires an observation to name the CAPABILITY that produced
+ * it, and an observation with no source is invalid rather than defaulted. S4's
+ * `sourceCapability` covers dimensions 1-3; S2 adds a second, separate name for
+ * dimensions 4-7 because they come from a genuinely different capability. Merging
+ * the two would misreport which capability produced which dimension (C-8).
+ */
+export const NO_OBSERVATION_CAPABILITY = 'none';
+
+/**
+ * §5.4 freshness — the provisional validity window for a side observation.
+ *
+ * §5.4 makes `valid_until` mandatory ("an observation older than its window is
+ * stale"), but its own second paragraph leaves the PER-CAPABILITY window
+ * `[UNRESOLVED]` (§20, U-7). This single constant is therefore an explicitly
+ * PROVISIONAL placeholder, not a decided per-capability policy: S2 records the
+ * timestamp so staleness is later computable, and does not use the window to
+ * authorise anything (I-5 forbids a stale value authorising anything, and no
+ * authorisation is derived here). When U-7 is decided this becomes a per-capability
+ * lookup rather than one global number.
+ */
+export const PROVISIONAL_OBSERVATION_VALIDITY_MS = 5 * 60 * 1000;
+
+/**
+ * S2 — dimensions 4-7 of the durable per-side observation record.
+ *
+ * Kept as a nested object rather than eleven loose columns on `PairSideIdentity`
+ * because these four dimensions travel together: they are the output of one
+ * provider read, and grouping them keeps the "S2 has not observed this side yet"
+ * case representable as a single absent object instead of eleven independent
+ * NULLs that could disagree with one another.
+ */
+export interface SideObservationReading {
+  reachabilityState: SideReachabilityState;
+  uiPresenceState: SideUiPresenceState;
+  activityState: SideActivityState;
+  messageEvidenceState: SideMessageEvidenceState;
+  message: SideMessageEvidence;
+  /**
+   * Dimension 8 for dimensions 4-7. Always populated; `NO_OBSERVATION_CAPABILITY`
+   * when the provider exposes no observation capability at all.
+   */
+  observationCapability: string;
+  /** Dimension 9 for dimensions 4-7. Always populated. */
+  observedAt: number;
+  /** §5.4 freshness marker; always populated. */
+  validUntil: number;
+  /** Why these values are what they are — required for every `unknown`. */
+  reason: string | null;
+  /** The low-level provider evidence artifact, when the provider returns one. */
+  evidence: ObservableEvidence | null;
+}
+
+/** S2 error code: observation was attempted on a Pair that is not ACTIVE. */
+export const PAIR_NOT_ACTIVE_FOR_OBSERVATION = 'PAIR_OPERATIONAL_STATE_IDLE';
 
 export type AssignmentStatus =
   | 'pending'

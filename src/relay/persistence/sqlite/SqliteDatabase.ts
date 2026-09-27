@@ -437,6 +437,7 @@ CREATE TABLE IF NOT EXISTS handoffs (
     this.migratePlanFirstSchema();
     this.migrateSessionPairOperationsSchema();
     this.migrateSideIdentitySchema();
+    this.migrateSideObservationSchema();
   }
 
   /**
@@ -488,6 +489,84 @@ CREATE TABLE IF NOT EXISTS handoffs (
     `);
 
     this.db.exec('PRAGMA user_version = 5;');
+  }
+
+  /**
+   * S2 observation dimensions, version 6.
+   *
+   * Frozen source: DESIGN_FREEZE_SESSION_PAIR_OPERATIONS.md §10.1, §10.3, §5.2,
+   * §5.3, §5.4, I-3, I-6, C-8.
+   *
+   * Additive only, gated on `PRAGMA user_version` exactly like the v0->v2 through
+   * v3->v5 steps. It adds columns and alters no existing value.
+   *
+   * ## It extends the SAME table rather than creating a second one
+   *
+   * §10.3's `side_observations` is one row per (pair, side), and that table already
+   * exists as `pair_side_identity` (stamped by v5), whose own doc comment calls it
+   * "the S5 subset of the §10.3 `side_observations` proposal". S2 supplies the
+   * missing dimensions 4-7 to that record. A second observation table keyed on the
+   * same (pair, side) would create two competing "latest observed" authorities for
+   * one subject, which is the duplicate-authority defect the S1-S6 foundation
+   * exists to prevent.
+   *
+   * ## Columns are NULLable, and that is deliberate
+   *
+   * Every column here is added WITHOUT a default, so a row written by S5 keeps NULL
+   * here. NULL therefore means "this build never wrote this dimension", which is a
+   * different fact from "a provider was asked and answered `unknown`". The
+   * repository maps NULL to a `null` `observation` object carrying an explicit
+   * reason, rather than fabricating `unknown` readings no provider ever returned
+   * (I-6, and the same provenance rule the v5 step states for an absent row).
+   *
+   * §10.1 is explicit that no column may be dropped or narrowed, and this step
+   * writes no row values at all: a fresh database (v0 -> v6) and a legacy file
+   * (v5 -> v6) both end up with the same columns, and a legacy file's existing
+   * S5 rows are left exactly as they were.
+   *
+   * ORDERING: this must run AFTER migrateSideIdentitySchema(), which stamps 5,
+   * otherwise a v5 database would re-enter the v5 step against a table that does
+   * not exist yet.
+   */
+  private migrateSideObservationSchema(): void {
+    const versionResult = this.db.prepare('PRAGMA user_version').get() as { user_version: number } | undefined;
+    const currentVersion = versionResult?.user_version ?? 0;
+    if (currentVersion >= 6) return;
+
+    // Dimension 4.
+    addColumnIfNeeded(this.db, 'pair_side_identity', 'reachability_state', 'TEXT');
+    // Dimension 5.
+    addColumnIfNeeded(this.db, 'pair_side_identity', 'ui_presence_state', 'TEXT');
+    // Dimension 6.
+    addColumnIfNeeded(this.db, 'pair_side_identity', 'activity_state', 'TEXT');
+    // Dimension 7.
+    addColumnIfNeeded(this.db, 'pair_side_identity', 'message_evidence_state', 'TEXT');
+    addColumnIfNeeded(this.db, 'pair_side_identity', 'message_ref', 'TEXT');
+    addColumnIfNeeded(this.db, 'pair_side_identity', 'message_role', 'TEXT');
+    addColumnIfNeeded(this.db, 'pair_side_identity', 'message_text', 'TEXT');
+    addColumnIfNeeded(this.db, 'pair_side_identity', 'message_truncated', 'INTEGER');
+    // Provider-supplied ordering, scoped to one provider and one session (I-7).
+    addColumnIfNeeded(this.db, 'pair_side_identity', 'message_ordinal', 'INTEGER');
+    // Dimension 8 for dimensions 4-7, kept separate from the S4 identity one.
+    addColumnIfNeeded(this.db, 'pair_side_identity', 'observation_capability', 'TEXT');
+    // Dimension 9 for dimensions 4-7.
+    addColumnIfNeeded(this.db, 'pair_side_identity', 'observation_observed_at', 'INTEGER');
+    // §5.4 freshness window.
+    addColumnIfNeeded(this.db, 'pair_side_identity', 'valid_until', 'INTEGER');
+    // The S2 reading's own reason, for the same reason as the evidence column: the
+    // existing `reason` explains the S5 identity dimensions, and an S2 explanation
+    // written over it would erase why the identity was unknown or mismatched.
+    addColumnIfNeeded(this.db, 'pair_side_identity', 'observation_reason', 'TEXT');
+    // The S2 provider evidence artifact, kept in its OWN column.
+    //
+    // This is deliberately not the existing `evidence_json`. That column holds the
+    // S4 identity-resolution artifact; writing an S2 observation artifact over it
+    // would destroy the provenance of the identity resolution, which is the same
+    // overwrite defect §12's provenance model exists to prevent. Two artifacts,
+    // two columns, neither shadowing the other.
+    addColumnIfNeeded(this.db, 'pair_side_identity', 'observation_evidence_json', 'TEXT');
+
+    this.db.exec('PRAGMA user_version = 6;');
   }
 
   /**

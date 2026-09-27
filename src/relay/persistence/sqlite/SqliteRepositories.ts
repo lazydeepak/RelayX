@@ -21,6 +21,12 @@ import {
   SideExistenceState,
   SideVerificationCapability,
   NO_IDENTITY_CAPABILITY,
+  SideObservationReading,
+  SideReachabilityState,
+  SideUiPresenceState,
+  SideActivityState,
+  SideMessageEvidenceState,
+  NO_OBSERVATION_CAPABILITY,
   ContractRevisionId,
   PlanFirstRunId,
   WorkUnitId,
@@ -404,12 +410,61 @@ export class SqlitePairSideIdentityRepository implements IPairSideIdentityReposi
       verificationValue: (row.verification_value as string) || null,
       existenceState: known(row.existence_state, ['present', 'absent'], 'unknown') as SideExistenceState,
       capability: known(row.capability, ['exact_session_verifiable'], 'not_verifiable') as SideVerificationCapability,
+      observation: this.mapObservation(row),
       // Dimension 8 is mandatory (§5.2). A row that somehow lost it is marked
       // explicitly rather than silently treated as a real capability name.
       sourceCapability: (row.source_capability as string) || NO_IDENTITY_CAPABILITY,
       observedAt: Number(row.observed_at),
       reason: (row.reason as string) || null,
       evidence: row.evidence_json ? JSON.parse(row.evidence_json as string) : null,
+    };
+  }
+
+  /**
+   * S2 — dimensions 4-7 as one grouped reading.
+   *
+   * I-6 on read, twice over:
+   *
+   *   1. An ABSENT group (a row written by S5, which had no S2 columns) is
+   *      `null`, not a set of `unknown` readings. "S2 never observed this side"
+   *      and "S2 observed every dimension as unknown" are different facts and are
+   *      kept apart.
+   *   2. A PRESENT but unrecognised state maps to `unknown` plus a reason, never
+   *      to a negative value, because a state this build does not understand
+   *      means "could not be checked", not "checked and negative".
+   */
+  private mapObservation(row: Record<string, unknown>): SideObservationReading | null {
+    if (row.reachability_state == null) return null;
+
+    const known = (v: unknown, allowed: readonly string[]) =>
+      typeof v === 'string' && allowed.includes(v) ? v : 'unknown';
+
+    return {
+      reachabilityState: known(row.reachability_state, ['reachable', 'unreachable']) as SideReachabilityState,
+      uiPresenceState: known(row.ui_presence_state, ['present', 'absent']) as SideUiPresenceState,
+      activityState: known(row.activity_state, ['working', 'idle', 'error']) as SideActivityState,
+      messageEvidenceState: known(row.message_evidence_state, ['observed', 'none']) as SideMessageEvidenceState,
+      message: {
+        ref: (row.message_ref as string) || null,
+        role:
+          row.message_role === 'user' || row.message_role === 'assistant' || row.message_role === 'system'
+            ? row.message_role
+            : row.message_role === null || row.message_role === undefined
+              ? null
+              : 'other',
+        text: (row.message_text as string) || null,
+        truncated: Number(row.message_truncated ?? 0) === 1,
+        // Null means the provider supplied NO ordering primitive, and the caller
+        // must then perform no staleness comparison at all (I-7).
+        ordinal: row.message_ordinal == null ? null : Number(row.message_ordinal),
+      },
+      observationCapability: (row.observation_capability as string) || NO_OBSERVATION_CAPABILITY,
+      observedAt: Number(row.observation_observed_at),
+      validUntil: Number(row.valid_until),
+      reason: (row.observation_reason as string) || null,
+      evidence: row.observation_evidence_json
+        ? JSON.parse(row.observation_evidence_json as string)
+        : null,
     };
   }
 
@@ -432,14 +487,22 @@ export class SqlitePairSideIdentityRepository implements IPairSideIdentityReposi
     // observation per side, enforced by the UNIQUE constraint. The primary key
     // must therefore include the role, or the two sides of one Pair collide.
     const id = `side_identity::${identity.sessionPairId}::${identity.sideRole}`;
+    // A null `observation` writes NULLs across the S2 columns, which is the
+    // honest encoding of "S2 has not observed this side" (see `mapObservation`).
+    const o = identity.observation;
     this.db
       .prepare(
         `INSERT INTO pair_side_identity (
            id, session_pair_id, side_role, provider_type, runtime_session_id,
            external_session_id, identity_state, identity_value,
            verification_state, verification_value, existence_state,
-           capability, source_capability, observed_at, reason, evidence_json
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           capability, source_capability, observed_at, reason, evidence_json,
+           reachability_state, ui_presence_state, activity_state,
+           message_evidence_state, message_ref, message_role, message_text,
+           message_truncated, message_ordinal, observation_capability,
+           observation_observed_at, valid_until, observation_evidence_json,
+           observation_reason
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(session_pair_id, side_role) DO UPDATE SET
            provider_type = excluded.provider_type,
            runtime_session_id = excluded.runtime_session_id,
@@ -453,7 +516,26 @@ export class SqlitePairSideIdentityRepository implements IPairSideIdentityReposi
            source_capability = excluded.source_capability,
            observed_at = excluded.observed_at,
            reason = excluded.reason,
-           evidence_json = excluded.evidence_json`,
+           evidence_json = excluded.evidence_json,
+           -- S2 dimensions. Overwriting these is the NORMAL case: a later
+           -- observation of the same side replaces the earlier one. What must
+           -- never happen here is a change to dimensions 1-3 as a side effect of
+           -- observing 4-7, which is why the engine carries them forward rather
+           -- than recomputing them.
+           reachability_state = excluded.reachability_state,
+           ui_presence_state = excluded.ui_presence_state,
+           activity_state = excluded.activity_state,
+           message_evidence_state = excluded.message_evidence_state,
+           message_ref = excluded.message_ref,
+           message_role = excluded.message_role,
+           message_text = excluded.message_text,
+           message_truncated = excluded.message_truncated,
+           message_ordinal = excluded.message_ordinal,
+           observation_capability = excluded.observation_capability,
+           observation_observed_at = excluded.observation_observed_at,
+           valid_until = excluded.valid_until,
+           observation_evidence_json = excluded.observation_evidence_json,
+           observation_reason = excluded.observation_reason`,
       )
       .run(
         id,
@@ -472,6 +554,20 @@ export class SqlitePairSideIdentityRepository implements IPairSideIdentityReposi
         identity.observedAt,
         identity.reason,
         identity.evidence ? JSON.stringify(identity.evidence) : null,
+        o ? o.reachabilityState : null,
+        o ? o.uiPresenceState : null,
+        o ? o.activityState : null,
+        o ? o.messageEvidenceState : null,
+        o ? o.message.ref : null,
+        o ? o.message.role : null,
+        o ? o.message.text : null,
+        o ? (o.message.truncated ? 1 : 0) : null,
+        o ? o.message.ordinal : null,
+        o ? o.observationCapability : null,
+        o ? o.observedAt : null,
+        o ? o.validUntil : null,
+        o?.evidence ? JSON.stringify(o.evidence) : null,
+        o ? o.reason : null,
       );
   }
 

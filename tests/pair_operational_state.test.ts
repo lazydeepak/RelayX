@@ -508,11 +508,11 @@ describe('S1 — ACTIVE is a permission, not an activity level (I-4, I-5)', () =
 });
 
 describe('S1/S6 — v4 operational-state and v5 side-identity migrations (additive, gated, backfill IDLE) (§10.2, §10.3, §17.1, §17.3)', () => {
-  it('stamps user_version 5 on a fresh database and adds only the v4 columns plus the v5 table', () => {
+  it('stamps user_version 6 on a fresh database, adding the v4 columns, the v5 table, and the v6 S2 columns', () => {
     const db = freshDb();
     try {
       const version = (db.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-      assert.strictEqual(version, 5);
+      assert.strictEqual(version, 6);
 
       const cols = (
         db.db.prepare("SELECT name FROM pragma_table_info('pairs')").all() as { name: string }[]
@@ -612,7 +612,7 @@ describe('S1/S6 — v4 operational-state and v5 side-identity migrations (additi
 
       const db = new SqliteRelayDatabase(path);
       try {
-        assert.strictEqual((db.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 5);
+        assert.strictEqual((db.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 6);
 
         const rows = db.db
           .prepare('SELECT id, name, status, operational_state, stable_pair_id FROM pairs ORDER BY id')
@@ -653,7 +653,7 @@ describe('S1/S6 — v4 operational-state and v5 side-identity migrations (additi
 
       const second = new SqliteRelayDatabase(path);
       try {
-        assert.strictEqual((second.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 5);
+        assert.strictEqual((second.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 6);
         const reloaded = await second.pairs.findById(pair.id);
         assert.strictEqual(reloaded?.operationalState, 'ACTIVE', 'a decided value is never re-backfilled');
         assert.strictEqual(reloaded?.stableId, pair.id);

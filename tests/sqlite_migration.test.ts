@@ -85,10 +85,11 @@ describe('RelayX SQLite Migration & Legacy Schema Upgrade', () => {
       // v3 is the Plan-First execution-domain schema version
       // (PLAN_FIRST_DOMAIN_FREEZE.md §E.5); v4 is the Session Pair operations
       // schema (DESIGN_FREEZE_SESSION_PAIR_OPERATIONS.md §10.2); v5 is the
-      // per-side identity evidence table (same freeze §10.3, S5). A v0 database
-      // must migrate all the way up.
+      // per-side identity evidence table (same freeze §10.3, S5); v6 is the S2
+      // observation dimensions on that same table. A v0 database must migrate all
+      // the way up.
       const versionCheck = db.db.prepare('PRAGMA user_version').get() as { user_version: number };
-      assert.strictEqual(versionCheck.user_version, 5);
+      assert.strictEqual(versionCheck.user_version, 6);
 
       // The Plan-First tables must exist after migrating from v0.
       const pfTables = (
@@ -183,7 +184,7 @@ describe('RelayX SQLite Migration & Legacy Schema Upgrade', () => {
     const db = new SqliteRelayDatabase(':memory:');
 
     const version = (db.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    assert.strictEqual(version, 5);
+    assert.strictEqual(version, 6);
 
     // Plan-First schema must be present on a fresh database too.
     const pfTables = (
@@ -254,7 +255,7 @@ describe('RelayX SQLite Migration & Legacy Schema Upgrade', () => {
       const db = new SqliteRelayDatabase(testDbPath);
 
       const version = (db.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-      assert.strictEqual(version, 5);
+      assert.strictEqual(version, 6);
 
       const triggerNames = (
         db.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger'").all() as { name: string }[]

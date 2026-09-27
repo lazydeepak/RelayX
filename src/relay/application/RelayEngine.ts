@@ -21,6 +21,11 @@ import {
   RuntimePairGovernance,
   RUNTIME_PAIR_NOT_ACTIVE,
   RUNTIME_PAIR_OWNERSHIP_AMBIGUOUS,
+  SideObservationReading,
+  SideObservationResult,
+  SideObservationOutcome,
+  NO_OBSERVATION_CAPABILITY,
+  PROVISIONAL_OBSERVATION_VALIDITY_MS,
 } from '../domain/types.ts';
 import {
   Project,
@@ -1738,6 +1743,9 @@ export class RelayEngine {
         verificationValue: null,
         existenceState: 'unknown',
         capability: 'not_verifiable',
+        // S2: S5 writes identity dimensions only, so dimensions 4-7 are honestly
+        // absent rather than fabricated as `unknown` (I-6).
+        observation: null,
         sourceCapability: NO_IDENTITY_CAPABILITY,
         observedAt,
         reason: `No ${sideRole} runtime is bound to this Pair, so there is no session to address`,
@@ -1759,6 +1767,9 @@ export class RelayEngine {
         verificationValue: null,
         existenceState: 'unknown',
         capability: 'not_verifiable',
+        // S2: S5 writes identity dimensions only, so dimensions 4-7 are honestly
+        // absent rather than fabricated as `unknown` (I-6).
+        observation: null,
         sourceCapability: NO_IDENTITY_CAPABILITY,
         observedAt,
         reason: `Bound ${sideRole} runtime ${runtimeSessionId} no longer exists`,
@@ -1787,6 +1798,9 @@ export class RelayEngine {
         verificationValue: null,
         existenceState: 'unknown',
         capability: 'not_verifiable',
+        // S2: S5 writes identity dimensions only, so dimensions 4-7 are honestly
+        // absent rather than fabricated as `unknown` (I-6).
+        observation: null,
         sourceCapability: NO_IDENTITY_CAPABILITY,
         observedAt,
         reason: `No provider is registered for '${providerType}', so the ${sideRole} side cannot be resolved`,
@@ -1810,6 +1824,9 @@ export class RelayEngine {
         verificationValue: null,
         existenceState: 'unknown',
         capability: 'not_verifiable',
+        // S2: S5 writes identity dimensions only, so dimensions 4-7 are honestly
+        // absent rather than fabricated as `unknown` (I-6).
+        observation: null,
         sourceCapability: NO_IDENTITY_CAPABILITY,
         observedAt,
         reason:
@@ -1834,6 +1851,9 @@ export class RelayEngine {
         verificationValue: null,
         existenceState: 'unknown',
         capability: 'not_verifiable',
+        // S2: S5 writes identity dimensions only, so dimensions 4-7 are honestly
+        // absent rather than fabricated as `unknown` (I-6).
+        observation: null,
         sourceCapability: NO_IDENTITY_CAPABILITY,
         observedAt,
         reason:
@@ -1867,6 +1887,9 @@ export class RelayEngine {
         existenceState: resolution.existenceState,
         capability: 'exact_session_verifiable',
         // Dimension 8: the capability name, never just the provider (§5.2, C-8).
+        // S2: S5 writes identity dimensions only, so dimensions 4-7 are honestly
+        // absent rather than fabricated as `unknown` (I-6).
+        observation: null,
         sourceCapability: resolution.sourceCapability || NO_IDENTITY_CAPABILITY,
         observedAt: resolution.observedAt || observedAt,
         reason: resolution.reason ?? null,
@@ -1886,6 +1909,9 @@ export class RelayEngine {
         verificationValue: null,
         existenceState: 'unknown',
         capability: 'exact_session_verifiable',
+        // S2: S5 writes identity dimensions only, so dimensions 4-7 are honestly
+        // absent rather than fabricated as `unknown` (I-6).
+        observation: null,
         sourceCapability: NO_IDENTITY_CAPABILITY,
         observedAt,
         reason: `Identity resolution threw: ${err?.message ?? String(err)}`,
@@ -2084,6 +2110,327 @@ export class RelayEngine {
     return pair;
   }
 
+  /* ===================================================================== *
+   * S2 — provider-neutral observation of one exact bound side
+   * ===================================================================== */
+
+  /**
+   * S2 — `observeSide(pairId, sideRole)`.
+   *
+   * §11.2: state precondition `ACTIVE`, provider contact **yes**, changes
+   * operational state **no**, and it "does not advance the checkpoint (§6.4)".
+   *
+   * ## I-2 comes first, before anything else
+   *
+   * The ACTIVE check is the second statement in the method, ahead of every
+   * provider lookup. An IDLE Pair returns `outcome: 'refused'` with
+   * `providerContacted: false` and never reaches `getProvider`. §7 of the S2 brief
+   * is therefore a structural property of this method, not a convention.
+   *
+   * ## What observation deliberately does NOT touch
+   *
+   * It observes dimensions 4-7 and carries dimensions 1-3 forward from the
+   * existing record UNCHANGED. It does not re-resolve identity, does not
+   * recompute verification, does not rewrite operational state, does not derive
+   * readiness (I-5), does not compare the two sides (I-7), and does not write any
+   * checkpoint, cursor, attempt, delivery or handoff field. Those are the
+   * boundaries §6.4 and the S2 non-goals draw, and the type system helps: this
+   * method's only write is `sideIdentities.save`.
+   */
+  public async observeSide(pairId: PairId, sideRole: PairSideRole): Promise<SideObservationResult> {
+    const pair = await this.repos.pairs.findById(pairId);
+    if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'PAIR_NOT_FOUND');
+
+    const stored = await this.repos.sideIdentities.find(pairId, sideRole);
+
+    /* --- Resolve the binding LOCALLY, before the gate ------------------------
+     *
+     * Reading the local database is not external contact, so doing it ahead of
+     * the I-2 check costs nothing in provider calls. It has to happen here
+     * because the refusal path must also be able to tell whether the stored
+     * record is even about the currently bound session: returning the previous
+     * session's evidence as this side's "last-known" would be a lie, and I-3
+     * requires the IDLE view to be truthful about what it is showing.
+     */
+    const runtimeSessionId = sideRole === 'planner' ? pair.plannerSessionId : pair.workerSessionId;
+    const runtime = runtimeSessionId ? await this.repos.runtimes.findById(runtimeSessionId) : null;
+    const externalSessionId = runtime?.externalSessionId ?? null;
+
+    /* --- A stored record may describe a DIFFERENT session --------------------
+     *
+     * `updatePair()` rebinds a side to a different runtime and does not touch the
+     * side-identity rows, so a row written before the rebind still names the
+     * PREVIOUS session. That row is not this side's evidence any more. Two
+     * things follow, and both are about truth rather than policy:
+     *
+     *   - its identity dimensions must not be carried forward or returned as if
+     *     they described the newly bound session, and
+     *   - its ordinal must NOT be used as the monotonic baseline, because an
+     *     ordinal from a different session is not comparable with this one and
+     *     would make a legitimate first observation of the new session look stale.
+     *
+     * The record is not deleted: the previous session's evidence stays on disk as
+     * its own last-known truth, it is simply no longer offered as evidence about
+     * THIS side. Rebinding itself is untouched — deciding when a rebind should
+     * discard evidence belongs to the replacement contract
+     * (SESSION_PAIR_REPLACEMENT.md, C-1), which is out of scope here.
+     */
+    const storedDescribesThisSession =
+      stored !== null && externalSessionId !== null && stored.externalSessionId === externalSessionId;
+    const prior = storedDescribesThisSession ? stored : null;
+    const supersededNote =
+      !storedDescribesThisSession && stored !== null
+        ? ` The previously stored record described external session ` +
+          `'${stored.externalSessionId ?? 'none'}', which this side is no longer bound to, so it is ` +
+          'not reported as evidence for this side and was not used as an ordering baseline.'
+        : '';
+
+    /**
+     * The single refusal path. It is reached ONLY before any provider is resolved,
+     * which is what makes "zero provider contact" provable rather than asserted.
+     */
+    const refuse = (reason: string): SideObservationResult => {
+      return {
+        pairId,
+        sideRole,
+        outcome: 'refused',
+        providerContacted: false,
+        record: prior ?? this.neverObservedSide(pair, sideRole),
+        reason: reason + supersededNote,
+      };
+    };
+
+    // I-2. An IDLE Pair permits no external contact of any kind.
+    if (!pair.isProviderContactPermitted()) {
+      return refuse(
+        `Pair is IDLE, so the ${sideRole} side was not observed and no provider was contacted ` +
+          '(freeze I-2, I-3). Its stored last-known observation is still readable locally, but it ' +
+          'is last-known evidence, not live state. Run Load & Activate to permit observation.',
+      );
+    }
+
+    if (!runtimeSessionId) {
+      return refuse(
+        `The ${sideRole} side has no bound runtime, so there is no exact session to observe ` +
+          '(freeze §4.4 "both sides bound").',
+      );
+    }
+
+    if (!runtime) {
+      return refuse(
+        `The ${sideRole} runtime '${runtimeSessionId}' no longer exists, so there is nothing to observe.`,
+      );
+    }
+
+    // I-11. The address is the provider's own external id. A name is never a
+    // substitute, and an absent id is an honest refusal rather than a guess.
+    if (!externalSessionId) {
+      return refuse(
+        `The ${sideRole} runtime has no external session id, so there is no provider-owned identity ` +
+          'to observe. Per I-11 a name or window title is not a substitute.',
+      );
+    }
+
+    let provider;
+    try {
+      provider = this.getProvider(runtime.providerType);
+    } catch {
+      // A provider that is not registered is a configuration failure. It is NOT a
+      // negative observation, so nothing is persisted over the existing record.
+      return refuse(
+        `No provider is registered for '${runtime.providerType}', so the ${sideRole} side could not ` +
+          'be observed. The existing last-known observation is unchanged.',
+      );
+    }
+
+    // LEVEL 0 for this capability. Reported as unknown on every dimension, and
+    // persisted, because "this provider cannot be observed" is durable truth worth
+    // keeping (I-6, §5.3, C-8). It is never a fabricated negative.
+    if (typeof provider.observeSide !== 'function') {
+      const reading = this.unobservableReading(
+        Date.now(),
+        `Provider '${runtime.providerType}' exposes no observation capability, so the ${sideRole} ` +
+          'side is unknown on every dimension. This is a permanent capability gap (LEVEL 0), not a ' +
+          'failed read (freeze I-6, §5.3, C-8).',
+      );
+      const record = this.withObservation(prior, pair, sideRole, runtime, reading);
+      await this.repos.sideIdentities.save(record);
+      return {
+        pairId,
+        sideRole,
+        outcome: 'observed',
+        providerContacted: false,
+        record,
+        reason: reading.reason,
+      };
+    }
+
+    let projectPath: string | undefined;
+    try {
+      const project = await this.repos.projects.findById(pair.projectId);
+      projectPath = project?.workerWorkspacePath ?? project?.canonicalPath ?? undefined;
+    } catch {
+      projectPath = undefined;
+    }
+
+    let reading: SideObservationReading;
+    let contacted = true;
+    try {
+      reading = await provider.observeSide({ externalSessionId, projectPath });
+    } catch (err: any) {
+      // A thrown read is "could not observe", never "observed as negative" (I-6).
+      contacted = true;
+      reading = this.unobservableReading(
+        Date.now(),
+        `The observation read threw: ${err?.message ?? String(err)}. Nothing is known about this ` +
+          'side from this attempt (I-6).',
+      );
+    }
+
+    /* --- §11 monotonicity: never let an older reading overwrite a newer one ---
+     *
+     * The ONLY accepted ordering primitive is the provider's own ordinal for this
+     * one session. If either side lacks one, NO comparison is performed and the
+     * reading is stored as-is: inventing an ordering — worst of all from a
+     * timestamp, and certainly across two providers — is what I-7 forbids.
+     */
+    const priorOrdinal = prior?.observation?.message.ordinal ?? null;
+    const nextOrdinal = reading.message.ordinal;
+    const isStale =
+      priorOrdinal !== null &&
+      nextOrdinal !== null &&
+      nextOrdinal < priorOrdinal;
+
+    if (isStale) {
+      // Reported, never hidden. The durable marker stays authoritative.
+      return {
+        pairId,
+        sideRole,
+        outcome: 'stale',
+        providerContacted: contacted,
+        record: prior!,
+        reason:
+          `The provider reported message ordinal ${nextOrdinal}, which is OLDER than the stored ` +
+          `ordinal ${priorOrdinal} for this session, so the stored latest-observed marker was kept. ` +
+          'Ordering uses only the provider\'s own within-session order (I-7).',
+      };
+    }
+
+    const record = this.withObservation(prior, pair, sideRole, runtime, reading);
+    await this.repos.sideIdentities.save(record);
+
+    await this.emitEvent('pair', pairId, 'pair.side_observed', {
+      actor: 'user',
+      previousState: prior?.observation ? 'observed' : 'never-observed',
+      newState: 'observed',
+      details: {
+        sideRole,
+        providerType: runtime.providerType,
+        externalSessionId,
+        observationCapability: reading.observationCapability,
+        reachabilityState: reading.reachabilityState,
+        uiPresenceState: reading.uiPresenceState,
+        activityState: reading.activityState,
+        messageEvidenceState: reading.messageEvidenceState,
+        messageRef: reading.message.ref,
+        messageOrdinal: reading.message.ordinal,
+        // §6.4: observation records what was seen. It does not acknowledge it.
+        checkpointAdvanced: false,
+        // Audit trail for the rebind case: a stored record that described a
+        // different session was deliberately not carried forward.
+        supersededPriorSession: !storedDescribesThisSession && stored !== null
+          ? stored.externalSessionId ?? null
+          : null,
+      },
+    });
+
+    return {
+      pairId,
+      sideRole,
+      outcome: 'observed',
+      providerContacted: contacted,
+      record,
+      reason: (reading.reason ? reading.reason + ' ' : '') + supersededNote.trim(),
+    };
+  }
+
+  /**
+   * Carries dimensions 1-3 forward from the PRIOR record and attaches the new
+   * dimensions 4-7 reading.
+   *
+   * Preserving 1-3 verbatim is the point: observation is a read of the CURRENT
+   * state of a side, and re-deriving identity inside it would (a) double the
+   * provider traffic, (b) risk regressing the S5 verdict with a weaker read, and
+   * (c) blur the boundary between "who is this side" (S4/S5) and "what is it
+   * doing now" (S2).
+   *
+   * `prior` is passed in already filtered to a record that describes the SAME
+   * externally bound session; when it is null because the side was rebound, or
+   * because nothing was ever stored, the identity dimensions are recorded as
+   * unknown with a reason rather than invented or inherited from another session.
+   */
+  private withObservation(
+    existing: PairSideIdentity | null,
+    pair: Pair,
+    sideRole: PairSideRole,
+    runtime: { id: RuntimeSessionId; providerType: ProviderType; externalSessionId?: string | null },
+    reading: SideObservationReading,
+  ): PairSideIdentity {
+    const base = existing ?? this.neverObservedSide(pair, sideRole);
+    return {
+      ...base,
+      // Keep the S5 identity provenance current with the binding it describes, but
+      // do not re-derive the states.
+      providerType: runtime.providerType,
+      runtimeSessionId: runtime.id,
+      externalSessionId: runtime.externalSessionId ?? null,
+      observation: reading,
+    };
+  }
+
+  /** A record that says plainly that nothing is known about this side yet. */
+  private neverObservedSide(pair: Pair, sideRole: PairSideRole): PairSideIdentity {
+    return {
+      sessionPairId: pair.id,
+      sideRole,
+      providerType: sideRole === 'planner' ? 'chatgpt' : 'opencode',
+      runtimeSessionId: sideRole === 'planner' ? (pair.plannerSessionId ?? null) : (pair.workerSessionId ?? null),
+      externalSessionId: null,
+      identityState: 'unknown',
+      identityValue: null,
+      verificationState: 'unknown',
+      verificationValue: null,
+      existenceState: 'unknown',
+      capability: 'not_verifiable',
+      observation: null,
+      sourceCapability: NO_IDENTITY_CAPABILITY,
+      observedAt: Date.now(),
+      reason: 'This side has never been observed by Load & Activate',
+      evidence: null,
+    };
+  }
+
+  /**
+   * A reading in which every dimension is `unknown` because the provider could
+   * not be asked (no capability, or a throw). Dimensions 8 and 9 are still
+   * populated, because §5.2 makes an observation with no source or no time
+   * invalid rather than defaulted.
+   */
+  private unobservableReading(at: number, reason: string): SideObservationReading {
+    return {
+      reachabilityState: 'unknown',
+      uiPresenceState: 'unknown',
+      activityState: 'unknown',
+      messageEvidenceState: 'unknown',
+      message: { ref: null, role: null, text: null, truncated: false, ordinal: null },
+      observationCapability: NO_OBSERVATION_CAPABILITY,
+      observedAt: at,
+      validUntil: at + PROVISIONAL_OBSERVATION_VALIDITY_MS,
+      reason,
+      evidence: null,
+    };
+  }
+
   /**
    * Reads both sides for reporting, preferring persisted last-known evidence and
    * falling back to an explicit "never observed" record. A side is never omitted
@@ -2102,6 +2449,8 @@ export class RelayEngine {
       verificationValue: null,
       existenceState: 'unknown',
       capability: 'not_verifiable',
+      // S2: an absent group, distinct from a group whose dimensions are unknown.
+      observation: null,
       sourceCapability: NO_IDENTITY_CAPABILITY,
       observedAt: Date.now(),
       reason: 'This side has never been observed by Load & Activate',

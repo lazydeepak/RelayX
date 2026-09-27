@@ -4,6 +4,7 @@ import {
   ObservableEvidence,
   ProviderType,
   ProviderIntegrationStatus,
+  SideObservationReading,
 } from '../domain/types.ts';
 
 export interface RuntimeTargetDescriptor {
@@ -133,8 +134,52 @@ export interface IRuntimeProvider {
    */
   resolveSideIdentity?(request: SideIdentityRequest): Promise<SideIdentityResolution>;
 
+  /**
+   * S2. Optional READ-ONLY observation of ONE exact bound external session,
+   * covering §5.2 dimensions 4-7 (reachability, UI presence, activity state,
+   * message evidence) plus their own dimension 8/9 and §5.4 validity window.
+   *
+   * Additive per §11.1: no existing member is changed, weakened, or reordered.
+   * Like `resolveSideIdentity`, a provider that does not implement this exposes
+   * NO observation capability, and that is reported as `unknown` on every
+   * dimension with a reason — never as a negative reading (I-6, §5.3, C-8).
+   *
+   * It is read-only. It sends nothing: no POST, no prompt, no keystroke, and it
+   * must never acquire a write path. Exact Planner transport is S11 (§9.4) and
+   * stays absent.
+   *
+   * I-11: addressed by the provider's OWN external session identifier. It must
+   * never resolve a session by window title, frontmost tab, human-readable name,
+   * or workspace basename.
+   *
+   * ## Ordering is the provider's, never RelayX's
+   *
+   * `SideObservationReading.message.ordinal` is the position of the latest
+   * meaningful message in the PROVIDER's own ordering of that one session. It is
+   * the only ordering primitive S2 accepts, and it is comparable only within a
+   * single provider and a single session. A provider with no such ordering
+   * returns `null`, and S2 then performs NO staleness comparison at all rather
+   * than substituting a timestamp (I-7, §4 of the S2 brief).
+   */
+  observeSide?(request: SideObservationRequest): Promise<SideObservationReading>;
+
   createWorkerSession?(
     projectPath: string,
     name?: string,
   ): Promise<{ sessionId: string; workspaceDir: string; error?: string }>;
+}
+
+/**
+ * S2 — the request for a one-side observation read.
+ *
+ * Carries the provider's own external session id and nothing else. There is no
+ * `name`, no `windowTitle`, and no frontmost hint, because the whole point is
+ * that the exact bound session is addressed rather than whatever happens to be
+ * on screen (I-11).
+ */
+export interface SideObservationRequest {
+  /** I-11: the provider's own external session identifier. */
+  externalSessionId: string;
+  /** Scope hint when the provider requires a project/workspace to disambiguate. */
+  projectPath?: string;
 }
