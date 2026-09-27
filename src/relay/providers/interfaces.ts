@@ -33,6 +33,8 @@ export interface RuntimeInspectionResult {
 
 export interface DeliveryInstructionRequest {
   runtimeSessionId: RuntimeSessionId;
+  /** Authoritative provider external session identity (`ses_*` for OpenCode). */
+  externalSessionId?: string | null;
   instructionText: string;
   idempotencyKey: string;
 }

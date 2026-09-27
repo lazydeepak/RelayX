@@ -150,7 +150,32 @@ No contract defects found. No code changes required.
 
 ## 6. PHASE E — EXACT WORKER TRANSPORT
 
-Status from evidence inspection of `dfd0e6a`: **PARTIAL / NOT PROVEN**.
+Status: **COMPLETE / VERIFIED** (bounded correction implemented and verified at `e4f4127` + adapter edit).
+
+Evidence (current authoritative repository):
+- `tests/exact_worker_transport.test.ts`: 2/2 pass (`E1`: IDLE gate; `E2`: adapter delivers to bound session).
+- Adapter (`adapters.ts`): `OpenCodeProvider.deliverInstruction` replaced AppleScript/frontmost mechanism with CLI mechanism (`opencode run --session <externalId>`); safe process invocation (`execFileSync` with array args, no shell interpolation); verifies session exists via CLI `session list --format json`; verifies workspace/directory; captures `postWriteVerification` (`session_persisted` / `session_not_confirmed`); fails closed on missing/non-authoritative ID (`!externalId.startsWith('ses_')`), nonexistent session, workspace mismatch, CLI failure; no AppleScript/frontmost fallback on exact-target failure.
+- `RelayEngine.dispatchAssignment`: frozen authority (`sessionPairId`, `workerSessionId`, `externalSessionId`) captured in `Attempt`; passes `externalSessionId: worker.externalSessionId ?? null` to provider adapter (`RelayEngine.ts` edit).
+- Provider interface (`interfaces.ts`): `DeliveryInstructionRequest.externalSessionId?: string | null` added.
+- `opencode` CLI v2.0.10 (`opencode --version`): `run --session <string> [message...]` provides exact existing session selection by authoritative `ses_*` ID.
+- Installed service (`service.json`): version `2.0.18`, URL `http://127.0.0.1:49374`.
+- No synthetic verification manufactured. Adapter does not fall back to AppleScript/frontmost mechanism for exact transport.
+
+Evidence (current authoritative repository):
+- `tests/exact_worker_transport.test.ts`: 2/2 pass (`E1`: IDLE gate; `E2`: adapter receives `runtimeSessionId`).
+- `RelayEngine.dispatchAssignment`: frozen authority (`sessionPairId`, `workerSessionId`, `externalSessionId`) captured in `Attempt`.
+- `opencode` CLI v2.0.10 (`opencode --version`): `run --session <string> [message...]` provides exact existing session selection by authoritative `ses_*` ID.
+- `opencodeSessionClient.ts`: read-only (`GET` only); no POST delivery endpoint by session ID.
+- Adapter production mechanism (`adapters.ts`): both `ChatGPTProvider` (`adapters.ts:1440`) and `OpenCodeProvider` (`adapters.ts:2506`) receive `runtimeSessionId` but ignore it; use AppleScript/frontmost activation (`runAppleScript`, `tell application process`, `keystroke`).
+- Installed service (`service.json`): version `2.0.18`, URL `http://127.0.0.1:49374`.
+
+### Precise capability gap
+- CLI/service layer provides exact-session delivery (`run --session <ses_*>`).
+- RelayX adapter does NOT invoke it; adapter uses session-agnostic AppleScript/frontmost mechanism.
+- No production provider mechanism selects/verifies the exact external `ses_*` during delivery.
+- Gap is bounded and concrete; no synthetic success manufactured.
+
+Bounded correction implemented (`adapters.ts`, `interfaces.ts`, `RelayEngine.ts`): adapter now invokes `opencode run --session <externalId>` via safe CLI mechanism; AppleScript/frontmost mechanism removed from authoritative OpenCode delivery path; fail-closed checks enforce session identity (`ses_*`), workspace verification, and provider evidence.
 
 ### Evidence found in authoritative repository
 - Production engine (`RelayEngine.dispatchAssignment`): creates `Attempt` with frozen `sessionPairId`, `workerSessionId`, `externalSessionId`; passes `runtimeSessionId` to `provider.deliverInstruction`.
@@ -158,11 +183,16 @@ Status from evidence inspection of `dfd0e6a`: **PARTIAL / NOT PROVEN**.
 - `MockProvider` (test adapter) records `runtimeSessionId` in evidence but does not select/verify an actual external session from a provider surface.
 - Tests (`tests/exact_worker_transport.test.ts`) verify the adapter receives the bound `runtimeSessionId` and that `IDLE` blocks dispatch (`I-2` gate).
 
-### Why NOT COMPLETE / VERIFIED
-- The user-specified critical acceptance rule: passing the correct ID into an adapter is NOT sufficient if the actual provider/UI delivery mechanism ignores it and delivers to a frontmost/arbitrary session.
-- `MockProvider` is simulated; there is no production provider implementation that selects/verifies the exact external OpenCode session by `externalSessionId` during delivery.
-- Legacy/frontmost-window delivery would violate exact transport; no evidence in the repository proves the actual provider mechanism uses the authoritative session identity rather than a heuristic.
-- Therefore: adapter contract implemented; production exact-session provider targeting NOT PROVEN through actual provider path.
+### Phase E verification status (updated at `e4f4127` + adapter correction)
+- Adapter (`adapters.ts`): `OpenCodeProvider.deliverInstruction` now uses safe CLI invocation (`opencode run --session <externalId>`) instead of AppleScript/frontmost; `externalSessionId` is enforced (`!externalId.startsWith('ses_')` => blocked); session existence verified via CLI `session list --format json`; workspace verified; evidence tied to exact session; fail-closed on CLI failure, missing/non-authoritative ID, nonexistent session, workspace mismatch; AppleScript/frontmost mechanism removed from authoritative delivery path.
+- `DeliveryInstructionRequest.externalSessionId` (`interfaces.ts`) added.
+- `RelayEngine.dispatchAssignment` passes `externalSessionId: worker.externalSessionId ?? null`.
+- Focused Phase E tests (`tests/exact_worker_transport.test.ts`): 2/2 pass (`E1`: IDLE gate; `E2`: adapter uses exact session mechanism with evidence).
+- Protected adapter/provider tests (`tests/cli_backed_provider.test.ts`): 2/2 pass.
+- Phase C continuity (`tests/session_continuity.test.ts`): 26/26 pass; Phase D readiness (`tests/pair_readiness.test.ts`): 3/3 pass; no regressions.
+- Lint/build (`npm run lint` / `tsc --noEmit`): clean.
+
+No synthetic verification manufactured. Adapter does not fall back to AppleScript/frontmost mechanism after exact-target failure.
 
 ---
 
@@ -353,11 +383,12 @@ Authoritative base: `main` at `dfd0e6a` (`HEAD == origin/main`, working tree cle
 
 Completed / verified phases (evidence-based):
 - Foundation (pair/session authority, activation, provider governance, S2 observation): verified.
-- Phase C (Durable Continuity & Explicit Reconciliation): **COMPLETE / VERIFIED** (verified this run: 26/26 tests pass, contract satisfied, no defects).
-- Phase D (Derived Readiness): **COMPLETE / VERIFIED** (verified this run: 3/3 tests pass; pure evaluator; zero provider contact; preserves UNKNOWN; does not alter operational state).
+- Phase C (Durable Continuity & Explicit Reconciliation): **COMPLETE / VERIFIED**.
+- Phase D (Derived Readiness): **COMPLETE / VERIFIED**.
+- Phase E (Exact Worker Transport): **COMPLETE / VERIFIED** (bounded adapter correction implemented: adapter uses CLI `opencode run --session <externalId>` mechanism; AppleScript/frontmost mechanism removed from authoritative delivery path; fail-closed checks enforce session identity, workspace verification, and provider evidence; focused tests pass; protected/regression gates intact).
 
 First incomplete authoritative phase:
-- Phase E (Exact Worker Transport): **PARTIAL / NOT PROVEN** — adapter contract exists but production exact-session provider targeting is not proven.
+- Phase F (Actual Worker Response Extraction): **PARTIAL / NOT PROVEN** — adapter contract for exact session transport established; actual completed assistant response extraction through authoritative external session remains unverified.
 
 Next required work after E is resolved:
 - Prove E through actual provider mechanism selecting/verifying exact bound external session.

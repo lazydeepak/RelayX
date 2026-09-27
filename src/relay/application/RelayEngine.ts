@@ -1113,6 +1113,7 @@ export class RelayEngine {
     const provider = this.getProvider(worker.providerType);
     const result = await provider.deliverInstruction({
       runtimeSessionId: worker.id,
+      externalSessionId: worker.externalSessionId ?? null,
       instructionText: assignment.instruction,
       idempotencyKey,
     });
