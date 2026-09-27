@@ -27,6 +27,9 @@ import {
   SideActivityState,
   SideMessageEvidenceState,
   NO_OBSERVATION_CAPABILITY,
+  PairSideCheckpoint,
+  PairSideCheckpointId,
+  CheckpointAuthority,
   ContractRevisionId,
   PlanFirstRunId,
   WorkUnitId,
@@ -54,6 +57,7 @@ import {
   IProjectRepository,
   IPairRepository,
   IPairSideIdentityRepository,
+  IPairSideCheckpointRepository,
   IRuntimeSessionRepository,
   IAssignmentRepository,
   IAttemptRepository,
@@ -573,6 +577,98 @@ export class SqlitePairSideIdentityRepository implements IPairSideIdentityReposi
 
   async deleteForPair(pairId: PairId): Promise<void> {
     this.db.prepare('DELETE FROM pair_side_identity WHERE session_pair_id = ?').run(pairId);
+  }
+}
+
+/* --- Pair Side Checkpoint Repository (S3) ---------------------------------- */
+export class SqlitePairSideCheckpointRepository implements IPairSideCheckpointRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  private mapRow(row: Record<string, unknown>): PairSideCheckpoint {
+    let authority: CheckpointAuthority;
+    try {
+      authority = JSON.parse(row.authority_payload_json as string);
+    } catch {
+      authority = {
+        kind: (row.authority_kind as 'INITIAL_BASELINE' | 'OPERATOR_ACKNOWLEDGED') || 'INITIAL_BASELINE',
+        operatorId: 'unknown',
+        acknowledgedAt: Date.now(),
+      };
+    }
+
+    return {
+      id: row.id as PairSideCheckpointId,
+      sessionPairId: row.session_pair_id as PairId,
+      sideRole: row.side_role === 'planner' ? 'planner' : 'worker',
+      messageRef: (row.message_ref as string) || null,
+      messageOrdinal: row.message_ordinal == null ? null : Number(row.message_ordinal),
+      messageText: (row.message_text as string) || null,
+      externalSessionId: (row.external_session_id as string) || null,
+      determinacy: row.determinacy === 'identified' ? 'identified' : 'unverified',
+      capturedAt: Number(row.captured_at),
+      sourceProvider: row.source_provider as ProviderType,
+      sourceCapability: (row.source_capability as string) || NO_OBSERVATION_CAPABILITY,
+      authority,
+      auditReason: (row.audit_reason as string) || '',
+    };
+  }
+
+  async findLatest(pairId: PairId, sideRole: PairSideRole): Promise<PairSideCheckpoint | null> {
+    const row = this.db
+      .prepare(
+        'SELECT * FROM pair_side_checkpoints WHERE session_pair_id = ? AND side_role = ? ORDER BY captured_at DESC, rowid DESC LIMIT 1',
+      )
+      .get(pairId, sideRole) as Record<string, unknown> | undefined;
+    return row ? this.mapRow(row) : null;
+  }
+
+  async findAll(pairId: PairId, sideRole?: PairSideRole): Promise<PairSideCheckpoint[]> {
+    if (sideRole) {
+      const rows = this.db
+        .prepare(
+          'SELECT * FROM pair_side_checkpoints WHERE session_pair_id = ? AND side_role = ? ORDER BY captured_at ASC, rowid ASC',
+        )
+        .all(pairId, sideRole) as Record<string, unknown>[];
+      return rows.map((r) => this.mapRow(r));
+    }
+    const rows = this.db
+      .prepare(
+        'SELECT * FROM pair_side_checkpoints WHERE session_pair_id = ? ORDER BY captured_at ASC, rowid ASC',
+      )
+      .all(pairId) as Record<string, unknown>[];
+    return rows.map((r) => this.mapRow(r));
+  }
+
+  async save(checkpoint: PairSideCheckpoint): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO pair_side_checkpoints (
+           id, session_pair_id, side_role, message_ref, message_ordinal,
+           message_text, external_session_id, determinacy, captured_at,
+           source_provider, source_capability, authority_kind,
+           authority_payload_json, audit_reason
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        checkpoint.id,
+        checkpoint.sessionPairId,
+        checkpoint.sideRole,
+        checkpoint.messageRef,
+        checkpoint.messageOrdinal,
+        checkpoint.messageText,
+        checkpoint.externalSessionId,
+        checkpoint.determinacy,
+        checkpoint.capturedAt,
+        checkpoint.sourceProvider,
+        checkpoint.sourceCapability,
+        checkpoint.authority.kind,
+        JSON.stringify(checkpoint.authority),
+        checkpoint.auditReason,
+      );
+  }
+
+  async deleteForPair(pairId: PairId): Promise<void> {
+    this.db.prepare('DELETE FROM pair_side_checkpoints WHERE session_pair_id = ?').run(pairId);
   }
 }
 

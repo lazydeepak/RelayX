@@ -6,6 +6,7 @@ import { MockProvider } from './MockProvider.ts';
 import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import type { AssociationId } from '../src/relay/domain/types.ts';
 
 describe('Core Slice 3 — Repository Boundary B1-B7', () => {
   let db: SqliteRelayDatabase;
@@ -37,8 +38,8 @@ describe('Core Slice 3 — Repository Boundary B1-B7', () => {
     worker.updateExternalIdentity('bind_b1_wk');
     await db.runtimes.save(worker);
     const { RuntimeProjectAssociation } = await import('../src/relay/domain/entities.ts');
-    await db.associations.save(new RuntimeProjectAssociation({ id: 'assoc_b1_pl', runtimeSessionId: planner.id, projectId: project.id, providerType: 'chatgpt', externalSessionId: planner.externalSessionId ?? '', verificationState: 'verified', provenance: 'pair_binding', createdAt: Date.now(), updatedAt: Date.now() }));
-    await db.associations.save(new RuntimeProjectAssociation({ id: 'assoc_b1_wk', runtimeSessionId: worker.id, projectId: project.id, providerType: 'opencode', externalSessionId: worker.externalSessionId ?? '', verificationState: 'verified', provenance: 'pair_binding', createdAt: Date.now(), updatedAt: Date.now() }));
+    await db.associations.save(new RuntimeProjectAssociation({ id: 'assoc_b1_pl' as AssociationId, runtimeSessionId: planner.id, projectId: project.id, providerType: 'chatgpt', externalSessionId: planner.externalSessionId ?? '', verificationState: 'verified', provenance: 'pair_binding', createdAt: Date.now(), updatedAt: Date.now() }));
+    await db.associations.save(new RuntimeProjectAssociation({ id: 'assoc_b1_wk' as AssociationId, runtimeSessionId: worker.id, projectId: project.id, providerType: 'opencode', externalSessionId: worker.externalSessionId ?? '', verificationState: 'verified', provenance: 'pair_binding', createdAt: Date.now(), updatedAt: Date.now() }));
     const pair = await engine.createPair(project.id, 'Pair', planner.id, worker.id);
     const assignment = await engine.createAssignment(pair.id, 'A', 'Do X');
     const { attempt } = await engine.dispatchAssignment(assignment.id);
@@ -70,8 +71,8 @@ describe('Core Slice 3 — Repository Boundary B1-B7', () => {
     worker.updateExternalIdentity('bind_b4_wk');
     await db.runtimes.save(worker);
     const { RuntimeProjectAssociation } = await import('../src/relay/domain/entities.ts');
-    await db.associations.save(new RuntimeProjectAssociation({ id: 'assoc_b4_pl', runtimeSessionId: planner.id, projectId: project.id, providerType: 'chatgpt', externalSessionId: planner.externalSessionId ?? '', verificationState: 'verified', provenance: 'pair_binding', createdAt: Date.now(), updatedAt: Date.now() }));
-    await db.associations.save(new RuntimeProjectAssociation({ id: 'assoc_b4_wk', runtimeSessionId: worker.id, projectId: project.id, providerType: 'opencode', externalSessionId: worker.externalSessionId ?? '', verificationState: 'verified', provenance: 'pair_binding', createdAt: Date.now(), updatedAt: Date.now() }));
+    await db.associations.save(new RuntimeProjectAssociation({ id: 'assoc_b4_pl' as AssociationId, runtimeSessionId: planner.id, projectId: project.id, providerType: 'chatgpt', externalSessionId: planner.externalSessionId ?? '', verificationState: 'verified', provenance: 'pair_binding', createdAt: Date.now(), updatedAt: Date.now() }));
+    await db.associations.save(new RuntimeProjectAssociation({ id: 'assoc_b4_wk' as AssociationId, runtimeSessionId: worker.id, projectId: project.id, providerType: 'opencode', externalSessionId: worker.externalSessionId ?? '', verificationState: 'verified', provenance: 'pair_binding', createdAt: Date.now(), updatedAt: Date.now() }));
     const pair = await engine.createPair(project.id, 'Pair', planner.id, worker.id);
     const assignment = await engine.createAssignment(pair.id, 'A', 'Do X');
     const { attempt } = await engine.dispatchAssignment(assignment.id);
@@ -94,8 +95,8 @@ describe('Core Slice 3 — Repository Boundary B1-B7', () => {
     worker.updateExternalIdentity('bind_b7_wk');
     await dbFile.runtimes.save(worker);
     const { RuntimeProjectAssociation } = await import('../src/relay/domain/entities.ts');
-    await dbFile.associations.save(new RuntimeProjectAssociation({ id: 'assoc_b7_pl', runtimeSessionId: planner.id, projectId: project.id, providerType: 'chatgpt', externalSessionId: planner.externalSessionId ?? '', verificationState: 'verified', provenance: 'pair_binding', createdAt: Date.now(), updatedAt: Date.now() }));
-    await dbFile.associations.save(new RuntimeProjectAssociation({ id: 'assoc_b7_wk', runtimeSessionId: worker.id, projectId: project.id, providerType: 'opencode', externalSessionId: worker.externalSessionId ?? '', verificationState: 'verified', provenance: 'pair_binding', createdAt: Date.now(), updatedAt: Date.now() }));
+    await dbFile.associations.save(new RuntimeProjectAssociation({ id: 'assoc_b7_pl' as AssociationId, runtimeSessionId: planner.id, projectId: project.id, providerType: 'chatgpt', externalSessionId: planner.externalSessionId ?? '', verificationState: 'verified', provenance: 'pair_binding', createdAt: Date.now(), updatedAt: Date.now() }));
+    await dbFile.associations.save(new RuntimeProjectAssociation({ id: 'assoc_b7_wk' as AssociationId, runtimeSessionId: worker.id, projectId: project.id, providerType: 'opencode', externalSessionId: worker.externalSessionId ?? '', verificationState: 'verified', provenance: 'pair_binding', createdAt: Date.now(), updatedAt: Date.now() }));
     const pair = await fileEngine.createPair(project.id, 'Pair', planner.id, worker.id);
     const assignment = await fileEngine.createAssignment(pair.id, 'A', 'Do X');
     const { attempt, delivery } = await fileEngine.dispatchAssignment(assignment.id);

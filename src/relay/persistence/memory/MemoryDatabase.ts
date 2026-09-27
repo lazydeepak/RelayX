@@ -15,6 +15,7 @@ import {
   VerificationResultId,
   PairSideRole,
   PairSideIdentity,
+  PairSideCheckpoint,
 } from '../../domain/types.ts';
 import {
   Project,
@@ -37,6 +38,7 @@ import {
   IProjectRepository,
   IPairRepository,
   IPairSideIdentityRepository,
+  IPairSideCheckpointRepository,
   IRuntimeSessionRepository,
   IAssignmentRepository,
   IAttemptRepository,
@@ -273,6 +275,50 @@ export class MemoryPairSideIdentityRepository implements IPairSideIdentityReposi
       MemoryPairSideIdentityRepository.key(identity.sessionPairId, identity.sideRole),
       identity,
     );
+  }
+
+  async deleteForPair(pairId: PairId): Promise<void> {
+    for (const [key, value] of Array.from(this.items.entries())) {
+      if (value.sessionPairId === pairId) this.items.delete(key);
+    }
+  }
+}
+
+export class MemoryPairSideCheckpointRepository implements IPairSideCheckpointRepository {
+  private readonly items = new Map<string, PairSideCheckpoint>();
+
+  snapshotState(): MemoryRepoSnapshot<PairSideCheckpoint> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<PairSideCheckpoint>): void {
+    restoreMapItems(this.items, snapshot);
+  }
+
+  async findLatest(pairId: PairId, sideRole: PairSideRole): Promise<PairSideCheckpoint | null> {
+    const list = Array.from(this.items.values()).filter(
+      (c) => c.sessionPairId === pairId && c.sideRole === sideRole,
+    );
+    if (list.length === 0) return null;
+    let latest = list[0];
+    for (let i = 1; i < list.length; i++) {
+      if (list[i].capturedAt >= latest.capturedAt) {
+        latest = list[i];
+      }
+    }
+    return latest;
+  }
+
+  async findAll(pairId: PairId, sideRole?: PairSideRole): Promise<PairSideCheckpoint[]> {
+    const list = Array.from(this.items.values()).filter(
+      (c) => c.sessionPairId === pairId && (!sideRole || c.sideRole === sideRole),
+    );
+    list.sort((a, b) => a.capturedAt - b.capturedAt);
+    return list;
+  }
+
+  async save(checkpoint: PairSideCheckpoint): Promise<void> {
+    this.items.set(checkpoint.id, checkpoint);
   }
 
   async deleteForPair(pairId: PairId): Promise<void> {
@@ -790,6 +836,7 @@ export class MemoryRelayDatabase implements IRelayRepositories {
   public readonly projects: MemoryProjectRepository;
   public readonly pairs: MemoryPairRepository;
   public readonly sideIdentities: MemoryPairSideIdentityRepository;
+  public readonly sideCheckpoints: MemoryPairSideCheckpointRepository;
   public readonly runtimes: MemoryRuntimeSessionRepository;
   public readonly assignments: MemoryAssignmentRepository;
   public readonly attempts: MemoryAttemptRepository;
@@ -807,6 +854,7 @@ export class MemoryRelayDatabase implements IRelayRepositories {
     this.projects = new MemoryProjectRepository();
     this.pairs = new MemoryPairRepository();
     this.sideIdentities = new MemoryPairSideIdentityRepository();
+    this.sideCheckpoints = new MemoryPairSideCheckpointRepository();
     this.runtimes = new MemoryRuntimeSessionRepository();
     this.assignments = new MemoryAssignmentRepository();
     this.attempts = new MemoryAttemptRepository();
@@ -833,6 +881,8 @@ export class MemoryRelayDatabase implements IRelayRepositories {
     const repos: Array<ISnapshotableMemoryRepo> = [
       this.projects,
       this.pairs,
+      this.sideIdentities,
+      this.sideCheckpoints,
       this.runtimes,
       this.assignments,
       this.attempts,

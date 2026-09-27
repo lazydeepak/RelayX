@@ -16,6 +16,7 @@ import {
   VerificationResultId,
   PairSideRole,
   PairSideIdentity,
+  PairSideCheckpoint,
 } from '../domain/types.ts';
 import {
   Project,
@@ -88,6 +89,20 @@ export interface IPairSideIdentityRepository {
   findByPair(pairId: PairId): Promise<PairSideIdentity[]>;
   find(pairId: PairId, sideRole: PairSideRole): Promise<PairSideIdentity | null>;
   save(identity: PairSideIdentity): Promise<void>;
+  deleteForPair(pairId: PairId): Promise<void>;
+}
+
+/**
+ * S3 append-only checkpoint repository.
+ *
+ * Checkpoints are immutable records representing operator baseline establishment
+ * or explicit operator acknowledgment/reconciliation. They are NEVER mutated or
+ * deleted in-place (append-only history).
+ */
+export interface IPairSideCheckpointRepository {
+  findLatest(pairId: PairId, sideRole: PairSideRole): Promise<PairSideCheckpoint | null>;
+  findAll(pairId: PairId, sideRole?: PairSideRole): Promise<PairSideCheckpoint[]>;
+  save(checkpoint: PairSideCheckpoint): Promise<void>;
   deleteForPair(pairId: PairId): Promise<void>;
 }
 
@@ -254,6 +269,7 @@ export interface IRelayRepositories {
   projects: IProjectRepository;
   pairs: IPairRepository;
   sideIdentities: IPairSideIdentityRepository;
+  sideCheckpoints: IPairSideCheckpointRepository;
   runtimes: IRuntimeSessionRepository;
   assignments: IAssignmentRepository;
   attempts: IAttemptRepository;

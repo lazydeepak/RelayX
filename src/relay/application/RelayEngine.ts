@@ -26,7 +26,21 @@ import {
   SideObservationOutcome,
   NO_OBSERVATION_CAPABILITY,
   PROVISIONAL_OBSERVATION_VALIDITY_MS,
+  PairSideCheckpoint,
+  PairSideCheckpointId,
+  PairContinuityResult,
+  CHECKPOINT_BASELINE_ALREADY_EXISTS,
+  CHECKPOINT_BASELINE_REQUIRED,
+  CHECKPOINT_OBSERVATION_REQUIRED,
 } from '../domain/types.ts';
+import {
+  evaluateSideContinuity,
+  classifyPairContinuity,
+} from '../domain/continuity.ts';
+import {
+  evaluatePairReadiness,
+  PairReadinessAssessment,
+} from '../domain/readiness.ts';
 import {
   Project,
   Pair,
@@ -2466,6 +2480,229 @@ export class RelayEngine {
       worker: worker ?? neverObserved('worker'),
     };
   }
+
+  /* ===================================================================== *
+   * S3 — Session Pair continuity and side checkpoints
+   * ===================================================================== */
+
+  /**
+   * S3 — `computeContinuity(pairId)`.
+   *
+   * §11.2: state precondition: Any (callable whether IDLE or ACTIVE).
+   * Changes operational state: No.
+   * Provider contact: **No** (pure local read of durable observation and checkpoints; zero provider contact).
+   *
+   * Evaluates both bound sides against their latest respective checkpoints:
+   * - If either side lacks a checkpoint baseline, that side is `unknown` and the Pair is `UNKNOWN`.
+   * - Stable identity is NOT ordering: differing message refs without trustworthy ordinals evaluate to `unknown`.
+   */
+  public async computeContinuity(pairId: PairId): Promise<PairContinuityResult> {
+    const pair = await this.repos.pairs.findById(pairId);
+    if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'PAIR_NOT_FOUND');
+
+    const [plannerObs, workerObs, plannerChk, workerChk] = await Promise.all([
+      this.repos.sideIdentities.find(pairId, 'planner'),
+      this.repos.sideIdentities.find(pairId, 'worker'),
+      this.repos.sideCheckpoints.findLatest(pairId, 'planner'),
+      this.repos.sideCheckpoints.findLatest(pairId, 'worker'),
+    ]);
+
+    const plannerEval = evaluateSideContinuity('planner', plannerObs, plannerChk);
+    const workerEval = evaluateSideContinuity('worker', workerObs, workerChk);
+
+    return classifyPairContinuity(pairId, plannerEval, workerEval);
+  }
+
+  /**
+   * Phase D — `computePairReadiness(pairId)`.
+   *
+   * Derived readiness evaluation for a Pair.
+   * Zero provider contact (pure evaluation of local persistence and continuity).
+   */
+  public async computePairReadiness(pairId: PairId): Promise<PairReadinessAssessment> {
+    const pair = await this.repos.pairs.findById(pairId);
+    if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'PAIR_NOT_FOUND');
+
+    const [plannerSession, workerSession, plannerObs, workerObs, continuity] = await Promise.all([
+      pair.plannerSessionId ? this.repos.runtimes.findById(pair.plannerSessionId) : Promise.resolve(null),
+      pair.workerSessionId ? this.repos.runtimes.findById(pair.workerSessionId) : Promise.resolve(null),
+      this.repos.sideIdentities.find(pairId, 'planner'),
+      this.repos.sideIdentities.find(pairId, 'worker'),
+      this.computeContinuity(pairId),
+    ]);
+
+    return evaluatePairReadiness(pair, plannerSession, workerSession, plannerObs, workerObs, continuity);
+  }
+
+  /**
+   * S3 — `captureInitialBaseline(pairId, sideRole, operatorId, auditReason?)`.
+   *
+   * Explicit operator establishment of the initial baseline checkpoint for one side.
+   *
+   * Preconditions:
+   * - Pair must exist.
+   * - Side must have an existing durable observation (`pair_side_identity`).
+   * - Side must NOT already have an existing checkpoint baseline (throws CHECKPOINT_BASELINE_ALREADY_EXISTS).
+   *
+   * Fencing:
+   * - ZERO provider contact.
+   * - Changes operational state: No.
+   * - Append-only record with authority kind 'INITIAL_BASELINE'.
+   */
+  public async captureInitialBaseline(
+    pairId: PairId,
+    sideRole: PairSideRole,
+    operatorId: string,
+    auditReason?: string,
+  ): Promise<PairSideCheckpoint> {
+    const pair = await this.repos.pairs.findById(pairId);
+    if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'PAIR_NOT_FOUND');
+
+    const existingCheckpoint = await this.repos.sideCheckpoints.findLatest(pairId, sideRole);
+    if (existingCheckpoint) {
+      throw new RelayDomainError(
+        `Pair ${pairId} ${sideRole} side already has a checkpoint baseline (${existingCheckpoint.id}). ` +
+          'Initial baseline can only be captured once per side. Use acknowledgeSideCheckpoint to advance.',
+        CHECKPOINT_BASELINE_ALREADY_EXISTS,
+      );
+    }
+
+    const obs = await this.repos.sideIdentities.find(pairId, sideRole);
+    if (!obs || !obs.observation) {
+      throw new RelayDomainError(
+        `Pair ${pairId} ${sideRole} side has no durable observation. A baseline cannot be captured without prior observation.`,
+        CHECKPOINT_OBSERVATION_REQUIRED,
+      );
+    }
+
+    const checkpointId = createId<PairSideCheckpointId>('chk');
+    const checkpoint: PairSideCheckpoint = {
+      id: checkpointId,
+      sessionPairId: pairId,
+      sideRole,
+      messageRef: obs.observation.message.ref,
+      messageOrdinal: obs.observation.message.ordinal,
+      messageText: obs.observation.message.text,
+      externalSessionId: obs.externalSessionId,
+      determinacy: obs.observation.message.ordinal !== null || obs.observation.message.ref !== null
+        ? 'identified'
+        : 'unverified',
+      capturedAt: Date.now(),
+      sourceProvider: obs.providerType,
+      sourceCapability: obs.observation.observationCapability,
+      authority: {
+        kind: 'INITIAL_BASELINE',
+        operatorId,
+      },
+      auditReason: auditReason || 'Explicit operator initial baseline capture',
+    };
+
+    await this.repos.sideCheckpoints.save(checkpoint);
+
+    await this.emitEvent('pair', pairId, 'pair.side_checkpoint_captured', {
+      actor: 'user',
+      previousState: 'none',
+      newState: 'checkpointed',
+      details: {
+        checkpointId,
+        sideRole,
+        authorityKind: 'INITIAL_BASELINE',
+        operatorId,
+        messageRef: checkpoint.messageRef,
+        messageOrdinal: checkpoint.messageOrdinal,
+      },
+    });
+
+    return checkpoint;
+  }
+
+  /**
+   * S3 — `acknowledgeSideCheckpoint(pairId, sideRole, options)`.
+   *
+   * Explicit operator acknowledgment/reconciliation of advanced state for one side.
+   *
+   * Preconditions:
+   * - Pair must exist.
+   * - Side must already have a prior baseline checkpoint (throws CHECKPOINT_BASELINE_REQUIRED).
+   * - Side must have an existing durable observation (throws CHECKPOINT_OBSERVATION_REQUIRED).
+   *
+   * Fencing:
+   * - ZERO provider contact.
+   * - Changes operational state: No.
+   * - Append-only record with authority kind 'OPERATOR_ACKNOWLEDGED'.
+   */
+  public async acknowledgeSideCheckpoint(
+    pairId: PairId,
+    sideRole: PairSideRole,
+    options: {
+      operatorId: string;
+      resolutionNote?: string;
+      auditReason?: string;
+    },
+  ): Promise<PairSideCheckpoint> {
+    const pair = await this.repos.pairs.findById(pairId);
+    if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'PAIR_NOT_FOUND');
+
+    const existingCheckpoint = await this.repos.sideCheckpoints.findLatest(pairId, sideRole);
+    if (!existingCheckpoint) {
+      throw new RelayDomainError(
+        `Pair ${pairId} ${sideRole} side has no prior checkpoint baseline. Initial baseline must be established before acknowledging progress.`,
+        CHECKPOINT_BASELINE_REQUIRED,
+      );
+    }
+
+    const obs = await this.repos.sideIdentities.find(pairId, sideRole);
+    if (!obs || !obs.observation) {
+      throw new RelayDomainError(
+        `Pair ${pairId} ${sideRole} side has no durable observation to acknowledge.`,
+        CHECKPOINT_OBSERVATION_REQUIRED,
+      );
+    }
+
+    const checkpointId = createId<PairSideCheckpointId>('chk');
+    const checkpoint: PairSideCheckpoint = {
+      id: checkpointId,
+      sessionPairId: pairId,
+      sideRole,
+      messageRef: obs.observation.message.ref,
+      messageOrdinal: obs.observation.message.ordinal,
+      messageText: obs.observation.message.text,
+      externalSessionId: obs.externalSessionId,
+      determinacy: obs.observation.message.ordinal !== null || obs.observation.message.ref !== null
+        ? 'identified'
+        : 'unverified',
+      capturedAt: Date.now(),
+      sourceProvider: obs.providerType,
+      sourceCapability: obs.observation.observationCapability,
+      authority: {
+        kind: 'OPERATOR_ACKNOWLEDGED',
+        operatorId: options.operatorId,
+        acknowledgedAt: Date.now(),
+        resolutionNote: options.resolutionNote,
+      },
+      auditReason: options.auditReason || 'Explicit operator checkpoint acknowledgment',
+    };
+
+    await this.repos.sideCheckpoints.save(checkpoint);
+
+    await this.emitEvent('pair', pairId, 'pair.side_checkpoint_captured', {
+      actor: 'user',
+      previousState: existingCheckpoint.id,
+      newState: checkpointId,
+      details: {
+        checkpointId,
+        sideRole,
+        authorityKind: 'OPERATOR_ACKNOWLEDGED',
+        operatorId: options.operatorId,
+        resolutionNote: options.resolutionNote,
+        messageRef: checkpoint.messageRef,
+        messageOrdinal: checkpoint.messageOrdinal,
+      },
+    });
+
+    return checkpoint;
+  }
+
 
   /**
    * `startPair` — EXECUTION authority. It is NOT the activation authority.

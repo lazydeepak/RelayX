@@ -18,6 +18,7 @@ export type EventId = Brand<string, 'EventId'>;
 export type AttentionItemId = Brand<string, 'AttentionItemId'>;
 export type AssociationId = Brand<string, 'AssociationId'>;
 export type RecoveryActionId = Brand<string, 'RecoveryActionId'>;
+export type PairSideCheckpointId = Brand<string, 'PairSideCheckpointId'>;
 
 /* --- Plan-First identifiers (PLAN_FIRST_DOMAIN_FREEZE.md §A) --- */
 export type ContractRevisionId = Brand<string, 'ContractRevisionId'>;
@@ -456,6 +457,93 @@ export interface SideObservationReading {
 
 /** S2 error code: observation was attempted on a Pair that is not ACTIVE. */
 export const PAIR_NOT_ACTIVE_FOR_OBSERVATION = 'PAIR_OPERATIONAL_STATE_IDLE';
+
+/* ========================================================================= *
+ * S3: Pair side checkpoints & continuity evaluation
+ *
+ * Frozen source: DESIGN_FREEZE_SESSION_PAIR_OPERATIONS.md §6.1-§6.5, §10.3, §11.2.
+ * ========================================================================= */
+
+/**
+ * Structural authority backing a checkpoint capture or advancement.
+ * S3 strictly admits only authorities that S3 can truthfully establish:
+ * - INITIAL_BASELINE: explicit operator establishment of the baseline position
+ * - OPERATOR_ACKNOWLEDGED: explicit operator review/reconciliation of advanced state
+ *
+ * Automated baseline creation and transport/delivery-inferred advancements
+ * are strictly forbidden in S3.
+ */
+export type CheckpointAuthority =
+  | {
+      readonly kind: 'INITIAL_BASELINE';
+      readonly operatorId: string;
+    }
+  | {
+      readonly kind: 'OPERATOR_ACKNOWLEDGED';
+      readonly operatorId: string;
+      readonly acknowledgedAt: number;
+      readonly resolutionNote?: string;
+    };
+
+export type CheckpointAuthorityKind = CheckpointAuthority['kind'];
+
+/**
+ * An append-only durable checkpoint record for one bound side of a Session Pair.
+ *
+ * In accordance with §10.3 and the S3 semantic freeze:
+ * 1. Represents acknowledged/baseline progress, NOT mere observation.
+ * 2. Immutable once written (append-only history).
+ * 3. Never created or advanced automatically by observation or background polling.
+ */
+export interface PairSideCheckpoint {
+  readonly id: PairSideCheckpointId;
+  readonly sessionPairId: PairId;
+  readonly sideRole: PairSideRole;
+  readonly messageRef: string | null;
+  readonly messageOrdinal: number | null;
+  readonly messageText: string | null;
+  readonly externalSessionId: string | null;
+  readonly determinacy: 'identified' | 'unverified';
+  readonly capturedAt: number;
+  readonly sourceProvider: ProviderType;
+  readonly sourceCapability: string;
+  readonly authority: CheckpointAuthority;
+  readonly auditReason: string;
+}
+
+export type SideAdvanceState = 'unchanged' | 'advanced' | 'unknown';
+
+export type PairAdvanceState =
+  | 'UNCHANGED'
+  | 'PLANNER_ADVANCED'
+  | 'WORKER_ADVANCED'
+  | 'BOTH_ADVANCED'
+  | 'UNKNOWN';
+
+export interface SideContinuityEvaluation {
+  readonly sideRole: PairSideRole;
+  readonly state: SideAdvanceState;
+  readonly determinacy: 'identified' | 'unverified';
+  readonly checkpointId: PairSideCheckpointId | null;
+  readonly checkpointOrdinal: number | null;
+  readonly checkpointRef: string | null;
+  readonly observedOrdinal: number | null;
+  readonly observedRef: string | null;
+  readonly reason: string;
+}
+
+export interface PairContinuityResult {
+  readonly sessionPairId: PairId;
+  readonly state: PairAdvanceState;
+  readonly computedAt: number;
+  readonly planner: SideContinuityEvaluation;
+  readonly worker: SideContinuityEvaluation;
+}
+
+export const CHECKPOINT_BASELINE_ALREADY_EXISTS = 'CHECKPOINT_BASELINE_ALREADY_EXISTS';
+export const CHECKPOINT_BASELINE_REQUIRED = 'CHECKPOINT_BASELINE_REQUIRED';
+export const CHECKPOINT_OBSERVATION_REQUIRED = 'CHECKPOINT_OBSERVATION_REQUIRED';
+
 
 export type AssignmentStatus =
   | 'pending'

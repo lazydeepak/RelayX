@@ -5,6 +5,7 @@ import {
   SqliteProjectRepository,
   SqlitePairRepository,
   SqlitePairSideIdentityRepository,
+  SqlitePairSideCheckpointRepository,
   SqliteRuntimeSessionRepository,
   SqliteAssignmentRepository,
   SqliteAttemptRepository,
@@ -47,6 +48,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
   public readonly projects: SqliteProjectRepository;
   public readonly pairs: SqlitePairRepository;
   public readonly sideIdentities: SqlitePairSideIdentityRepository;
+  public readonly sideCheckpoints: SqlitePairSideCheckpointRepository;
   public readonly runtimes: SqliteRuntimeSessionRepository;
   public readonly assignments: SqliteAssignmentRepository;
   public readonly attempts: SqliteAttemptRepository;
@@ -68,6 +70,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     this.runtimes = new SqliteRuntimeSessionRepository(this.db);
     this.pairs = new SqlitePairRepository(this.db);
     this.sideIdentities = new SqlitePairSideIdentityRepository(this.db);
+    this.sideCheckpoints = new SqlitePairSideCheckpointRepository(this.db);
     this.assignments = new SqliteAssignmentRepository(this.db);
     this.attempts = new SqliteAttemptRepository(this.db);
     this.deliveries = new SqliteDeliveryRepository(this.db);
@@ -438,6 +441,49 @@ CREATE TABLE IF NOT EXISTS handoffs (
     this.migrateSessionPairOperationsSchema();
     this.migrateSideIdentitySchema();
     this.migrateSideObservationSchema();
+    this.migrateSideCheckpointSchema();
+  }
+
+  /**
+   * S3 per-side checkpoints schema, version 7.
+   *
+   * Frozen source: DESIGN_FREEZE_SESSION_PAIR_OPERATIONS.md §10.3, §6.1-§6.5.
+   *
+   * Additive only: creates ONE new table `pair_side_checkpoints` and alters no existing table.
+   * Checkpoints are append-only rows; existing checkpoint rows are never mutated or deleted in place.
+   *
+   * ORDERING: must run AFTER migrateSideObservationSchema(), which stamps 6.
+   *
+   * ## There is deliberately no backfill step
+   *
+   * Existing pairs have NO checkpoint baseline until an explicit operator initial-baseline
+   * operation is invoked. Synthesizing checkpoints for pre-existing pairs would fabricate
+   * a baseline comparison that never occurred, violating provenance and baseline freeze rules.
+   */
+  private migrateSideCheckpointSchema(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pair_side_checkpoints (
+        id TEXT PRIMARY KEY,
+        session_pair_id TEXT NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,
+        side_role TEXT NOT NULL,
+        message_ref TEXT,
+        message_ordinal INTEGER,
+        message_text TEXT,
+        external_session_id TEXT,
+        determinacy TEXT NOT NULL,
+        captured_at INTEGER NOT NULL,
+        source_provider TEXT NOT NULL,
+        source_capability TEXT NOT NULL,
+        authority_kind TEXT NOT NULL,
+        authority_payload_json TEXT NOT NULL,
+        audit_reason TEXT NOT NULL
+      );
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_pair_side_checkpoints_lookup 
+        ON pair_side_checkpoints(session_pair_id, side_role, captured_at DESC);
+    `);
   }
 
   /**
