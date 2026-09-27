@@ -1400,6 +1400,14 @@ export class RelayApiService implements IRelayApi {
     return { ok: true, projectPath: proj.canonicalPath ?? proj.workerWorkspacePath, choices, discovery };
   }
 
+  /**
+   * OPENCODE SESSION PRESERVATION FENCE
+   * This adoption/creation boundary is verified infrastructure. Keep external
+   * `ses_*` identity, provider confirmation, workspace checks, single-attempt
+   * creation, and the creation/adoption distinction intact. Behavioral changes
+   * require preservation tests and evidence recorded in
+   * OPENCODE_SESSION_DISCOVERY.md; never add service-layer auth or retry POSTs.
+   */
   public async adoptOpenCodeSession(projectId: string, sessionId: string, name?: string): Promise<UIRuntimeSession> {
     const trimmed = sessionId.trim();
     if (!trimmed.startsWith('ses_')) {
@@ -1437,7 +1445,7 @@ export class RelayApiService implements IRelayApi {
     // all there is nothing that could corroborate it and adoption must stop.
     const projectPath = proj.workerWorkspacePath ?? proj.canonicalPath ?? '';
     let opencodeProvider:
-      | { confirmSessionForProject?: (sessionId: string, projectPath: string) => Promise<{ confirmed: boolean; projectPath?: string }> }
+      | { confirmSessionForProject?: (sessionId: string, projectPath: string) => Promise<{ confirmed: boolean; externalSessionId?: string | null; projectPath?: string }> }
       | undefined;
     try {
       opencodeProvider = this.engine.getProvider('opencode') as typeof opencodeProvider;
@@ -1449,16 +1457,16 @@ export class RelayApiService implements IRelayApi {
         `Adopting OpenCode session '${trimmed}' requires provider confirmation, but no OpenCode provider is registered to confirm it`,
       );
     }
-    // When the registered provider can actually confirm, it must do so. A
-    // provider that does not implement confirmation is not an authority and
-    // cannot veto an explicit adoption.
-    if (typeof opencodeProvider.confirmSessionForProject === 'function') {
-      const confirmation = await opencodeProvider.confirmSessionForProject(trimmed, projectPath);
-      if (!confirmation?.confirmed) {
-        throw new Error(
-          `Adopting OpenCode session '${trimmed}' requires provider confirmation for project '${projectPath}'`,
-        );
-      }
+    if (typeof opencodeProvider.confirmSessionForProject !== 'function') {
+      throw new Error(
+        `Adopting OpenCode session '${trimmed}' requires a provider capable of authoritative project confirmation`,
+      );
+    }
+    const confirmation = await opencodeProvider.confirmSessionForProject(trimmed, projectPath);
+    if (!confirmation?.confirmed || confirmation.externalSessionId !== trimmed) {
+      throw new Error(
+        `Adopting OpenCode session '${trimmed}' requires provider confirmation for project '${projectPath}'`,
+      );
     }
 
     const runtime = RuntimeSession.create('opencode', name?.trim() || `OpenCode session ${trimmed}`);
@@ -1492,156 +1500,47 @@ export class RelayApiService implements IRelayApi {
       throw new Error('Project has no workspace path to scope the new OpenCode session');
     }
 
-    // Resolve the shared service client (read-only) to find service URL/auth.
     let provider: any = null;
     try {
       provider = this.engine.getProvider('opencode') as any;
     } catch {
       provider = null;
     }
-    let serviceUrl: string | null = null;
-    let servicePassword: string | null = null;
+    if (!provider || typeof provider.createWorkerSession !== 'function') {
+      return {
+        sessionId: '',
+        adopted: false,
+        partial: true,
+        error: 'OpenCode provider does not support authoritative session creation',
+      };
+    }
+
+    // Exactly one provider-owned creation attempt. Authentication and service
+    // negotiation stay inside the proven provider implementation; this service
+    // never reconstructs credentials, retries POST, or injects a chat message.
+    let creationRes: { sessionId: string; workspaceDir: string; error?: string };
     try {
-      const discovery = await (provider as any)?.resolveSharedServiceClient?.();
-      if (discovery?.status === 'available' && discovery?.client) {
-        serviceUrl = discovery.client.baseUrl ?? null;
-        servicePassword = discovery.discovery?.registration?.password ?? null;
-      }
-    } catch {
-      // Fall back: read service.json directly.
-    }
-    if (!serviceUrl || !servicePassword) {
-      try {
-        const { discoverOpenCodeService, parseServiceRegistration, defaultServiceFilePath } = await import('../providers/opencodeSessionClient.ts');
-        const discovery = await discoverOpenCodeService({ serviceFile: defaultServiceFilePath() });
-        if (discovery.status === 'available') {
-          serviceUrl = discovery.registration.url;
-          servicePassword = discovery.registration.password;
-        }
-      } catch {
-        // Service unavailable — creation cannot proceed.
-        throw new Error('OpenCode shared service unavailable: cannot create new worker session');
-      }
-    }
-
-    // Delegate to CLI-backed provider when available (correct auth for v2.0.16)
-    if (provider && typeof (provider as any).createWorkerSession === 'function') {
-      try {
-        const cliRes = await (provider as any).createWorkerSession(workspacePath, name);
-        if (cliRes.sessionId && cliRes.sessionId.startsWith('ses_')) {
-          const sessionWorkspaceDir = cliRes.workspaceDir || workspacePath || '';
-          const normWorkspaceDir = normalizeWorkerProjectPath(sessionWorkspaceDir);
-          const normProjWorker = normalizeWorkerProjectPath(proj.workerWorkspacePath ?? null);
-          if (normWorkspaceDir && normProjWorker && normWorkspaceDir !== normProjWorker) {
-            return {
-              sessionId: cliRes.sessionId,
-              adopted: false,
-              partial: true,
-              error: `Created session workspace '${normWorkspaceDir}' does not match project workspace '${normProjWorker}'`,
-            };
-          }
-          try {
-            const adoptedUI = await this.adoptOpenCodeSession(projectId, cliRes.sessionId, name);
-            return {
-              sessionId: cliRes.sessionId,
-              adopted: true,
-              runtime: adoptedUI,
-            };
-          } catch (adoptErr: any) {
-            return {
-              sessionId: cliRes.sessionId,
-              adopted: false,
-              partial: true,
-              error: adoptErr?.message ?? String(adoptErr),
-            };
-          }
-        }
-      } catch {
-        // Provider CLI unavailable; fall through to direct HTTP
-      }
-    }
-
-    const url = `${serviceUrl}/api/session`;
-    const authToken = Buffer.from(`opencode:${servicePassword}`).toString('base64');
-    const payload = {
-      id: null,
-      title: name?.trim() || 'OpenCode Worker Session',
-      agent: 'build',
-      model: null,
-      location: { directory: workspacePath },
-      metadata: null,
-      permissions: null,
-    };
-
-    let creationRes: { ok: boolean; status?: number; sessionId?: string; workspaceDir?: string; error?: string } = { ok: false };
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          Authorization: `Basic ${authToken}`,
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-        body: JSON.stringify(payload),
-      });
-      const bodyText = await response.text();
-      creationRes.status = response.status;
-      if (!response.ok) {
-        creationRes.ok = false;
-        creationRes.error = `Service returned HTTP ${response.status}: ${bodyText.slice(0, 400)}`;
-        return {
-          sessionId: '',
-          adopted: false,
-          partial: true,
-          error: creationRes.error,
-        };
-      }
-      let parsed: any = null;
-      try {
-        parsed = JSON.parse(bodyText);
-      } catch {
-        creationRes.ok = false;
-        creationRes.error = `Invalid JSON response from service: ${bodyText.slice(0, 200)}`;
-        return {
-          sessionId: '',
-          adopted: false,
-          partial: true,
-          error: creationRes.error,
-        };
-      }
-      const data = parsed?.data ?? parsed;
-      const sessionId = data?.id ?? null;
-      if (!sessionId || typeof sessionId !== 'string' || !sessionId.startsWith('ses_')) {
-        creationRes.ok = false;
-        creationRes.error = `Service did not return an authoritative session id (expected ses_*, got: ${String(sessionId).slice(0, 40)})`;
-        return {
-          sessionId: String(sessionId ?? ''),
-          adopted: false,
-          partial: true,
-          error: creationRes.error,
-        };
-      }
-      const workspaceDir = data?.location?.directory ?? workspacePath;
-      creationRes.ok = true;
-      creationRes.sessionId = sessionId;
-      creationRes.workspaceDir = workspaceDir;
+      creationRes = await provider.createWorkerSession(workspacePath, name);
     } catch (err: any) {
-      creationRes.ok = false;
-      creationRes.error = err?.message ?? String(err);
+      return {
+        sessionId: '',
+        adopted: false,
+        partial: true,
+        error: err?.message ?? String(err),
+      };
     }
 
-    // If the service creation failed, surface the recoverable partial result truthfully.
-    if (!creationRes.ok || !creationRes.sessionId) {
+    if (!creationRes.sessionId?.startsWith('ses_')) {
       return {
         sessionId: creationRes.sessionId ?? '',
         adopted: false,
         partial: true,
-        error: creationRes.error ?? 'OpenCode session creation returned no authoritative session id',
+        error: creationRes.error ?? 'OpenCode provider did not return an authoritative ses_* identity',
       };
     }
 
     // Verify workspace ownership of the created session before adoption.
-    const sessionWorkspaceDir = creationRes.workspaceDir ?? workspacePath;
+    const sessionWorkspaceDir = creationRes.workspaceDir || workspacePath;
     const normWorkspaceDir = normalizeWorkerProjectPath(sessionWorkspaceDir);
     const normProjWorker = normalizeWorkerProjectPath(proj.workerWorkspacePath ?? null);
     if (normWorkspaceDir && normProjWorker && normWorkspaceDir !== normProjWorker) {

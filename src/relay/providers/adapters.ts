@@ -3178,7 +3178,9 @@ export class OpenCodeProvider extends BaseMacOSProvider {
         let matchedVia: string | undefined;
         let rejectionReason: string | undefined;
 
-        if (!normPersDir) {
+        if (!persId?.startsWith('ses_')) {
+          rejectionReason = 'Persisted session has no authoritative ses_* identity';
+        } else if (!normPersDir) {
           rejectionReason = 'Persisted session has no directory property';
         } else if (normPersDir === normProjPath) {
           matchScore += 100;
@@ -3195,7 +3197,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
           }
         }
 
-        if (matchScore === 0) {
+        if (matchScore === 0 && !rejectionReason) {
           rejectionReason = `Directory "${persDir}" does not match projectPath "${projectPath}" or gitRoot "${gitRoot}"`;
         }
 

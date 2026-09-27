@@ -194,6 +194,17 @@ describe('OpenCodeSessionClient read-only capabilities', () => {
     assert.equal(res.versionMismatch, false);
   });
 
+  it('rejects service rows that do not carry an authoritative ses_* identity', async () => {
+    const { fetchImpl } = makeFetch(() => ({
+      body: { data: [{ id: 'runtime_internal_1', location: { directory: '/Users/relay/alpha' } }] },
+    }));
+    const client = makeClient(fetchImpl);
+    await assert.rejects(
+      () => client.listSessionsByDirectory('/Users/relay/alpha'),
+      /authoritative `ses_\*` id/,
+    );
+  });
+
   it('retrieves an exact ses_* session by id', async () => {
     const { fetchImpl, requests } = makeFetch((req) => {
       assert.equal(req.url, `${SERVICE_URL}/api/session/ses_exact_1`);

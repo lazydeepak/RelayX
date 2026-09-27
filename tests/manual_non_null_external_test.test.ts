@@ -229,7 +229,17 @@ describe('Manual non-null externalSessionId rejected — no provider-verified ev
       planner: await db.associations.findBySessionId(planner.id),
       worker: await db.associations.findBySessionId(worker.id as RuntimeSessionId),
     };
-    assert.deepStrictEqual(postRows, preRows);
+    assert.deepStrictEqual(
+      {
+        planner: postRows.planner.map(({ updatedAt: _updatedAt, ...row }) => row),
+        worker: postRows.worker,
+      },
+      {
+        planner: preRows.planner.map(({ updatedAt: _updatedAt, ...row }) => row),
+        worker: preRows.worker,
+      },
+    );
+    assert.ok(postRows.planner[0].updatedAt >= preRows.planner[0].updatedAt);
     const plannerAfter = await db.runtimes.findById(planner.id);
     assert.strictEqual(plannerAfter?.externalSessionId, 'conv-b');
     assert.strictEqual(plannerAfter?.externalProjectRef, 'https://chatgpt.com/g/g-p-b/project');

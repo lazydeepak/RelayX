@@ -86,4 +86,28 @@ describe('adapter match regression: bounded matching + ambiguity scope', () => {
     assert.strictEqual(segment('/dev/relay', '/dev/relay/packages/app'), true);
     assert.strictEqual(segment('/dev/relayx/packages/app', '/dev/relay'), false);
   });
+
+  it('a matching title cannot make an unrelated directory eligible', async () => {
+    const res = await (provider as any).matchAuthoritativeSessions(
+      [{ id: 'ses_relay_title_only', directory: '/dev/other', title: 'Relay worker' }],
+      [{
+        found: true,
+        status: 'available',
+        windowTitle: 'OpenCode — Relay',
+        composerVisible: true,
+        composerHasFocus: false,
+        sendButtonVisible: true,
+        stopButtonVisible: false,
+        cancelButtonVisible: false,
+        isWorking: false,
+        isComplete: false,
+        evidence: { id: 'ev_title', timestamp: 1, source: 'macos_system_events', details: {} },
+      }],
+      '/dev/relay',
+      undefined,
+      { allowMissingDirectory: false, directoryScopedMatchedVia: 'test' },
+    );
+    assert.strictEqual(res.results.length, 0);
+    assert.strictEqual(res.candidates[0].eligible, false);
+  });
 });

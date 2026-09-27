@@ -97,21 +97,4 @@ describe('adoptOpenCodeSession: isolated adoption of existing session', () => {
     );
   });
 
-  it('confirms no message delivery and unchanged service state', async () => {
-    // Read-only confirmation only — no additional DB/state mutation.
-    const res = await fetch(
-      'http://127.0.0.1:49374/api/session/ses_f36097667ffe7DDdSTkROUCzOk/message',
-      {
-        method: 'GET',
-        headers: {
-          Authorization: `Basic ${Buffer.from('opencode:EzuqNXu7RKaZltqfoGxYlyjzERvR7U8Y-lJ2Q-J04po').toString('base64')}`,
-          Accept: 'application/json',
-        },
-      },
-    );
-    assert.strictEqual(res.status, 200);
-    const body = await res.json();
-    assert.deepStrictEqual(body.data, []);
-    assert.strictEqual(body.cursor?.previous, null);
-  });
 });

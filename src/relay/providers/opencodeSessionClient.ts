@@ -490,10 +490,10 @@ export class OpenCodeSessionClient {
   private mapSession(raw: unknown): OpenCodeSessionSummary {
     const row = asRecord(raw);
     const id = asString(row?.id);
-    if (!row || !id) {
+    if (!row || !id || !id.startsWith('ses_')) {
       throw new OpenCodeServiceError(
         'invalid_response',
-        'OpenCode session entry is missing an `id`',
+        'OpenCode session entry is missing an authoritative `ses_*` id',
       );
     }
     const modelRecord = asRecord(row.model);

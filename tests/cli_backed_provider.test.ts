@@ -1,24 +1,20 @@
-import { test, describe } from 'node:test';
-import assert from 'node:assert';
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
 import { OpenCodeProvider } from '../src/relay/providers/adapters.ts';
 
-describe('CLI-backed OpenCode provider correction', () => {
-  test('createWorkerSession via CLI returns ses_* with directory', async () => {
-    const provider = new OpenCodeProvider();
-    const result = await provider.createWorkerSession('/tmp/relay-test-cli-backend');
-    assert.strictEqual(typeof result.sessionId, 'string');
-    assert.ok(result.sessionId.startsWith('ses_'), `expected ses_*, got ${result.sessionId}`);
-    assert.strictEqual(typeof result.workspaceDir, 'string');
-    assert.strictEqual(result.error, undefined);
-    // Clean only workspace dir; do not delete provider session
+describe('CLI-backed OpenCode provider preservation fence (no live calls)', () => {
+  it('keeps provider-owned CLI creation message-free and free of manual auth', () => {
+    const source = OpenCodeProvider.prototype.createWorkerSession.toString();
+    assert.match(source, /api["'],\s*["']POST["'],\s*["']\/api\/session/);
+    assert.match(source, /location:\s*\{\s*directory:\s*projectPath\s*\}/);
+    assert.match(source, /sessionId\.startsWith\(["']ses_["']\)/);
+    assert.doesNotMatch(source, /Authorization|Basic\s|message\s*:/i);
   });
 
-  test('confirmSessionForProject via CLI verifies authoritativeSessionId', async () => {
-    const provider = new OpenCodeProvider();
-    const sessionId = 'ses_f27199e88ffeJskCa6vADCM5Jg'; // existing verified session
-    const result = await provider.confirmSessionForProject(sessionId, '/tmp/relay-disposable-workspace');
-    assert.strictEqual(result.confirmed, true);
-    assert.strictEqual(result.externalSessionId, sessionId);
-    assert.ok(result.evidence);
+  it('keeps confirmation read-only and exact-session based', () => {
+    const source = OpenCodeProvider.prototype.confirmSessionForProject.toString();
+    assert.match(source, /api["'],\s*["']GET["']/);
+    assert.match(source, /s\?\.id\s*===\s*sessionId/);
+    assert.doesNotMatch(source, /api["'],\s*["']POST["']/);
   });
 });

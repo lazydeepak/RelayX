@@ -5,6 +5,7 @@ import { RelayApiService } from '../src/relay/application/RelayApiService.ts';
 import { RelayEngine } from '../src/relay/application/RelayEngine.ts';
 import { Project, Pair, RuntimeSession } from '../src/relay/domain/entities.ts';
 import { ProjectId, ProviderType } from '../src/relay/domain/types.ts';
+import { makeConfirmingOpenCodeProvider } from './support/authoritativeProvider.ts';
 
 const DISPOSABLE = '/tmp/opencode_disposable_workspace';
 const SESSION_ID = 'ses_f36097667ffe7DDdSTkROUCzOk';
@@ -13,8 +14,7 @@ describe('pair adopted session with planner conversation (isolated DB)', () => {
   it('creates pair using adopted open code worker + planner conversation, survives reload, zero messages', async () => {
     const db = new MemoryRelayDatabase();
     const engine = new RelayEngine(db);
-    // Minimal provider for service-level session adoption (service method reads provider only for shared-service resolution fallbacks; actual POST uses direct fetch).
-    engine.registerProvider({ providerType: 'opencode', integrationStatus: 'full' } as any);
+    engine.registerProvider(makeConfirmingOpenCodeProvider());
     const api = new RelayApiService(db, engine);
     const proj = new Project({
       id: 'proj-pair-adopt' as ProjectId,
@@ -70,20 +70,9 @@ describe('pair adopted session with planner conversation (isolated DB)', () => {
     assert.strictEqual(refreshedWorker?.externalSessionId, SESSION_ID);
     assert.strictEqual(refreshedWorker?.providerType, 'opencode');
 
-    // Confirm no message delivery (read-only service confirmation) and session persists externally.
-    const msgRes = await fetch(
-      `http://127.0.0.1:49374/api/session/${SESSION_ID}/message`,
-      {
-        method: 'GET',
-        headers: {
-          Authorization: `Basic ${Buffer.from('opencode:EzuqNXu7RKaZltqfoGxYlyjzERvR7U8Y-lJ2Q-J04po').toString('base64')}`,
-          Accept: 'application/json',
-        },
-      },
-    );
-    assert.strictEqual(msgRes.status, 200);
-    const msgBody = await msgRes.json();
-    assert.deepStrictEqual(msgBody.data, []);
+    // Adoption and pairing persist identity only; message-free provider creation
+    // is fenced independently without contacting a live session.
+    assert.strictEqual(refreshedWorker?.lastEvidence, undefined);
   });
 
   it('retains adopted session id when pairing fails and resumes without duplicate POST', async () => {
@@ -91,7 +80,7 @@ describe('pair adopted session with planner conversation (isolated DB)', () => {
     // If pairing fails (e.g., planner conflict), the adopted runtime remains in DB and pairing can resume.
     const db = new MemoryRelayDatabase();
     const engine = new RelayEngine(db);
-    engine.registerProvider({ providerType: 'opencode', integrationStatus: 'full' } as any);
+    engine.registerProvider(makeConfirmingOpenCodeProvider());
     const api = new RelayApiService(db, engine);
     await db.projects.save(
       new Project({
