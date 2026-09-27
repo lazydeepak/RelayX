@@ -49,7 +49,12 @@ import path from 'node:path';
 export function normalizeChatProjectSlug(ref: string | null | undefined): string {
   if (!ref || typeof ref !== 'string') return '';
   const match = ref.match(/(?:^|\/g\/)(g-p-[^/?#]+)/i);
-  return (match?.[1] ?? ref).replace(/\/$/, '').toLowerCase();
+  const slug = (match?.[1] ?? ref).replace(/\/$/, '').toLowerCase();
+  // Current ChatGPT links may append a human-readable project name to the
+  // stable 32-hex project key (for example `g-p-<key>-odarehub`). Discovery
+  // can return the bare key while a copied conversation URL includes the
+  // suffix, so ownership must compare the stable key when it is present.
+  return slug.match(/^(g-p-[0-9a-f]{32})(?:-|$)/)?.[1] ?? slug;
 }
 
 /** Normalizes a workspace path reference for project-ownership comparison. */
@@ -445,7 +450,7 @@ export class RelayApiService implements IRelayApi {
       if (!projectSlug) {
         throw new Error('Cross-project pairing: planner project ownership cannot be proven');
       }
-      if (parsed.projectId.toLowerCase() !== projectSlug) {
+      if (normalizeChatRef(parsed.projectId) !== projectSlug) {
         throw new Error('Cross-project pairing: conversation belongs to different ChatGPT project');
       }
       if (planner.externalSessionId && planner.externalSessionId !== parsed.conversationId) {

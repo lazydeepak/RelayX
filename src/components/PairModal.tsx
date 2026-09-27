@@ -52,6 +52,9 @@ export const PairModal: React.FC<PairModalProps> = ({
   const [workerChoices, setWorkerChoices] = useState<WorkerChoice[]>([]);
   const [workerDiscovery, setWorkerDiscovery] = useState<{ ok: boolean; reason?: string } | null>(null);
   const [adoptedRuntimes, setAdoptedRuntimes] = useState<UIRuntimeSession[]>([]);
+  const [newWorkerSessionName, setNewWorkerSessionName] = useState('');
+  const [isCreatingWorker, setIsCreatingWorker] = useState(false);
+  const [workerCreationMessage, setWorkerCreationMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isAddProjectWizardOpen, setIsAddProjectWizardOpen] = useState(false);
@@ -112,6 +115,8 @@ export const PairModal: React.FC<PairModalProps> = ({
         setProjectId(pair.projectId);
         setPlannerSessionId(pair.plannerSessionId || '');
         setWorkerSessionId(pair.workerSessionId || '');
+        setNewWorkerSessionName(`${pair.name} worker`);
+        setWorkerCreationMessage(null);
       } else if (mode === 'create') {
         setName('');
         setConversationUrl('');
@@ -123,6 +128,9 @@ export const PairModal: React.FC<PairModalProps> = ({
         setAdoptedRuntimes([]);
         const defaultProj = initialProjectId || activeProjects[0]?.id || '';
         setProjectId(defaultProj);
+        const projectName = activeProjects.find((p) => p.id === defaultProj)?.name;
+        setNewWorkerSessionName(`${projectName || 'OpenCode'} worker`);
+        setWorkerCreationMessage(null);
         // default planner to first chatgpt/available runtime
         const defaultPlanner = runtimes.find((r) => r.providerType === 'chatgpt') || runtimes[0];
         const defaultWorker = runtimes.find((r) => r.providerType === 'opencode' || r.providerType === 'vscode') || runtimes[1];
@@ -142,16 +150,18 @@ export const PairModal: React.FC<PairModalProps> = ({
   // Load project-owned choices: the observed ChatGPT conversation registry and the
   // OpenCode worker-session enumeration (registered + adoptable discovered ids).
   useEffect(() => {
-    if (!(isOpen && mode === 'create' && projectId)) return;
+    if (!(isOpen && projectId)) return;
     let cancelled = false;
     (async () => {
-      try {
-        const convRes = await relayBridge.enumerateChatGPTConversations(projectId);
-        if (cancelled) return;
-        setConversationChoices(convRes.ok ? convRes.conversations : []);
-        setConversationRegistryError(convRes.ok ? null : (convRes.error ?? 'Conversation registry unavailable'));
-      } catch (err: any) {
-        if (!cancelled) setConversationRegistryError(err?.message ?? 'Conversation registry unavailable');
+      if (mode === 'create') {
+        try {
+          const convRes = await relayBridge.enumerateChatGPTConversations(projectId);
+          if (cancelled) return;
+          setConversationChoices(convRes.ok ? convRes.conversations : []);
+          setConversationRegistryError(convRes.ok ? null : (convRes.error ?? 'Conversation registry unavailable'));
+        } catch (err: any) {
+          if (!cancelled) setConversationRegistryError(err?.message ?? 'Conversation registry unavailable');
+        }
       }
       try {
         const workRes = await relayBridge.enumerateWorkerChoices(projectId);
@@ -257,6 +267,41 @@ export const PairModal: React.FC<PairModalProps> = ({
       return;
     }
     setWorkerSessionId(value);
+  };
+
+  const createWorkerSession = async () => {
+    const sessionName = newWorkerSessionName.trim();
+    if (!projectId) {
+      setErrorMessage('Select a project before creating a worker session');
+      return;
+    }
+    if (!sessionName) {
+      setErrorMessage('Enter a name for the new worker session');
+      return;
+    }
+
+    setIsCreatingWorker(true);
+    setErrorMessage(null);
+    setWorkerCreationMessage(null);
+    try {
+      const result = await relayBridge.createOpenCodeWorkerSession(projectId, sessionName);
+      if (!result.adopted || !result.runtime) {
+        const retainedId = result.sessionId ? ` Session ${result.sessionId} was retained for recovery.` : '';
+        throw new Error(`${result.error || 'The new OpenCode session could not be adopted.'}${retainedId}`);
+      }
+      setAdoptedRuntimes((prev) =>
+        prev.some((runtime) => runtime.id === result.runtime!.id)
+          ? prev
+          : [...prev, result.runtime!],
+      );
+      setWorkerSessionId(result.runtime.id);
+      setWorkerCreationMessage(`Created and selected “${sessionName}”. Save the pair to apply this binding.`);
+      if (onRefresh) onRefresh();
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Failed to create the OpenCode worker session');
+    } finally {
+      setIsCreatingWorker(false);
+    }
   };
 
   return (
@@ -533,7 +578,31 @@ export const PairModal: React.FC<PairModalProps> = ({
                   </optgroup>
                 )}
               </select>
-              {mode === 'create' && workerDiscovery && !workerDiscovery.ok && (
+              <div className="grid grid-cols-[1fr_auto] gap-2">
+                <input
+                  type="text"
+                  value={newWorkerSessionName}
+                  onChange={(e) => setNewWorkerSessionName(e.target.value)}
+                  placeholder="New worker session name"
+                  className="min-w-0 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-emerald-500"
+                />
+                <button
+                  type="button"
+                  onClick={createWorkerSession}
+                  disabled={isCreatingWorker || !projectId || !newWorkerSessionName.trim()}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white font-medium transition-colors"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>{isCreatingWorker ? 'Creating…' : 'Create Session'}</span>
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-400">
+                Creates an empty OpenCode session in this project workspace and selects it as the worker.
+              </p>
+              {workerCreationMessage && (
+                <p className="text-[11px] text-emerald-300">{workerCreationMessage}</p>
+              )}
+              {workerDiscovery && !workerDiscovery.ok && (
                 <p className="text-[11px] text-amber-300/90">
                   Session discovery unavailable ({workerDiscovery.reason ?? 'unknown reason'}) —
                   showing registered sessions only.

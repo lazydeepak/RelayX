@@ -180,6 +180,27 @@ describe('service boundary: explicit ChatGPT conversation binding contract', () 
     assert.strictEqual((await db.pairs.findAll()).length, 0);
   });
 
+  it('accepts a conversation URL whose display slug follows the same stable project key', async () => {
+    const db = makeDb();
+    const { api } = makeApi(db);
+    const stableProjectId = 'g-p-6a9d699a8a488191a554385d74bb9422';
+    await seedProject(db, `https://chatgpt.com/g/${stableProjectId}/project`);
+    const planner = await makeChatgptRuntime(db, 'Planner', { projectRef: stableProjectId });
+    const worker = await makeWorker(db);
+
+    const pair = await api.createPair(
+      'proj-1' as string,
+      'Slugged URL',
+      planner.id as string,
+      worker.id as string,
+      `https://chatgpt.com/g/${stableProjectId}-odarehub/c/6ab7d566-3438-83e8-9e72-850a925b54b4`,
+    );
+
+    assert.strictEqual(pair.name, 'Slugged URL');
+    const reloaded = await db.runtimes.findById(planner.id as RuntimeSessionId);
+    assert.strictEqual(reloaded?.externalSessionId, '6ab7d566-3438-83e8-9e72-850a925b54b4');
+  });
+
   it('rejects when the selected planner runtime already carries a different external session ID', async () => {
     const db = makeDb();
     const { api } = makeApi(db);
