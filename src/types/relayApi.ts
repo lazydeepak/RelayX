@@ -159,7 +159,16 @@ export interface IRelayApi {
   ): Promise<UIRuntimeSession>;
   discoverRuntime(providerType: ProviderType): Promise<{ success: boolean; runtime?: UIRuntimeSession; isNew?: boolean; error?: string }>;
   inspectRuntime(sessionId: string): Promise<{ success: boolean; evidence?: ObservableEvidence; error?: string }>;
-  recoverRuntime(sessionId: string): Promise<{ success: boolean; restored: boolean }>;
+  /**
+   * S6 CLOSURE — `error` is populated ONLY when the attempt was refused by the I-2
+   * runtime->Pair governance guard (the owning Pair is IDLE, or its ownership is
+   * ambiguous). It is absent for a genuine provider/transport failure, so "not
+   * permitted" is never reported as "the provider could not be reached".
+   *
+   * Additive: the field is optional, so every existing caller and implementation of
+   * this interface keeps compiling and behaving identically.
+   */
+  recoverRuntime(sessionId: string): Promise<{ success: boolean; restored: boolean; error?: string }>;
   detachRuntime(sessionId: string): Promise<{ success: boolean; detachedFromPairs: string[] }>;
   canDeleteRuntimeSession(sessionId: string): Promise<{ canDelete: boolean; reasons: string[] }>;
   deleteRuntimeSession(sessionId: string): Promise<{ success: boolean; error?: string }>;

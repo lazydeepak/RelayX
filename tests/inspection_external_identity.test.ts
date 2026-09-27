@@ -171,6 +171,15 @@ describe('inspectRuntime persists identity only from an authoritative session ID
     const pair = await engine.createPair(project.id, 'Default Pair', planner.id, runtime.id);
     assert.equal(pair.workerSessionId, runtime.id);
 
+    // S6 CLOSURE: this runtime is now bound to a Pair, so `inspectRuntime` is a
+    // Pair-governed provider operation and I-2 applies. Load & Activate is the only
+    // authorized grantor (§4.4, §11.5), so the Pair must be ACTIVE before the
+    // inspection can contact the provider at all. The test's actual subject — the
+    // identity-conflict guard below — is unaffected by activation; it only needs the
+    // provider to be reachable so it can observe `ses_B`.
+    const activation = await engine.loadAndActivate(pair.id);
+    assert.equal(activation.outcome, 'activated', activation.reason ?? '');
+
     // Inspection observes a DIFFERENT verified session ID.
     provider.authoritativeSessionId = 'ses_B';
     const res = await service.inspectRuntime(runtime.id);

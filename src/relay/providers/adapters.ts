@@ -12,6 +12,8 @@ import {
   DeliveryInstructionRequest,
   DeliveryInstructionResult,
   ProviderSessionConfirmation,
+  SideIdentityRequest,
+  SideIdentityResolution,
 } from './interfaces.ts';
 import {
   OpenCodeServiceError,
@@ -3107,6 +3109,154 @@ export class OpenCodeProvider extends BaseMacOSProvider {
     } catch {
       return { confirmed: false };
     }
+  }
+
+  /* --- S4: read-only side identity resolution ------------------------------
+   *
+   * Frozen source: DESIGN_FREEZE_SESSION_PAIR_OPERATIONS.md §11.1, §9.5, §5.2-5.3.
+   *
+   * This is the ONE member added to `IRuntimeProvider` in this tranche, and it is
+   * optional and read-only (§11.1). It sends nothing: no POST, no prompt, no
+   * keystroke. Exact Planner transport is S11 (§9.4) and is deliberately absent.
+   *
+   * ## I-16 / ef6185b preservation
+   *
+   * No `ef6185b` member is modified, replaced, or reimplemented. Specifically
+   * `confirmSessionForProject`, `matchSessionsByPath`,
+   * `discoverSessionsViaSharedService`, `discoverPersistedSessions`,
+   * `matchAuthoritativeSessions` and `createWorkerSession` are all left
+   * byte-identical, because each is an executable preservation gate in
+   * OPENCODE_SESSION_DISCOVERY.md. The CLI `GET /api/session` read below is
+   * deliberately a SEPARATE private helper rather than a refactor of the
+   * existing confirmation path: sharing one helper would have edited protected
+   * behaviour to save a few lines, and that trade is not available here.
+   *
+   * ## I-11
+   *
+   * The lookup is addressed by the provider's own `ses_*` session id. It never
+   * matches on a human-readable title or a window name, so the shared Pair Name
+   * can never become the identity.
+   *
+   * ## I-6
+   *
+   * The three outcomes are kept distinct. A transport failure, a missing binary
+   * or an unparseable response is `unknown` — "we could not check". Only a
+   * successful read that does not contain the id is `not_resolved`/`absent`.
+   */
+  public async resolveSideIdentity(request: SideIdentityRequest): Promise<SideIdentityResolution> {
+    const now = Date.now();
+    const base = {
+      sourceCapability: 'opencode_cli_session_get',
+      observedAt: now,
+    };
+    const unknown = (reason: string): SideIdentityResolution => ({
+      ...base,
+      identityState: 'unknown',
+      identityValue: null,
+      verificationState: 'unknown',
+      verificationValue: null,
+      existenceState: 'unknown',
+      reason,
+    });
+
+    const { spawnSync } = await import('child_process');
+    const fs = await import('fs');
+    const cli = [
+      '/Users/lazydeepak/Library/Application Support/ai.opencode.desktop/cli/2.0.16/opencode-cli',
+      'opencode-cli',
+    ].find((p: string) => {
+      try {
+        return fs.existsSync(p);
+      } catch {
+        return false;
+      }
+    });
+    if (!cli) {
+      return unknown('No OpenCode CLI is available to resolve session identity');
+    }
+
+    // GET only. Never a write, and never a message of any kind (I-16, §9.4).
+    const query = request.projectPath
+      ? `/api/session?directory=${encodeURIComponent(request.projectPath)}&limit=50`
+      : '/api/session?limit=50';
+
+    let res: { error?: Error; status?: number | null; stdout?: string; stderr?: string };
+    try {
+      res = spawnSync(cli, ['api', 'GET', query], {
+        encoding: 'utf8',
+        timeout: 15000,
+        maxBuffer: 5 * 1024 * 1024,
+        env: process.env,
+      }) as any;
+    } catch (err: any) {
+      return unknown(`OpenCode CLI read failed: ${err?.message ?? String(err)}`);
+    }
+
+    if (res.error || res.status !== 0 || !res.stdout) {
+      // The read did not succeed. That is "could not check", not "not there" (I-6).
+      return unknown(
+        `OpenCode CLI read did not complete (status ${res.status ?? 'none'}${
+          res.error ? `, error ${res.error.message}` : ''
+        })`,
+      );
+    }
+
+    let sessions: any[];
+    try {
+      const parsed = JSON.parse(res.stdout);
+      sessions = Array.isArray(parsed) ? parsed : (parsed?.data ?? parsed?.sessions ?? []);
+      if (!Array.isArray(sessions)) {
+        return unknown('OpenCode CLI returned a response that is not a session list');
+      }
+    } catch {
+      return unknown('OpenCode CLI returned an unparseable response');
+    }
+
+    // Exact match on the provider's own id only. Never a title/name match (I-11).
+    const exact = sessions.find(
+      (s: any) => s?.id === request.externalSessionId || s?.evidence?.details?.authoritativeSessionId === request.externalSessionId,
+    );
+
+    if (!exact) {
+      return {
+        ...base,
+        identityState: 'not_resolved',
+        identityValue: null,
+        verificationState: 'mismatched',
+        verificationValue: null,
+        existenceState: 'absent',
+        reason: `OpenCode has no session '${request.externalSessionId}' in the queried scope`,
+        evidence: {
+          id: `ev_side_absent_${now}`,
+          timestamp: now,
+          source: 'reconciliation_probe',
+        },
+      };
+    }
+
+    const resolvedId: string = exact.id ?? request.externalSessionId;
+    const directory: string | null = exact.directory ?? exact.cwd ?? null;
+    return {
+      ...base,
+      identityState: 'resolved',
+      identityValue: resolvedId,
+      // The provider returned this exact id from its own session store, which is
+      // the confirmation authority (ef6185b). If a directory scope was supplied
+      // and the provider reports a different one, that is a mismatch, not a pass.
+      verificationState:
+        request.projectPath && directory && directory !== request.projectPath
+          ? 'mismatched'
+          : 'verified',
+      verificationValue: resolvedId,
+      existenceState: 'present',
+      reason: null,
+      evidence: exact.evidence ?? {
+        id: `ev_side_present_${now}`,
+        timestamp: now,
+        source: 'reconciliation_probe',
+        details: { authoritativeSessionId: resolvedId },
+      },
+    };
   }
 
   /**

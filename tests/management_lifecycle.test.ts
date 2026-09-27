@@ -4,12 +4,40 @@ import { SqliteRelayDatabase } from '../src/relay/persistence/sqlite/SqliteDatab
 import { RelayEngine } from '../src/relay/application/RelayEngine.ts';
 import { RelayApiService } from '../src/relay/application/RelayApiService.ts';
 import { ChatGPTProvider, OpenCodeProvider, VSCodeProvider } from '../src/relay/providers/adapters.ts';
+import type { SideIdentityRequest, SideIdentityResolution } from '../src/relay/providers/interfaces.ts';
+
+/**
+ * Hermetic identity read.
+ *
+ * These lifecycle tests now drive a real Load & Activate (S6), which calls the
+ * provider's read-only identity capability. The production
+ * `OpenCodeProvider.resolveSideIdentity` shells out to the real OpenCode CLI, so
+ * the lifecycle assertions would otherwise depend on whether a CLI is installed.
+ * Overriding just that one read keeps the rest of the real provider behaviour —
+ * including what these tests are actually about — untouched.
+ */
+class HermeticIdentityOpenCode extends OpenCodeProvider {
+  public override async resolveSideIdentity(
+    request: SideIdentityRequest,
+  ): Promise<SideIdentityResolution> {
+    return {
+      identityState: 'resolved',
+      identityValue: request.externalSessionId,
+      verificationState: 'verified',
+      verificationValue: request.externalSessionId,
+      existenceState: 'present',
+      sourceCapability: 'test_hermetic_identity',
+      observedAt: Date.now(),
+      reason: null,
+    };
+  }
+}
 
 test('Project, Pair, and Runtime Session Management Lifecycle and Deletion Guards', async (t) => {
   const db = new SqliteRelayDatabase(':memory:');
   const engine = new RelayEngine(db);
   engine.registerProvider(new ChatGPTProvider());
-  engine.registerProvider(new OpenCodeProvider());
+  engine.registerProvider(new HermeticIdentityOpenCode());
   engine.registerProvider(new VSCodeProvider());
   const service = new RelayApiService(db, engine);
 
@@ -65,6 +93,10 @@ test('Project, Pair, and Runtime Session Management Lifecycle and Deletion Guard
     assert.strictEqual(pair.projectId, project.id);
     assert.strictEqual(pair.status, 'idle');
 
+    // I-2 (S6): dispatch is provider contact, so the Pair must be ACTIVE first.
+    // Load & Activate is the ONLY authorized grantor (freeze §4.4, §11.5).
+    assert.strictEqual((await engine.loadAndActivate(pair.id as any)).outcome, 'activated');
+
     // Dispatch assignment to make it active
     const assignment = await service.createAssignment(
       pair.id,
@@ -118,7 +150,26 @@ test('Project, Pair, and Runtime Session Management Lifecycle and Deletion Guard
     const pausedPair = await db.pairs.findById(pair.id as any);
     assert.strictEqual(pausedPair?.status, 'paused');
 
-    // Resume pair
+    // Start Pair is EXECUTION authority only. On an IDLE Pair it must refuse
+    // truthfully and name the operation that would work, rather than silently
+    // granting ACTIVE (freeze §4.4 "Changes operational state: No", N-16, N-18).
+    await assert.rejects(
+      () => service.startPair(pair.id),
+      (err: any) => {
+        assert.strictEqual(err?.code, 'PAIR_OPERATIONAL_STATE_IDLE');
+        assert.match(err?.message ?? '', /Load & Activate/);
+        return true;
+      },
+      'Start Pair must refuse an IDLE Pair instead of activating it',
+    );
+    assert.strictEqual(
+      (await db.pairs.findById(pair.id as any))?.operationalState,
+      'IDLE',
+      'a refused Start Pair must leave operational state untouched',
+    );
+
+    // Activate, then resume execution.
+    assert.strictEqual((await engine.loadAndActivate(pair.id as any)).outcome, 'activated');
     await service.startPair(pair.id);
     const resumedPair = await db.pairs.findById(pair.id as any);
     assert.strictEqual(resumedPair?.status, 'idle');

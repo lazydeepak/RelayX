@@ -14,6 +14,9 @@ import {
   RecoveryActionId,
   ProjectStatus,
   PairStatus,
+  PairOperationalState,
+  DEFAULT_PAIR_OPERATIONAL_STATE,
+  isPairOperationalState,
   AssignmentStatus,
   AttemptStatus,
   RuntimeSessionStatus,
@@ -31,6 +34,7 @@ import {
   MissingEvidenceError,
   DuplicateDeliveryAttemptError,
   AmbiguousDeliveryResendError,
+  RelayDomainError,
 } from './errors.ts';
 
 /* --- Project Entity --- */
@@ -118,6 +122,16 @@ export interface PairProps {
   workerSessionId?: RuntimeSessionId | null;
   activeAssignmentId?: AssignmentId;
   status: PairStatus;
+  /**
+   * Two-valued operational dimension (I-1). Omitted means IDLE, which is the only
+   * safe default for a pre-existing record (§17.3).
+   */
+  operationalState?: PairOperationalState;
+  /**
+   * Stable Pair identity that survives session rebinding (C-1 prerequisite).
+   * Immutable once set; defaults to `id`.
+   */
+  stableId?: PairId;
   lastSupervisedAt?: number;
   createdAt: number;
   updatedAt: number;
@@ -135,6 +149,22 @@ export class Pair {
   public readonly createdAt: number;
   public updatedAt: number;
 
+  /**
+   * Immutable identity anchor for everything that must outlive a session
+   * rebinding (observations, checkpoints, provenance).
+   *
+   * SESSION_PAIR_REPLACEMENT.md requires that a replacement produce a NEW Pair
+   * with the old one preserved. The current `updatePair()` path still mutates the
+   * same row, and that in-place path is asserted by protected regression gates
+   * (see S1_PAIR_SEMANTICS_IMPLEMENTATION.md §2). `stableId` is therefore the
+   * safe prerequisite: it gives history a non-rewritable anchor TODAY, so the
+   * in-place mutation can no longer silently move the ownership of a recorded
+   * fact. It does not by itself implement replacement; see the S1 note.
+   */
+  public readonly stableId: PairId;
+
+  private operational: PairOperationalState;
+
   constructor(props: PairProps) {
     this.id = props.id;
     this.projectId = props.projectId;
@@ -143,9 +173,37 @@ export class Pair {
     this.workerSessionId = props.workerSessionId ?? undefined;
     this.activeAssignmentId = props.activeAssignmentId;
     this.status = props.status;
+    this.stableId = props.stableId ?? props.id;
+    this.operational = DEFAULT_PAIR_OPERATIONAL_STATE;
     this.lastSupervisedAt = props.lastSupervisedAt;
     this.createdAt = props.createdAt;
     this.updatedAt = props.updatedAt;
+    // Assigned last so the validating setter is the only way in, for a
+    // constructor-supplied value as well as for any later assignment.
+    this.operationalState = props.operationalState ?? DEFAULT_PAIR_OPERATIONAL_STATE;
+  }
+
+  /**
+   * The single source of truth for operational state (I-1, §4.1, §17.2).
+   *
+   * Deliberately a validated accessor rather than a plain public field: a third
+   * value (e.g. `ACTIVATING`) is unrepresentable, not merely discouraged. I-1
+   * forbids a persisted third value for a transient condition, and a plain field
+   * would let one in from any call site including the persistence mappers.
+   */
+  public get operationalState(): PairOperationalState {
+    return this.operational;
+  }
+
+  public set operationalState(value: PairOperationalState) {
+    if (!isPairOperationalState(value)) {
+      throw new RelayDomainError(
+        `Pair operational state must be exactly IDLE or ACTIVE; received '${String(value)}'. ` +
+          'A transient third value is prohibited (DESIGN_FREEZE I-1).',
+        'PAIR_OPERATIONAL_STATE_INVALID',
+      );
+    }
+    this.operational = value;
   }
 
   public static create(
@@ -162,9 +220,57 @@ export class Pair {
       plannerSessionId,
       workerSessionId,
       status: 'idle',
+      operationalState: DEFAULT_PAIR_OPERATIONAL_STATE,
       createdAt: now,
       updatedAt: now,
     });
+  }
+
+  /**
+   * IDLE -> ACTIVE. Permission to contact providers, nothing more.
+   *
+   * Pure state transition: it contacts no provider, reads no external surface,
+   * and does not imply execution, readiness, or polling (I-4). Callers that need
+   * to verify both sides before granting this permission are Load & Activate
+   * (S6); nothing in S1 may call this on an operator-visible path.
+   */
+  public makeActive(reason?: string): void {
+    this.operationalState = 'ACTIVE';
+    this.updatedAt = Date.now();
+    void reason;
+  }
+
+  /**
+   * ACTIVE -> IDLE. Idempotent (freeze §4.5).
+   *
+   * Preserves everything: bindings, `activeAssignmentId`, history, checkpoints,
+   * provenance and last-known evidence are all untouched (I-10). Only the
+   * permission to contact providers is withdrawn.
+   */
+  public makeIdle(reason?: string): void {
+    this.operationalState = 'IDLE';
+    this.updatedAt = Date.now();
+    void reason;
+  }
+
+  /**
+   * The I-2 gate, and the ONLY place operational state is consulted for provider
+   * contact. Reads `operationalState` and nothing else — never `status`, never a
+   * runtime's last-known status or last observation. A stale historical value on
+   * any of those must not be able to authorize contact.
+   */
+  public isProviderContactPermitted(): boolean {
+    return this.operationalState === 'ACTIVE';
+  }
+
+  public assertProviderContactPermitted(): void {
+    if (!this.isProviderContactPermitted()) {
+      throw new RelayDomainError(
+        `Pair is IDLE: provider contact is not permitted. Persisted provider information is ` +
+          'last-known evidence only (DESIGN_FREEZE I-2, I-3).',
+        'PAIR_OPERATIONAL_STATE_IDLE',
+      );
+    }
   }
 
   public update(name?: string, plannerSessionId?: RuntimeSessionId | null, workerSessionId?: RuntimeSessionId | null): void {
@@ -193,6 +299,15 @@ export class Pair {
     this.workerSessionId = undefined;
     this.updatedAt = Date.now();
   }
+
+  /* --- Lifecycle / execution dimension (the single owner of `PairStatus`) ---
+   *
+   * These methods are the ONLY writers of `this.status`. They never write
+   * `this.operationalState`, and a lifecycle change never changes operational
+   * state: a Pair may be ACTIVE and blocked, or IDLE and archived (freeze §4.2).
+   * This is what keeps the two dimensions from becoming competing state
+   * machines over the deprecated `idle`/`active` aliases.
+   */
 
   public archive(): void {
     this.status = 'archived';
@@ -253,6 +368,24 @@ export interface RuntimeSessionProps {
 }
 
 export class RuntimeSession {
+  /* --- CHECKPOINT SEMANTIC FENCE (DESIGN_FREEZE §6.4, I-14; owned by S3) ---
+   *
+   * `lastEvidence` is the LATEST OBSERVATION. It is NOT an acknowledged or
+   * consumed checkpoint, and it is NOT a synchronization cursor.
+   *
+   * The frozen rule this field must never violate: observation alone must never
+   * advance the durable per-side synchronization checkpoint. If the checkpoint
+   * moved on every observation there would be nothing left to compare against,
+   * and `planner advanced` / `worker advanced` / `BOTH advanced` (I-8) could
+   * never be detected. Checkpoint advancement is a separate, explicit, durable,
+   * append-only act (S3).
+   *
+   * Until S3 introduces that durable model, this overwrite-on-write field is the
+   * only per-side continuity carrier that exists, which is exactly why its role
+   * must be named rather than left implicit. It is last-known evidence, and it is
+   * rendered as last-known while the Pair is IDLE (I-3).
+   */
+
   public readonly id: RuntimeSessionId;
   public readonly providerType: ProviderType;
   public name: string;
@@ -500,7 +633,22 @@ export interface HandoffProps {
   status: HandoffStatus;
   resultSummary?: string;
   payload?: Record<string, unknown>;
+  /**
+   * Evidence that the WORKER physically produced the result. Set by
+   * {@link Handoff.markReady}. This is a `provider-produced` fact about the
+   * Worker side and nothing else.
+   */
   evidence?: ObservableEvidence;
+  /**
+   * Evidence that the PLANNER was externally notified. Set only by
+   * {@link Handoff.markDeliveredToPlanner}, and only with provider evidence.
+   *
+   * Deliberately a SEPARATE field from `evidence`: the two are different claims
+   * about different external systems, and one must never overwrite the other
+   * (§7.3, I-13). Before this split, delivering to the Planner destroyed the
+   * record of what the Worker actually produced.
+   */
+  plannerDeliveryEvidence?: ObservableEvidence;
   deliveredToPlannerAt?: number;
   completedAt?: number;
   createdAt: number;
@@ -515,6 +663,7 @@ export class Handoff {
   public resultSummary?: string;
   public payload?: Record<string, unknown>;
   public evidence?: ObservableEvidence;
+  public plannerDeliveryEvidence?: ObservableEvidence;
   public deliveredToPlannerAt?: number;
   public completedAt?: number;
   public readonly createdAt: number;
@@ -528,6 +677,7 @@ export class Handoff {
     this.resultSummary = props.resultSummary;
     this.payload = props.payload;
     this.evidence = props.evidence;
+    this.plannerDeliveryEvidence = props.plannerDeliveryEvidence;
     this.deliveredToPlannerAt = props.deliveredToPlannerAt;
     this.completedAt = props.completedAt;
     this.createdAt = props.createdAt;
@@ -554,8 +704,26 @@ export class Handoff {
     this.updatedAt = Date.now();
   }
 
-  public markDeliveredToPlanner(): void {
+  /**
+   * Record that the Planner was externally notified.
+   *
+   * REQUIRES provider evidence. `HandoffStatus`/`deliveredToPlannerAt` is a
+   * durable assertion about the external world, so it is gated exactly like
+   * `Delivery.confirmDelivered`: without evidence this throws rather than
+   * writing a claim RelayX cannot support. Before this gate existed,
+   * `RelayEngine.deliverHandoffToPlanner()` called it with no provider call at
+   * all, which manufactured Planner-delivery evidence from a pure local
+   * transition (DESIGN_FREEZE §9.4.1, §7.3).
+   */
+  public markDeliveredToPlanner(evidence: ObservableEvidence): void {
+    if (!evidence) {
+      throw new MissingEvidenceError('markDeliveredToPlanner');
+    }
     this.status = 'delivered';
+    // Written to its OWN field. `this.evidence` records what the Worker
+    // produced; overwriting it here would destroy a `provider-produced`
+    // provenance record (§7.3, I-13) in order to record a different one.
+    this.plannerDeliveryEvidence = evidence;
     this.deliveredToPlannerAt = Date.now();
     this.updatedAt = Date.now();
   }

@@ -96,11 +96,13 @@ async function approvedRevision(
 }
 
 describe('Plan-First schema — frozen constraints (§E)', () => {
-  it('S1 — a clean database creates all three tables and stamps user_version 3', async () => {
+  it('S1 — a clean database creates all three tables and stamps the current user_version', async () => {
     await withTempDir(async (dir) => {
       const db = new SqliteRelayDatabase(join(dir, 'clean.sqlite'));
       const version = (db.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-      assert.strictEqual(version, 3);
+      // v3 = Plan-First execution domain (§E.5); v4 = Session Pair operations
+      // (DESIGN_FREEZE §10.2); v5 = per-side identity evidence (§10.3, S5).
+      assert.strictEqual(version, 5);
 
       const tables = (
         db.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]
@@ -461,7 +463,7 @@ describe('Plan-First schema — migration (§E.5)', () => {
       raw.close();
 
       const db = new SqliteRelayDatabase(path);
-      assert.strictEqual((db.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 3);
+      assert.strictEqual((db.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 5);
 
       // The regression this guards: stamping 3 first would make `version < 2` false and
       // silently skip the orphan triggers.
@@ -501,7 +503,7 @@ describe('Plan-First schema — migration (§E.5)', () => {
       raw.close();
 
       const db = new SqliteRelayDatabase(path);
-      assert.strictEqual((db.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 3);
+      assert.strictEqual((db.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 5);
 
       // The dropped columns are gone, the frozen ones are present.
       const runCols = (

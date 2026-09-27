@@ -117,8 +117,16 @@ describe('RelayX Domain Model & Invariants', () => {
 
     assert.strictEqual(assignment.status, 'waiting_for_handoff');
 
-    // Planner receives and marks handoff complete
-    handoff.markDeliveredToPlanner();
+    // Planner receives and marks handoff complete.
+    // External delivery to the Planner requires provider evidence (S1
+    // external-effect invariant), so the transition is given it explicitly.
+    // Without evidence it throws rather than asserting a delivery that never
+    // happened; that gate is covered in external_effect_evidence.test.ts.
+    handoff.markDeliveredToPlanner({
+      id: 'ev_handoff_planner_delivery',
+      timestamp: Date.now(),
+      source: 'reconciliation_probe',
+    });
     handoff.completeHandoff();
 
     assert.strictEqual(handoff.status, 'complete');

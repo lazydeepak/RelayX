@@ -25,6 +25,10 @@ describe('RelayX Architectural Scenarios & Recovery Invariants', () => {
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner Alpha');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker Beta');
     const pair = await engine.createPair(project.id, 'Pair 1', planner.id, worker.id);
+    // I-2 (S6): this test drives provider contact (dispatch/supervision/recovery),
+    // which requires operational_state = ACTIVE. Load & Activate is the ONLY
+    // authorized grantor (freeze §4.4, §11.5).
+    assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
 
     const assignment = await engine.createAssignment(pair.id, 'Async Job', 'Compute long batch');
     await engine.dispatchAssignment(assignment.id);
@@ -51,6 +55,10 @@ describe('RelayX Architectural Scenarios & Recovery Invariants', () => {
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner Alpha');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker Beta');
     const pair = await engine.createPair(project.id, 'Pair 1', planner.id, worker.id);
+    // I-2 (S6): this test drives provider contact (dispatch/supervision/recovery),
+    // which requires operational_state = ACTIVE. Load & Activate is the ONLY
+    // authorized grantor (freeze §4.4, §11.5).
+    assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
 
     const assignment = await engine.createAssignment(pair.id, 'Job', 'Run script');
     await engine.dispatchAssignment(assignment.id);
@@ -85,6 +93,10 @@ describe('RelayX Architectural Scenarios & Recovery Invariants', () => {
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner Alpha');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker Beta');
     const pair = await engine.createPair(project.id, 'Pair 1', planner.id, worker.id);
+    // I-2 (S6): this test drives provider contact (dispatch/supervision/recovery),
+    // which requires operational_state = ACTIVE. Load & Activate is the ONLY
+    // authorized grantor (freeze §4.4, §11.5).
+    assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
 
     const assignment = await engine.createAssignment(pair.id, 'Tracing Task', 'Log steps');
     await engine.dispatchAssignment(assignment.id);

@@ -122,6 +122,18 @@ async function setupBoundary0(
 
   const pair = await engine.createPair(project.id, 'Pair', planner.id, worker.id);
 
+  // I-2: every provider contact below needs operational_state = ACTIVE. The ONLY
+  // grantor is Load & Activate (freeze §4.4, §11.5), so the fixture must go
+  // through it. Neither MockProvider exposes an identity capability, so both sides
+  // report `unknown` and activation succeeds while recording the asymmetry.
+  // (S6_LOAD_AND_ACTIVATE.md §2 documents the §4.4-vs-§11.2 reading.)
+  const activation = await engine.loadAndActivate(pair.id);
+  assert.strictEqual(
+    activation.outcome,
+    'activated',
+    `fixture pair must activate, otherwise every boundary below silently contacts nothing: ${activation.reason ?? ''}`,
+  );
+
   const semanticFields = {
     wu1: { objective: 'a.txt', expect: 'A' },
     wu2: { objective: 'b.txt', expect: 'B' },

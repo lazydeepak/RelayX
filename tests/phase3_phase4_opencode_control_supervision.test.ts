@@ -4,13 +4,43 @@ import { OpenCodeProvider } from '../src/relay/providers/adapters.ts';
 import { RelayEngine } from '../src/relay/application/RelayEngine.ts';
 import { MemoryRelayDatabase } from '../src/relay/persistence/memory/MemoryDatabase.ts';
 import { AmbiguousDeliveryResendError } from '../src/relay/domain/errors.ts';
+import { MockProvider } from './MockProvider.ts';
+import type { SideIdentityRequest, SideIdentityResolution } from '../src/relay/providers/interfaces.ts';
+
+/**
+ * Hermetic identity read for every test provider in this file.
+ *
+ * S4 added the optional read-only `resolveSideIdentity` to `OpenCodeProvider`, and
+ * the production implementation shells out to the real OpenCode CLI. These tests
+ * exercise dispatch and supervision, which now require an ACTIVE Pair, and the
+ * only authorized grantor (Load & Activate) therefore calls that read. Overriding
+ * it here keeps the suite hermetic and deterministic — without this, activation
+ * would depend on whether a real CLI happens to be installed, and these UI-control
+ * tests would silently become environment-dependent.
+ */
+class HermeticIdentityOpenCode extends OpenCodeProvider {
+  public override async resolveSideIdentity(
+    request: SideIdentityRequest,
+  ): Promise<SideIdentityResolution> {
+    return {
+      identityState: 'resolved',
+      identityValue: request.externalSessionId,
+      verificationState: 'verified',
+      verificationValue: request.externalSessionId,
+      existenceState: 'present',
+      sourceCapability: 'test_hermetic_identity',
+      observedAt: Date.now(),
+      reason: null,
+    };
+  }
+}
 
 describe('Phase 3 & Phase 4 — OpenCode UI Control & Worker Supervision', () => {
   it('delivers instruction visibly and marks delivered when post-send state is verified', async () => {
     const db = new MemoryRelayDatabase();
     const engine = new RelayEngine(db);
 
-    class ControllableOpenCodeProvider extends OpenCodeProvider {
+    class ControllableOpenCodeProvider extends HermeticIdentityOpenCode {
       public sendScriptSucceeds = true;
 
       protected override probeMacOSProcess(_name: string) {
@@ -40,11 +70,20 @@ describe('Phase 3 & Phase 4 — OpenCode UI Control & Worker Supervision', () =>
 
     const testProvider = new ControllableOpenCodeProvider();
     engine.registerProvider(testProvider);
+    // §4.4 "provider capabilities present" is per side: a bound planner side needs
+    // a registered provider too. MockProvider exposes no identity capability, so the
+    // planner side is honestly reported as `unknown` (LEVEL 0, §9.5) rather than
+    // blocking activation.
+    engine.registerProvider(new MockProvider('chatgpt'));
 
     const project = await engine.createProject('Test Control Proj');
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner ChatGPT');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker OpenCode');
     const pair = await engine.createPair(project.id, 'Control Pair', planner.id, worker.id);
+    // I-2 (S6): this test drives provider contact (dispatch/supervision/recovery),
+    // which requires operational_state = ACTIVE. Load & Activate is the ONLY
+    // authorized grantor (freeze §4.4, §11.5).
+    assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
 
     const assignment = await engine.createAssignment(pair.id, 'Implement Feature X', 'export function featureX() {}');
 
@@ -65,7 +104,7 @@ describe('Phase 3 & Phase 4 — OpenCode UI Control & Worker Supervision', () =>
     const db = new MemoryRelayDatabase();
     const engine = new RelayEngine(db);
 
-    class AmbiguousOpenCodeProvider extends OpenCodeProvider {
+    class AmbiguousOpenCodeProvider extends HermeticIdentityOpenCode {
       protected override probeMacOSProcess(_name: string) {
         return {
           running: true,
@@ -89,11 +128,18 @@ describe('Phase 3 & Phase 4 — OpenCode UI Control & Worker Supervision', () =>
 
     const provider = new AmbiguousOpenCodeProvider();
     engine.registerProvider(provider);
+    // See the note in the first test: a bound planner side needs a registered
+    // provider for §4.4, reported as `unknown` rather than blocking activation.
+    engine.registerProvider(new MockProvider('chatgpt'));
 
     const project = await engine.createProject('Ambiguous Proj');
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker');
     const pair = await engine.createPair(project.id, 'Ambiguous Pair', planner.id, worker.id);
+    // I-2 (S6): this test drives provider contact (dispatch/supervision/recovery),
+    // which requires operational_state = ACTIVE. Load & Activate is the ONLY
+    // authorized grantor (freeze §4.4, §11.5).
+    assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
 
     const assignment = await engine.createAssignment(pair.id, 'Risky Refactor', 'refactor codebase');
 
@@ -124,7 +170,7 @@ describe('Phase 3 & Phase 4 — OpenCode UI Control & Worker Supervision', () =>
     const db = new MemoryRelayDatabase();
     const engine = new RelayEngine(db);
 
-    class SupervisedOpenCodeProvider extends OpenCodeProvider {
+    class SupervisedOpenCodeProvider extends HermeticIdentityOpenCode {
       public state: 'working' | 'complete' = 'working';
 
       protected override probeMacOSProcess(_name: string) {
@@ -160,11 +206,18 @@ describe('Phase 3 & Phase 4 — OpenCode UI Control & Worker Supervision', () =>
 
     const provider = new SupervisedOpenCodeProvider();
     engine.registerProvider(provider);
+    // See the note in the first test: a bound planner side needs a registered
+    // provider for §4.4, reported as `unknown` rather than blocking activation.
+    engine.registerProvider(new MockProvider('chatgpt'));
 
     const project = await engine.createProject('Supervision Proj');
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker');
     const pair = await engine.createPair(project.id, 'Supervision Pair', planner.id, worker.id);
+    // I-2 (S6): this test drives provider contact (dispatch/supervision/recovery),
+    // which requires operational_state = ACTIVE. Load & Activate is the ONLY
+    // authorized grantor (freeze §4.4, §11.5).
+    assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
 
     const assignment = await engine.createAssignment(pair.id, 'Supervised Task', 'code');
     await engine.dispatchAssignment(assignment.id);

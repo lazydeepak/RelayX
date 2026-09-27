@@ -13,6 +13,8 @@ import {
   PlanFirstRunId,
   WorkUnitId,
   VerificationResultId,
+  PairSideRole,
+  PairSideIdentity,
 } from '../../domain/types.ts';
 import {
   Project,
@@ -34,6 +36,7 @@ import {
   IRelayRepositories,
   IProjectRepository,
   IPairRepository,
+  IPairSideIdentityRepository,
   IRuntimeSessionRepository,
   IAssignmentRepository,
   IAttemptRepository,
@@ -223,12 +226,59 @@ export class MemoryPairRepository implements IPairRepository {
     return Array.from(this.items.values()).sort((a, b) => b.createdAt - a.createdAt);
   }
 
+  /** S6 CLOSURE — mirrors SqlitePairRepository.findByRuntimeSessionId exactly. */
+  async findByRuntimeSessionId(runtimeSessionId: RuntimeSessionId): Promise<Pair[]> {
+    return Array.from(this.items.values()).filter(
+      (p) => p.plannerSessionId === runtimeSessionId || p.workerSessionId === runtimeSessionId,
+    );
+  }
+
   async save(pair: Pair): Promise<void> {
     this.items.set(pair.id, pair);
   }
 
   async delete(id: PairId): Promise<void> {
     this.items.delete(id);
+  }
+}
+
+export class MemoryPairSideIdentityRepository implements IPairSideIdentityRepository {
+  // Keyed `${pairId}::${sideRole}`: exactly one last-known observation per side.
+  private readonly items = new Map<string, PairSideIdentity>();
+
+  snapshotState(): MemoryRepoSnapshot<PairSideIdentity> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<PairSideIdentity>): void {
+    restoreMapItems(this.items, snapshot);
+  }
+
+  private static key(pairId: PairId, sideRole: PairSideRole): string {
+    return `${pairId}::${sideRole}`;
+  }
+
+  async findByPair(pairId: PairId): Promise<PairSideIdentity[]> {
+    return Array.from(this.items.values())
+      .filter((i) => i.sessionPairId === pairId)
+      .sort((a, b) => a.sideRole.localeCompare(b.sideRole));
+  }
+
+  async find(pairId: PairId, sideRole: PairSideRole): Promise<PairSideIdentity | null> {
+    return this.items.get(MemoryPairSideIdentityRepository.key(pairId, sideRole)) ?? null;
+  }
+
+  async save(identity: PairSideIdentity): Promise<void> {
+    this.items.set(
+      MemoryPairSideIdentityRepository.key(identity.sessionPairId, identity.sideRole),
+      identity,
+    );
+  }
+
+  async deleteForPair(pairId: PairId): Promise<void> {
+    for (const [key, value] of Array.from(this.items.entries())) {
+      if (value.sessionPairId === pairId) this.items.delete(key);
+    }
   }
 }
 
@@ -739,6 +789,7 @@ export class MemoryVerificationResultRepository implements IVerificationResultRe
 export class MemoryRelayDatabase implements IRelayRepositories {
   public readonly projects: MemoryProjectRepository;
   public readonly pairs: MemoryPairRepository;
+  public readonly sideIdentities: MemoryPairSideIdentityRepository;
   public readonly runtimes: MemoryRuntimeSessionRepository;
   public readonly assignments: MemoryAssignmentRepository;
   public readonly attempts: MemoryAttemptRepository;
@@ -755,6 +806,7 @@ export class MemoryRelayDatabase implements IRelayRepositories {
   constructor() {
     this.projects = new MemoryProjectRepository();
     this.pairs = new MemoryPairRepository();
+    this.sideIdentities = new MemoryPairSideIdentityRepository();
     this.runtimes = new MemoryRuntimeSessionRepository();
     this.assignments = new MemoryAssignmentRepository();
     this.attempts = new MemoryAttemptRepository();

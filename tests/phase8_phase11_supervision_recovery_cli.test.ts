@@ -4,6 +4,34 @@ import { RelayEngine } from '../src/relay/application/RelayEngine.ts';
 import { MemoryRelayDatabase } from '../src/relay/persistence/memory/MemoryDatabase.ts';
 import { OpenCodeProvider } from '../src/relay/providers/adapters.ts';
 import { Attempt } from '../src/relay/domain/entities.ts';
+import { MockProvider } from './MockProvider.ts';
+import type { SideIdentityRequest, SideIdentityResolution } from '../src/relay/providers/interfaces.ts';
+
+/**
+ * Hermetic identity read.
+ *
+ * Load & Activate (S6) is the only authorized `IDLE -> ACTIVE` grantor, and it
+ * calls the provider's read-only identity capability. The production
+ * `OpenCodeProvider.resolveSideIdentity` shells out to the real CLI, which would
+ * make this restart test environment-dependent, so the test provider answers
+ * in-process instead.
+ */
+class HermeticIdentityOpenCode extends OpenCodeProvider {
+  public override async resolveSideIdentity(
+    request: SideIdentityRequest,
+  ): Promise<SideIdentityResolution> {
+    return {
+      identityState: 'resolved',
+      identityValue: request.externalSessionId,
+      verificationState: 'verified',
+      verificationValue: request.externalSessionId,
+      existenceState: 'present',
+      sourceCapability: 'test_hermetic_identity',
+      observedAt: Date.now(),
+      reason: null,
+    };
+  }
+}
 
 describe('Phase 8 & Phase 9 — Background Supervision & Crash/Restart Recovery', () => {
   it('starts and cleanly stops background supervision loop without leaks', () => {
@@ -26,7 +54,7 @@ describe('Phase 8 & Phase 9 — Background Supervision & Crash/Restart Recovery'
     const db = new MemoryRelayDatabase();
     const engine1 = new RelayEngine(db);
 
-    class ControllableProvider extends OpenCodeProvider {
+    class ControllableProvider extends HermeticIdentityOpenCode {
       public isComplete = false;
       public isWorking = true;
 
@@ -65,11 +93,19 @@ describe('Phase 8 & Phase 9 — Background Supervision & Crash/Restart Recovery'
 
     const provider1 = new ControllableProvider();
     engine1.registerProvider(provider1);
+    // §4.4 per-side "provider capabilities present": the bound planner side needs a
+    // registered provider, reported as `unknown` (LEVEL 0) rather than blocking.
+    engine1.registerProvider(new MockProvider('chatgpt'));
 
     const project = await engine1.createProject('Offline Recovery Project');
     const planner = await engine1.registerRuntimeSession('chatgpt', 'Planner');
     const worker = await engine1.registerRuntimeSession('opencode', 'Worker');
     const pair = await engine1.createPair(project.id, 'Pair 1', planner.id, worker.id);
+    // I-2 (S6): engine2's startup recovery reaches the provider, so the Pair must be
+    // ACTIVE. This is also what makes the restart assertion meaningful: the pair is
+    // activated, the engine is rebuilt, and the recovered operational state still
+    // permits contact. Load & Activate is the only authorized grantor (§4.4, §11.5).
+    assert.strictEqual((await engine1.loadAndActivate(pair.id)).outcome, 'activated');
 
     const assignment = await engine1.createAssignment(pair.id, 'Offline task', 'do something');
     // Dispatch assignment
@@ -87,6 +123,7 @@ describe('Phase 8 & Phase 9 — Background Supervision & Crash/Restart Recovery'
     // Simulate Relay restart: new RelayEngine instance with same database!
     const engine2 = new RelayEngine(db);
     engine2.registerProvider(provider1);
+    engine2.registerProvider(new MockProvider('chatgpt'));
 
     const recoveryReport = await engine2.recoverOnStartup();
     assert.equal(recoveryReport.recoveredHandoffs, 1, 'Should recover 1 completed handoff');

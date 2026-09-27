@@ -172,6 +172,12 @@ describe('Dispatch-intent reconciliation', () => {
     );
     const pair = Pair.create(projectId, 'Pair', plannerId, workerId);
     await db.pairs.save(pair);
+    // I-2 (S6): reconciliation calls `provider.reconcileDispatch`, which is real
+    // external contact and is gated on operational_state = ACTIVE. Load & Activate
+    // is the ONLY authorized grantor (freeze §4.4, §11.5), so the Pair must be
+    // activated before dispatch/reconciliation here can exercise their real
+    // behaviour rather than being refused at the gate.
+    assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
     return pair;
   }
 
@@ -452,6 +458,8 @@ describe('Dispatch-intent reconciliation', () => {
         }
         const pair = Pair.create(project.id, 'Pair', planner.id, worker.id);
         await db1.pairs.save(pair);
+        // Same I-2 reason as bindPair: activation must precede dispatch.
+        assert.strictEqual((await engine1.loadAndActivate(pair.id)).outcome, 'activated');
         const assignment = await engine1.createAssignment(pair.id, 'A', 'Do X');
         const { attempt, delivery } = await engine1.dispatchAssignment(assignment.id);
 
@@ -492,6 +500,11 @@ describe('Dispatch-intent reconciliation', () => {
       {
         const db3 = new SqliteRelayDatabase(path);
         const engine3 = new RelayEngine(db3);
+        // Providers must be registered before Load & Activate can satisfy its
+        // §4.4 "provider capabilities present" precondition. The other sessions in
+        // this restart test already do this; session 3 now matches them.
+        engine3.registerProvider(new ReconcileProvider('opencode'));
+        engine3.registerProvider(new MockProvider('chatgpt'));
         const project = await engine3.createProject('R8b Project');
         const planner = await engine3.registerRuntimeSession('chatgpt', 'P2');
         const worker = await engine3.registerRuntimeSession('opencode', 'W2');
@@ -516,6 +529,8 @@ describe('Dispatch-intent reconciliation', () => {
         }
         const pair2 = Pair.create(project.id, 'Pair2', planner.id, worker.id);
         await db3.pairs.save(pair2);
+        // Same I-2 reason as bindPair: activation must precede dispatch.
+        assert.strictEqual((await engine3.loadAndActivate(pair2.id)).outcome, 'activated');
         const asg2 = await engine3.createAssignment(pair2.id, 'B', 'Do Y');
         const { attempt: a2, delivery: d2 } = await engine3.dispatchAssignment(asg2.id);
         db3.db.prepare(`UPDATE deliveries SET status = 'delivering' WHERE id = ?`).run(d2.id);

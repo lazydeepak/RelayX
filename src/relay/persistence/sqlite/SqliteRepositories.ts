@@ -12,6 +12,15 @@ import {
   ObservableEvidence,
   ProviderType,
   PairStatus,
+  DEFAULT_PAIR_OPERATIONAL_STATE,
+  isPairOperationalState,
+  PairSideRole,
+  PairSideIdentity,
+  SideIdentityState,
+  SideVerificationState,
+  SideExistenceState,
+  SideVerificationCapability,
+  NO_IDENTITY_CAPABILITY,
   ContractRevisionId,
   PlanFirstRunId,
   WorkUnitId,
@@ -38,6 +47,7 @@ import type { VerificationResult } from '../../domain/repoBoundary.ts';
 import {
   IProjectRepository,
   IPairRepository,
+  IPairSideIdentityRepository,
   IRuntimeSessionRepository,
   IAssignmentRepository,
   IAttemptRepository,
@@ -268,6 +278,13 @@ export class SqlitePairRepository implements IPairRepository {
   constructor(private readonly db: DatabaseSync) {}
 
   private mapRow(row: Record<string, unknown>): Pair {
+    // operational_state is NOT NULL DEFAULT 'IDLE' after the v4 migration. The
+    // `isPairOperationalState` guard is deliberately re-applied here rather than
+    // cast: a corrupted or hand-edited value must be coerced to the one safe
+    // default instead of widening the persisted set to a third value.
+    const rawOperational = row.operational_state;
+    const operationalState = isPairOperationalState(rawOperational) ? rawOperational : DEFAULT_PAIR_OPERATIONAL_STATE;
+    const rawStable = row.stable_pair_id;
     return new Pair({
       id: row.id as PairId,
       projectId: row.project_id as ProjectId,
@@ -276,6 +293,10 @@ export class SqlitePairRepository implements IPairRepository {
       workerSessionId: (row.worker_session_id as RuntimeSessionId) || undefined,
       activeAssignmentId: (row.active_assignment_id as AssignmentId) || undefined,
       status: row.status as PairStatus,
+      operationalState,
+      // A row with no stable identity (written before v4 and never backfilled)
+      // falls back to its own primary key, which is exactly the backfill value.
+      stableId: ((rawStable as string) || (row.id as string)) as PairId,
       lastSupervisedAt: row.last_supervised_at ? Number(row.last_supervised_at) : undefined,
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
@@ -298,21 +319,45 @@ export class SqlitePairRepository implements IPairRepository {
     return rows.map((r) => this.mapRow(r));
   }
 
+  /**
+   * S6 CLOSURE — authoritative reverse binding lookup.
+   *
+   * The query is a single indexed-looking `OR` over the two durable binding
+   * columns, compared by RUNTIME SESSION ID. No title, name, path, window, or
+   * lifecycle `status` participates in the predicate (I-11): a shared human-readable
+   * string is evidence, never identity.
+   *
+   * All matches are returned rather than the first one, so the caller can fail
+   * closed when the schema has been bypassed. `OR` is a UNION of rows, never a
+   * merge, so a single row can appear at most once here.
+   */
+  async findByRuntimeSessionId(runtimeSessionId: RuntimeSessionId): Promise<Pair[]> {
+    const rows = this.db
+      .prepare('SELECT * FROM pairs WHERE planner_session_id = ? OR worker_session_id = ?')
+      .all(runtimeSessionId, runtimeSessionId) as Array<Record<string, unknown>>;
+    return rows.map((r) => this.mapRow(r));
+  }
+
   async save(pair: Pair): Promise<void> {
     const stmt = this.db.prepare(`
       INSERT INTO pairs (
         id, project_id, name, planner_session_id, worker_session_id,
-        active_assignment_id, status, last_supervised_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        active_assignment_id, status, operational_state, stable_pair_id,
+        last_supervised_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         planner_session_id = excluded.planner_session_id,
         worker_session_id = excluded.worker_session_id,
         active_assignment_id = excluded.active_assignment_id,
         status = excluded.status,
+        operational_state = excluded.operational_state,
         last_supervised_at = excluded.last_supervised_at,
         updated_at = excluded.updated_at
     `);
+    // `stable_pair_id` is written on INSERT and deliberately ABSENT from the
+    // DO UPDATE set: it is immutable once set (freeze §10.2), so no later save
+    // of a mutated Pair row can move the identity that history is anchored to.
     stmt.run(
       pair.id,
       pair.projectId,
@@ -321,6 +366,8 @@ export class SqlitePairRepository implements IPairRepository {
       pair.workerSessionId ?? null,
       pair.activeAssignmentId ?? null,
       pair.status,
+      pair.operationalState,
+      pair.stableId,
       pair.lastSupervisedAt ?? null,
       pair.createdAt,
       pair.updatedAt,
@@ -329,6 +376,107 @@ export class SqlitePairRepository implements IPairRepository {
 
   async delete(id: PairId): Promise<void> {
     this.db.prepare('DELETE FROM pairs WHERE id = ?').run(id);
+  }
+}
+
+/* --- Pair Side Identity Repository (S5) ----------------------------------- */
+export class SqlitePairSideIdentityRepository implements IPairSideIdentityRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  /**
+   * I-6 on read: an unrecognised persisted state is never coerced into a
+   * negative. It maps to `unknown` plus a reason, because "we could not check"
+   * is the honest reading of a value this build does not understand.
+   */
+  private mapRow(row: Record<string, unknown>): PairSideIdentity {
+    const known = (v: unknown, allowed: readonly string[], fallback: string) =>
+      typeof v === 'string' && allowed.includes(v) ? v : fallback;
+
+    return {
+      sessionPairId: row.session_pair_id as PairId,
+      sideRole: row.side_role === 'planner' ? 'planner' : 'worker',
+      providerType: row.provider_type as ProviderType,
+      runtimeSessionId: (row.runtime_session_id as RuntimeSessionId) || null,
+      externalSessionId: (row.external_session_id as string) || null,
+      identityState: known(row.identity_state, ['resolved', 'not_resolved'], 'unknown') as SideIdentityState,
+      identityValue: (row.identity_value as string) || null,
+      verificationState: known(row.verification_state, ['verified', 'mismatched'], 'unknown') as SideVerificationState,
+      verificationValue: (row.verification_value as string) || null,
+      existenceState: known(row.existence_state, ['present', 'absent'], 'unknown') as SideExistenceState,
+      capability: known(row.capability, ['exact_session_verifiable'], 'not_verifiable') as SideVerificationCapability,
+      // Dimension 8 is mandatory (§5.2). A row that somehow lost it is marked
+      // explicitly rather than silently treated as a real capability name.
+      sourceCapability: (row.source_capability as string) || NO_IDENTITY_CAPABILITY,
+      observedAt: Number(row.observed_at),
+      reason: (row.reason as string) || null,
+      evidence: row.evidence_json ? JSON.parse(row.evidence_json as string) : null,
+    };
+  }
+
+  async findByPair(pairId: PairId): Promise<PairSideIdentity[]> {
+    const rows = this.db
+      .prepare('SELECT * FROM pair_side_identity WHERE session_pair_id = ? ORDER BY side_role')
+      .all(pairId) as Record<string, unknown>[];
+    return rows.map((r) => this.mapRow(r));
+  }
+
+  async find(pairId: PairId, sideRole: PairSideRole): Promise<PairSideIdentity | null> {
+    const row = this.db
+      .prepare('SELECT * FROM pair_side_identity WHERE session_pair_id = ? AND side_role = ?')
+      .get(pairId, sideRole) as Record<string, unknown> | undefined;
+    return row ? this.mapRow(row) : null;
+  }
+
+  async save(identity: PairSideIdentity): Promise<void> {
+    // The natural key is (pair, side): there is exactly one last-known
+    // observation per side, enforced by the UNIQUE constraint. The primary key
+    // must therefore include the role, or the two sides of one Pair collide.
+    const id = `side_identity::${identity.sessionPairId}::${identity.sideRole}`;
+    this.db
+      .prepare(
+        `INSERT INTO pair_side_identity (
+           id, session_pair_id, side_role, provider_type, runtime_session_id,
+           external_session_id, identity_state, identity_value,
+           verification_state, verification_value, existence_state,
+           capability, source_capability, observed_at, reason, evidence_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(session_pair_id, side_role) DO UPDATE SET
+           provider_type = excluded.provider_type,
+           runtime_session_id = excluded.runtime_session_id,
+           external_session_id = excluded.external_session_id,
+           identity_state = excluded.identity_state,
+           identity_value = excluded.identity_value,
+           verification_state = excluded.verification_state,
+           verification_value = excluded.verification_value,
+           existence_state = excluded.existence_state,
+           capability = excluded.capability,
+           source_capability = excluded.source_capability,
+           observed_at = excluded.observed_at,
+           reason = excluded.reason,
+           evidence_json = excluded.evidence_json`,
+      )
+      .run(
+        id,
+        identity.sessionPairId,
+        identity.sideRole,
+        identity.providerType,
+        identity.runtimeSessionId,
+        identity.externalSessionId,
+        identity.identityState,
+        identity.identityValue,
+        identity.verificationState,
+        identity.verificationValue,
+        identity.existenceState,
+        identity.capability,
+        identity.sourceCapability,
+        identity.observedAt,
+        identity.reason,
+        identity.evidence ? JSON.stringify(identity.evidence) : null,
+      );
+  }
+
+  async deleteForPair(pairId: PairId): Promise<void> {
+    this.db.prepare('DELETE FROM pair_side_identity WHERE session_pair_id = ?').run(pairId);
   }
 }
 
@@ -563,6 +711,7 @@ export class SqliteHandoffRepository implements IHandoffRepository {
       resultSummary: row.result_summary as string | undefined,
       payload: safeJsonParse<Record<string, unknown>>(row.payload_json),
       evidence: safeJsonParse<ObservableEvidence>(row.evidence_json),
+      plannerDeliveryEvidence: safeJsonParse<ObservableEvidence>(row.planner_delivery_evidence_json),
       deliveredToPlannerAt: row.delivered_to_planner_at ? Number(row.delivered_to_planner_at) : undefined,
       completedAt: row.completed_at ? Number(row.completed_at) : undefined,
       createdAt: Number(row.created_at),
@@ -590,14 +739,15 @@ export class SqliteHandoffRepository implements IHandoffRepository {
     const stmt = this.db.prepare(`
       INSERT INTO handoffs (
         id, assignment_id, attempt_id, status, result_summary,
-        payload_json, evidence_json, delivered_to_planner_at, completed_at,
-        created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        payload_json, evidence_json, planner_delivery_evidence_json,
+        delivered_to_planner_at, completed_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         status = excluded.status,
         result_summary = excluded.result_summary,
         payload_json = excluded.payload_json,
         evidence_json = excluded.evidence_json,
+        planner_delivery_evidence_json = excluded.planner_delivery_evidence_json,
         delivered_to_planner_at = excluded.delivered_to_planner_at,
         completed_at = excluded.completed_at,
         updated_at = excluded.updated_at
@@ -610,6 +760,7 @@ export class SqliteHandoffRepository implements IHandoffRepository {
       handoff.resultSummary ?? null,
       safeJsonStringify(handoff.payload),
       safeJsonStringify(handoff.evidence),
+      safeJsonStringify(handoff.plannerDeliveryEvidence),
       handoff.deliveredToPlannerAt ?? null,
       handoff.completedAt ?? null,
       handoff.createdAt,

@@ -37,6 +37,8 @@ import {
   AttentionItemId,
   AssociationId,
   createId,
+  RUNTIME_PAIR_NOT_ACTIVE,
+  RUNTIME_PAIR_OWNERSHIP_AMBIGUOUS,
 } from '../domain/types.ts';
 import path from 'node:path';
 
@@ -805,6 +807,28 @@ export class RelayApiService implements IRelayApi {
     const runtime = await this.db.runtimes.findById(sessionId as RuntimeSessionId);
     if (!runtime) return { success: false, error: 'Runtime session not found' };
 
+    // S6 CLOSURE — I-2 GATE, ARMED. This is the eighth provider-contact site and the
+    // last one found ungated. It contacts the provider DIRECTLY on the service rather
+    // than through the engine, which is exactly why it was missed: the earlier audits
+    // reasoned about engine methods and this call bypasses the engine entirely.
+    //
+    // The guard is the engine's single shared runtime->Pair resolution, so this path
+    // and `reconcileAndRecoverRuntime` cannot disagree about who governs a runtime or
+    // what its state is. An IDLE owning Pair, or an ambiguous owning Pair, is refused
+    // BEFORE any provider method is reached, and the refusal is returned rather than
+    // swallowed, so the caller can distinguish "not permitted" from "contact failed".
+    try {
+      await this.engine.assertRuntimeProviderContactPermitted(runtime.id);
+    } catch (err: any) {
+      if (
+        err?.code === RUNTIME_PAIR_NOT_ACTIVE ||
+        err?.code === RUNTIME_PAIR_OWNERSHIP_AMBIGUOUS
+      ) {
+        return { success: false, error: err.message };
+      }
+      throw err;
+    }
+
     try {
       const provider = this.engine.getProvider(runtime.providerType);
       const inspection = await provider.inspectRuntime(runtime.id);
@@ -879,12 +903,29 @@ export class RelayApiService implements IRelayApi {
     }
   }
 
-  public async recoverRuntime(sessionId: string): Promise<{ success: boolean; restored: boolean }> {
+  /**
+   * S6 CLOSURE — runtime recovery.
+   *
+   * The provider contact happens inside `engine.reconcileAndRecoverRuntime`, which
+   * is gated by the shared runtime->Pair guard, so the I-2 invariant holds here too.
+   *
+   * The previous `catch { return { success: false, restored: false } }` discarded the
+   * reason. That made a governance refusal indistinguishable from a genuine
+   * provider failure, which is the dishonesty I-2 exists to prevent: a caller would
+   * see "recovery failed" with no indication that the real answer was "not
+   * permitted, activate the Pair first". The reason is now reported.
+   */
+  public async recoverRuntime(sessionId: string): Promise<{ success: boolean; restored: boolean; error?: string }> {
     try {
       const recovered = await this.engine.reconcileAndRecoverRuntime(sessionId as RuntimeSessionId);
       return { success: true, restored: recovered.status !== 'suspended' && recovered.status !== 'unknown' };
-    } catch {
-      return { success: false, restored: false };
+    } catch (err: any) {
+      // Governance denials keep their reason, so "not permitted" is never reported
+      // as "provider unreachable". Everything else stays a flat failure, preserving
+      // the previous contract for genuine contact errors.
+      const isGovernanceDenial =
+        err?.code === RUNTIME_PAIR_NOT_ACTIVE || err?.code === RUNTIME_PAIR_OWNERSHIP_AMBIGUOUS;
+      return { success: false, restored: false, error: isGovernanceDenial ? err.message : undefined };
     }
   }
 

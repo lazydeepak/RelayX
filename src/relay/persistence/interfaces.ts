@@ -14,6 +14,8 @@ import {
   PlanFirstRunId,
   WorkUnitId,
   VerificationResultId,
+  PairSideRole,
+  PairSideIdentity,
 } from '../domain/types.ts';
 import {
   Project,
@@ -44,8 +46,49 @@ export interface IPairRepository {
   findById(id: PairId): Promise<Pair | null>;
   findByProjectId(projectId: ProjectId): Promise<Pair[]>;
   findAll(): Promise<Pair[]>;
+  /**
+   * S6 CLOSURE — the authoritative reverse lookup: which Pair(s) bind this runtime
+   * session, on either side.
+   *
+   * ## Why this lives here, and not somewhere invented
+   *
+   * `Pair.plannerSessionId` / `Pair.workerSessionId` ARE RelayX's durable binding
+   * ground truth. This repository is the layer that owns them, so the reverse
+   * lookup belongs here. Ownership is derived ONLY from those two columns, by
+   * identifier: never from an OpenCode session title, a ChatGPT or window title, a
+   * project name, a workspace basename, a lifecycle `PairStatus`, or the
+   * frontmost window (I-11).
+   *
+   * ## Why it returns an array
+   *
+   * The `pairs` table carries **no unique index** on either binding column — the
+   * application layer rejects a second binding with `SESSION_ALREADY_PAIRED`, but
+   * the schema does not enforce it, and a raw entity save can produce the state.
+   * Collapsing that into "the first match" would be a heuristic choice of owner,
+   * which is exactly what a fail-closed ownership resolution must never do. So the
+   * ambiguity is representable, and the caller fails closed on it.
+   *
+   * An empty array means the runtime is not bound to any Pair. That is an honest
+   * answer, not a permission grant.
+   */
+  findByRuntimeSessionId(runtimeSessionId: RuntimeSessionId): Promise<Pair[]>;
   save(pair: Pair): Promise<void>;
   delete(id: PairId): Promise<void>;
+}
+
+/**
+ * S5 durable per-side identity evidence.
+ *
+ * The S5 subset of the §10.3 `side_observations` proposal: dimensions 1-3 plus
+ * the mandatory dimensions 8 and 9. Upsert semantics are deliberate — the latest
+ * observation per (pair, side) is the last-known evidence I-3 renders while IDLE.
+ * History lives in the event stream, not in this table.
+ */
+export interface IPairSideIdentityRepository {
+  findByPair(pairId: PairId): Promise<PairSideIdentity[]>;
+  find(pairId: PairId, sideRole: PairSideRole): Promise<PairSideIdentity | null>;
+  save(identity: PairSideIdentity): Promise<void>;
+  deleteForPair(pairId: PairId): Promise<void>;
 }
 
 export interface IRuntimeSessionRepository {
@@ -210,6 +253,7 @@ export interface IVerificationResultRepository {
 export interface IRelayRepositories {
   projects: IProjectRepository;
   pairs: IPairRepository;
+  sideIdentities: IPairSideIdentityRepository;
   runtimes: IRuntimeSessionRepository;
   assignments: IAssignmentRepository;
   attempts: IAttemptRepository;

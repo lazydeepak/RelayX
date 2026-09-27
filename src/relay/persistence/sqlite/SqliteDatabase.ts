@@ -4,6 +4,7 @@ import { SqliteAssociationRepository } from './SqliteAssociationRepository.ts';
 import {
   SqliteProjectRepository,
   SqlitePairRepository,
+  SqlitePairSideIdentityRepository,
   SqliteRuntimeSessionRepository,
   SqliteAssignmentRepository,
   SqliteAttemptRepository,
@@ -45,6 +46,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
   public readonly db: DatabaseSync;
   public readonly projects: SqliteProjectRepository;
   public readonly pairs: SqlitePairRepository;
+  public readonly sideIdentities: SqlitePairSideIdentityRepository;
   public readonly runtimes: SqliteRuntimeSessionRepository;
   public readonly assignments: SqliteAssignmentRepository;
   public readonly attempts: SqliteAttemptRepository;
@@ -65,6 +67,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     this.projects = new SqliteProjectRepository(this.db);
     this.runtimes = new SqliteRuntimeSessionRepository(this.db);
     this.pairs = new SqlitePairRepository(this.db);
+    this.sideIdentities = new SqlitePairSideIdentityRepository(this.db);
     this.assignments = new SqliteAssignmentRepository(this.db);
     this.attempts = new SqliteAttemptRepository(this.db);
     this.deliveries = new SqliteDeliveryRepository(this.db);
@@ -240,6 +243,7 @@ CREATE TABLE IF NOT EXISTS handoffs (
         result_summary TEXT,
         payload_json TEXT,
         evidence_json TEXT,
+        planner_delivery_evidence_json TEXT,
         delivered_to_planner_at INTEGER,
         completed_at INTEGER,
         created_at INTEGER NOT NULL,
@@ -307,6 +311,11 @@ CREATE TABLE IF NOT EXISTS handoffs (
 
     addColumnIfNeeded(this.db, 'pairs', 'active_assignment_id', 'TEXT');
     addColumnIfNeeded(this.db, 'pairs', 'last_supervised_at', 'INTEGER');
+    // S1 — Session Pair operations: the two-valued operational dimension and the
+    // stable identity anchor. Both additive; the gated step below backfills and
+    // stamps user_version = 4.
+    addColumnIfNeeded(this.db, 'pairs', 'operational_state', "TEXT NOT NULL DEFAULT 'IDLE'");
+    addColumnIfNeeded(this.db, 'pairs', 'stable_pair_id', 'TEXT');
 
     addColumnIfNeeded(this.db, 'assignments', 'current_attempt_id', 'TEXT');
     addColumnIfNeeded(this.db, 'assignments', 'active_delivery_id', 'TEXT');
@@ -324,6 +333,7 @@ CREATE TABLE IF NOT EXISTS handoffs (
     addColumnIfNeeded(this.db, 'handoffs', 'result_summary', 'TEXT');
     addColumnIfNeeded(this.db, 'handoffs', 'payload_json', 'TEXT');
     addColumnIfNeeded(this.db, 'handoffs', 'evidence_json', 'TEXT');
+    addColumnIfNeeded(this.db, 'handoffs', 'planner_delivery_evidence_json', 'TEXT');
     addColumnIfNeeded(this.db, 'handoffs', 'delivered_to_planner_at', 'INTEGER');
     addColumnIfNeeded(this.db, 'handoffs', 'completed_at', 'INTEGER');
 
@@ -338,6 +348,39 @@ CREATE TABLE IF NOT EXISTS handoffs (
     addColumnIfNeeded(this.db, 'attention_items', 'suggested_action', 'TEXT');
     addColumnIfNeeded(this.db, 'attention_items', 'suggested_tier', 'TEXT');
     addColumnIfNeeded(this.db, 'attention_items', 'resolved_at', 'INTEGER');
+
+    // S5 durable per-side identity evidence. Additive only (§10.1): a new table,
+    // no existing table altered, gated on `PRAGMA user_version` below.
+    //
+    // This is the S5 SUBSET of the §10.3 `side_observations` proposal: dimensions
+    // 1-3 plus the mandatory dimensions 8 and 9. Dimensions 4-7 (reachability, UI
+    // presence, activity, message evidence) are S2 provider observation and are
+    // deliberately NOT present. `valid_until` is omitted because §5.4 leaves the
+    // per-capability window UNRESOLVED (U-7) and S8 owns staleness.
+    //
+    // There is no readiness column and no checkpoint column here. I-5 forbids a
+    // persisted readiness value, and checkpoints are S3/S7.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pair_side_identity (
+        id TEXT PRIMARY KEY,
+        session_pair_id TEXT NOT NULL,
+        side_role TEXT NOT NULL,
+        provider_type TEXT NOT NULL,
+        runtime_session_id TEXT,
+        external_session_id TEXT,
+        identity_state TEXT NOT NULL,
+        identity_value TEXT,
+        verification_state TEXT NOT NULL,
+        verification_value TEXT,
+        existence_state TEXT NOT NULL,
+        capability TEXT NOT NULL,
+        source_capability TEXT NOT NULL,
+        observed_at INTEGER NOT NULL,
+        reason TEXT,
+        evidence_json TEXT,
+        UNIQUE (session_pair_id, side_role)
+      );
+    `);
 
     this.db.exec(`CREATE TABLE IF NOT EXISTS runtime_project_associations (
       id TEXT PRIMARY KEY,
@@ -392,6 +435,116 @@ CREATE TABLE IF NOT EXISTS handoffs (
     // stamps user_version = 3 and would otherwise make the `currentVersion < 2` guard
     // skip the orphan triggers on a legacy database.
     this.migratePlanFirstSchema();
+    this.migrateSessionPairOperationsSchema();
+    this.migrateSideIdentitySchema();
+  }
+
+  /**
+   * Per-side identity evidence schema, version 5.
+   *
+   * Frozen source: DESIGN_FREEZE_SESSION_PAIR_OPERATIONS.md §10.1, §10.3, §5.2, §5.3,
+   * I-3, I-6, I-10.
+   *
+   * Additive only, gated on `PRAGMA user_version` exactly like the v0->v2, v2->v3
+   * and v3->v4 steps. It creates ONE new table and alters nothing.
+   *
+   * ORDERING: this must run AFTER migrateSessionPairOperationsSchema(), which
+   * stamps 4, otherwise a v4 database would re-enter the v4 backfill.
+   *
+   * ## There is deliberately no backfill step
+   *
+   * §17.3 backfills `operational_state` to IDLE, and I-2 then forbids contacting
+   * any provider for such a Pair. A row here can therefore only ever have been
+   * written by a real `loadAndActivate` against a real provider. Synthesising
+   * "unknown" rows for pre-existing Pairs would fabricate an observation that
+   * never happened, which is the same provenance defect I-13 exists to prevent.
+   * An absent row honestly means "never activated, nothing known".
+   */
+  private migrateSideIdentitySchema(): void {
+    const versionResult = this.db.prepare('PRAGMA user_version').get() as { user_version: number } | undefined;
+    const currentVersion = versionResult?.user_version ?? 0;
+    if (currentVersion >= 5) return;
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pair_side_identity (
+        id TEXT PRIMARY KEY,
+        session_pair_id TEXT NOT NULL,
+        side_role TEXT NOT NULL,
+        provider_type TEXT NOT NULL,
+        runtime_session_id TEXT,
+        external_session_id TEXT,
+        identity_state TEXT NOT NULL,
+        identity_value TEXT,
+        verification_state TEXT NOT NULL,
+        verification_value TEXT,
+        existence_state TEXT NOT NULL,
+        capability TEXT NOT NULL,
+        source_capability TEXT NOT NULL,
+        observed_at INTEGER NOT NULL,
+        reason TEXT,
+        evidence_json TEXT,
+        UNIQUE (session_pair_id, side_role)
+      );
+    `);
+
+    this.db.exec('PRAGMA user_version = 5;');
+  }
+
+  /**
+   * Session Pair operations schema, version 4.
+   *
+   * Frozen source: DESIGN_FREEZE_SESSION_PAIR_OPERATIONS.md §10.2, §17.1-17.3.
+   *
+   * Additive only, following the `addColumnIfNeeded(...)` precedent and gated on
+   * `PRAGMA user_version` exactly like the v0->v2 and v2->v3 steps:
+   *
+   *   operational_state  TEXT NOT NULL DEFAULT 'IDLE'  -- I-1, exactly two values
+   *   stable_pair_id     TEXT                          -- C-1 safe prerequisite
+   *
+   * and, on `handoffs`:
+   *
+   *   planner_delivery_evidence_json  TEXT              -- §7.3, I-13
+   *
+   * The handoffs column is declared here rather than in the unconditional audit
+   * above so that the version stamp and the column land together. The
+   * unconditional audit also contains it, because that audit is what runs for a
+   * brand-new database where `user_version` starts at 0; the gate below is what
+   * guarantees a legacy file is brought forward explicitly.
+   *
+   * Backfill policy: every pre-existing Pair gets `operational_state = 'IDLE'`.
+   * That is the ONLY safe default (§17.3) because ACTIVE grants a permission to
+   * contact providers (I-2) that cannot be justified for a record that predates
+   * the permission, and IDLE preserves all last-known evidence (I-3, I-10).
+   *
+   * `stable_pair_id` is backfilled to the row's own `id` and is never rewritten
+   * afterwards, so it is a true immutable identity anchor.
+   *
+   * ORDERING: this must run AFTER migratePlanFirstSchema(), which stamps 3.
+   */
+  private migrateSessionPairOperationsSchema(): void {
+    const versionResult = this.db.prepare('PRAGMA user_version').get() as { user_version: number } | undefined;
+    const currentVersion = versionResult?.user_version ?? 0;
+    if (currentVersion >= 4) return;
+
+    addColumnIfNeeded(this.db, 'pairs', 'operational_state', "TEXT NOT NULL DEFAULT 'IDLE'");
+    addColumnIfNeeded(this.db, 'pairs', 'stable_pair_id', 'TEXT');
+    addColumnIfNeeded(this.db, 'handoffs', 'planner_delivery_evidence_json', 'TEXT');
+
+    // Backfill is idempotent and only ever fills NULLs, so a re-run, a partially
+    // migrated legacy file, or a column added by the unconditional audit above
+    // all converge on the same state without rewriting a decided value.
+    this.db.exec(`
+      UPDATE pairs
+         SET operational_state = 'IDLE'
+       WHERE operational_state IS NULL OR operational_state NOT IN ('IDLE', 'ACTIVE');
+    `);
+    this.db.exec(`
+      UPDATE pairs
+         SET stable_pair_id = id
+       WHERE stable_pair_id IS NULL OR stable_pair_id = '';
+    `);
+
+    this.db.exec('PRAGMA user_version = 4;');
   }
 
   /**

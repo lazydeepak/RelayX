@@ -59,6 +59,20 @@ describe('Core Slice 1 — Frozen Authority + Dispatch Boundary', () => {
     await target.associations.save(workerAssoc);
     const p = (await import('../src/relay/domain/entities.ts')).Pair.create(projectId, 'Pair', plannerId, workerId);
     await target.pairs.save(p);
+
+    // I-2 (S6): every provider contact these slices assert — dispatch, supervision,
+    // recovery — requires operational_state = ACTIVE. `bindPair` is the single
+    // chokepoint that creates a Pair here, so the ONLY authorized grantor
+    // (`loadAndActivate`, freeze §4.4/§11.5) is applied once, here, rather than
+    // in each slice. MockProvider exposes no identity capability, so both sides
+    // report `unknown` and activation succeeds while recording that asymmetry
+    // (S6_LOAD_AND_ACTIVATE.md §2, §3).
+    const result = await (target === db ? engine : engine).loadAndActivate(p.id);
+    assert.strictEqual(
+      result.outcome,
+      'activated',
+      `bindPair must activate: without it these slices would contact nothing and pass vacuously (${result.reason ?? ''})`,
+    );
     return p;
   }
 
@@ -206,6 +220,10 @@ describe('Core Slice 1 — Frozen Authority + Dispatch Boundary', () => {
     const { Pair } = await import('../src/relay/domain/entities.ts');
     const pair = Pair.create(project.id, 'Pair', planner.id, worker.id);
     await dbFile.pairs.save(pair);
+    // Same reason as bindPair: the I-2 gate sits ahead of the duplicate-delivery
+    // check, so the Pair must be ACTIVE for this slice to be testing the duplicate
+    // rule rather than the gate. Load & Activate is the only authorized grantor.
+    assert.strictEqual((await fileEngine.loadAndActivate(pair.id)).outcome, 'activated');
     const assignment = await fileEngine.createAssignment(pair.id, 'A', 'Do X');
     const { attempt: simAttempt, delivery: simDelivery } = await fileEngine.dispatchAssignment(assignment.id);
     // Update status directly via DB to avoid transition guard; persistence order verified

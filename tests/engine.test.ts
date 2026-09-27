@@ -23,6 +23,11 @@ describe('RelayX Engine Application Lifecycle & Supervision', () => {
     const planner = await engine.registerRuntimeSession('chatgpt', 'ChatGPT Planner');
     const worker = await engine.registerRuntimeSession('opencode', 'OpenCode Worker');
     const pair = await engine.createPair(project.id, 'Pair 1', planner.id, worker.id);
+    // I-2 (S6): dispatch, supervision and Tier-1 recovery all contact the provider,
+    // so the Pair must be ACTIVE. Load & Activate is the ONLY authorized grantor
+    // (freeze §4.4, §11.5); neither MockProvider exposes an identity capability, so
+    // both sides report `unknown` and the asymmetry is recorded, not hidden.
+    assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
 
     const assignment = await engine.createAssignment(pair.id, 'Refactor Engine', 'Organize into modules');
     assert.strictEqual(assignment.status, 'pending');
@@ -57,6 +62,11 @@ describe('RelayX Engine Application Lifecycle & Supervision', () => {
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker');
     const pair = await engine.createPair(project.id, 'Pair 1', planner.id, worker.id);
+    // I-2 (S6): dispatch, supervision and Tier-1 recovery all contact the provider,
+    // so the Pair must be ACTIVE. Load & Activate is the ONLY authorized grantor
+    // (freeze §4.4, §11.5); neither MockProvider exposes an identity capability, so
+    // both sides report `unknown` and the asymmetry is recorded, not hidden.
+    assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
 
     const assignment = await engine.createAssignment(pair.id, 'Uncertain Task', 'Execute risky command');
 
@@ -91,6 +101,11 @@ describe('RelayX Engine Application Lifecycle & Supervision', () => {
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker');
     const pair = await engine.createPair(project.id, 'Pair 1', planner.id, worker.id);
+    // I-2 (S6): dispatch, supervision and Tier-1 recovery all contact the provider,
+    // so the Pair must be ACTIVE. Load & Activate is the ONLY authorized grantor
+    // (freeze §4.4, §11.5); neither MockProvider exposes an identity capability, so
+    // both sides report `unknown` and the asymmetry is recorded, not hidden.
+    assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
 
     const assignment = await engine.createAssignment(pair.id, 'Build Component', 'Write React button');
     await engine.dispatchAssignment(assignment.id);
@@ -117,8 +132,23 @@ describe('RelayX Engine Application Lifecycle & Supervision', () => {
     assert.strictEqual(handoff?.status, 'ready');
     assert.strictEqual(handoff?.resultSummary, 'Component code and unit tests are complete.');
 
-    // Planner reviews and accepts handoff
-    await engine.deliverHandoffToPlanner(handoff!.id);
+    // Planner reviews and accepts handoff.
+    //
+    // S1 corrected this path: `deliverHandoffToPlanner` contacts no provider, so
+    // it can no longer assert that the Planner was notified. It now rejects with
+    // PLANNER_DELIVERY_UNSUPPORTED and leaves the handoff at `ready`.
+    // See external_effect_evidence.test.ts.
+    await assert.rejects(
+      () => engine.deliverHandoffToPlanner(handoff!.id),
+      /NOT delivered to the Planner/,
+    );
+    const notDelivered = await db.handoffs.findById(handoff!.id);
+    assert.strictEqual(
+      notDelivered?.status,
+      'ready',
+      'an unsupported delivery must not be recorded as delivered',
+    );
+    assert.strictEqual(notDelivered?.deliveredToPlannerAt, undefined);
     await engine.completeHandoff(handoff!.id);
 
     // Invariant check: assignment is still waiting_for_handoff or active until explicit completion
@@ -136,6 +166,11 @@ describe('RelayX Engine Application Lifecycle & Supervision', () => {
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker');
     const pair = await engine.createPair(project.id, 'Pair 1', planner.id, worker.id);
+    // I-2 (S6): dispatch, supervision and Tier-1 recovery all contact the provider,
+    // so the Pair must be ACTIVE. Load & Activate is the ONLY authorized grantor
+    // (freeze §4.4, §11.5); neither MockProvider exposes an identity capability, so
+    // both sides report `unknown` and the asymmetry is recorded, not hidden.
+    assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
 
     const assignment = await engine.createAssignment(pair.id, 'Task', 'Run script');
     await engine.dispatchAssignment(assignment.id);

@@ -13,6 +13,14 @@ import {
   ProviderType,
   ObservableEvidence,
   createId,
+  PairSideRole,
+  PairSideIdentity,
+  PairActivationResult,
+  PAIR_SIDE_ROLES,
+  NO_IDENTITY_CAPABILITY,
+  RuntimePairGovernance,
+  RUNTIME_PAIR_NOT_ACTIVE,
+  RUNTIME_PAIR_OWNERSHIP_AMBIGUOUS,
 } from '../domain/types.ts';
 import {
   Project,
@@ -87,6 +95,54 @@ type DispatchProbeOutcome =
   | { kind: 'delivered'; evidence: ObservableEvidence; reason?: string }
   | { kind: 'not_delivered'; evidence?: ObservableEvidence; reason?: string }
   | { kind: 'insufficient'; reason: string; evidence?: ObservableEvidence };
+
+/**
+ * The truthful result of an attempt to deliver a handoff to the Planner.
+ *
+ * The external-effect invariant (S1) requires that no durable record assert an
+ * external effect merely because RelayX intended one. The Handoff aggregate
+ * carries no "attempted" or "unverified" status, so the unverified outcome is
+ * reported here and durably recorded as a `planner.delivery.unverified` event,
+ * rather than by inventing a second Handoff lifecycle.
+ *
+ * `externally_confirmed` is declared but has no construction path in S1: it
+ * requires an exact Planner transport (S11) that returns provider evidence. It
+ * exists so the future success path is typed, not so it can be assumed.
+ */
+export type PlannerDeliveryAttempt =
+  | {
+      /** The handoff, unchanged. */
+      handoff: Handoff;
+      outcome: 'unverified';
+      reason: string;
+      /** Always false in S1: no external contact is possible at all. */
+      externalContactAttempted: false;
+    }
+  | {
+      handoff: Handoff;
+      outcome: 'externally_confirmed';
+      evidence: ObservableEvidence;
+      externalContactAttempted: true;
+    };
+
+/**
+ * A compact, event-safe projection of one side. Only tri-state facts and the
+ * mandatory dimensions 8/9 travel into the audit stream, so an event can never
+ * imply a verification that did not happen (§5.2, §5.3, I-6).
+ */
+function summariseSide(side: PairSideIdentity): Record<string, unknown> {
+  return {
+    sideRole: side.sideRole,
+    providerType: side.providerType,
+    identityState: side.identityState,
+    verificationState: side.verificationState,
+    existenceState: side.existenceState,
+    capability: side.capability,
+    sourceCapability: side.sourceCapability,
+    observedAt: side.observedAt,
+    reason: side.reason,
+  };
+}
 
 export class RelayEngine {
   private readonly providers: Map<ProviderType, IRuntimeProvider> = new Map();
@@ -839,6 +895,27 @@ export class RelayEngine {
     return runtime;
   }
 
+  /**
+   * S6 CLOSURE — unarchive is a LOCAL record change plus a best-effort re-check.
+   *
+   * The local part (unarchive the row, emit `runtime.updated`) is performed FIRST
+   * and unconditionally, because archiving and unarchiving are established
+   * standalone runtime operations that exist independently of any Pair. Gating the
+   * whole method on Pair state would make an IDLE Pair's runtime permanently
+   * un-unarchivable, which is Case C's failure mode.
+   *
+   * The provider re-check that follows is the part that must obey I-2, and it is
+   * gated by `reconcileAndRecoverRuntime` through the single shared guard.
+   *
+   * ## A refusal here is a PARTIAL result, and is reported as one
+   *
+   * The local unarchive has already been committed when the gate refuses. Throwing
+   * the gate's own message verbatim would imply the unarchive failed, which would be
+   * false — a caller that retried, or that rendered the row as still archived, would
+   * be acting on a misreport. So the refusal is re-thrown with the SAME machine
+   * code (callers still classify on it) and a message that states what did and did
+   * not happen. The Pair is not activated, and no provider was contacted.
+   */
   public async unarchiveRuntimeSession(id: RuntimeSessionId): Promise<RuntimeSession> {
     const runtime = await this.repos.runtimes.findById(id);
     if (!runtime) throw new RelayDomainError(`Runtime session ${id} not found`, 'NOT_FOUND');
@@ -852,11 +929,33 @@ export class RelayEngine {
       newState: 'unknown',
     });
 
-    // Immediate re-check of the real external session
+    // Immediate re-check of the real external session.
+    //
+    // I-2 GATE: the re-check is provider contact, and `reconcileAndRecoverRuntime`
+    // refuses it for a Pair that is IDLE. That refusal MUST NOT be swallowed.
+    // A bare catch here would turn the gate into a silent no-op: the unarchive
+    // would report success while quietly contacting nothing, which is the exact
+    // dishonesty I-2 exists to prevent. The refusal is re-thrown so the caller
+    // learns the Pair must be activated first; any other failure stays
+    // best-effort, because unarchiving is a local record change and its own
+    // success does not depend on the external re-check succeeding.
+    //
+    // BOTH denial codes are re-thrown, including the fail-closed ambiguous-ownership
+    // refusal. Swallowing that one would be worse than swallowing the IDLE case: it
+    // would mean silently proceeding with no defensible owner.
     try {
       await this.reconcileAndRecoverRuntime(id);
-    } catch (err) {
-      // ignore
+    } catch (err: any) {
+      const code = err?.code;
+      if (code === RUNTIME_PAIR_NOT_ACTIVE || code === RUNTIME_PAIR_OWNERSHIP_AMBIGUOUS) {
+        throw new RelayDomainError(
+          `Runtime ${id} was unarchived locally, but its external re-check was refused: ` +
+            `${err.message} The unarchive is saved; the external state remains last-known evidence only, ` +
+            'and the Pair was NOT activated.',
+          code,
+        );
+      }
+      // ignore: best-effort external re-check
     }
 
     return runtime;
@@ -917,6 +1016,12 @@ export class RelayEngine {
 
       const pair = await this.repos.pairs.findById(assignment.pairId);
       if (!pair) throw new RelayDomainError(`Pair ${assignment.pairId} not found`, 'PAIR_NOT_FOUND');
+
+      // I-2 GATE — ARMED (S6). §11.5: every provider contact is gated on
+      // `operational_state === 'ACTIVE'`, and this is the single enforcement point.
+      // The check sits at the top of the Phase-1 transaction, BEFORE any durable
+      // dispatch intent is written, so a refused dispatch leaves no partial record.
+      pair.assertProviderContactPermitted();
 
       if (!pair.workerSessionId) {
         throw new RelayDomainError('Pair has no worker runtime bound', 'NO_WORKER_BOUND');
@@ -1078,6 +1183,16 @@ export class RelayEngine {
   }
 
   /* --- Supervisor Tick (Observe -> Reconcile -> Decide -> Act -> Verify) --- */
+  /**
+   * I-2 GATE — ARMED (S6). §11.5 / §4.3: an IDLE Pair receives zero provider
+   * contact, so the tick skips it entirely rather than inspecting it. The skip is
+   * placed before `getProvider(...)` and before `inspectRuntime`.
+   *
+   * Gating this tick also gates `startSupervisionLoop`, which only schedules this
+   * method. Note the tick's non-provider work below (ambiguous-delivery attention
+   * items) reads only RelayX's own database and still runs for every Pair — I-2
+   * forbids provider contact, not local bookkeeping.
+   */
   public async runSupervisionTick(): Promise<{
     inspectedRuntimes: number;
     inspectedAssignments: number;
@@ -1098,6 +1213,7 @@ export class RelayEngine {
         const pair = await this.repos.pairs.findById(assignment.pairId);
         if (!pair) continue;
 
+        if (!pair.isProviderContactPermitted()) continue;
         if (!pair.workerSessionId) continue;
         const worker = await this.repos.runtimes.findById(pair.workerSessionId);
         if (!worker) continue;
@@ -1214,36 +1330,94 @@ export class RelayEngine {
 
   /* --- Planner Review & Handoff Completion --- */
   /**
-   * Invariant 1 & 6:
-   * Completing a handoff delivers result to planner.
-   * Does NOT complete assignment unless planner explicitly marks assignment complete.
+   * The outcome of an attempt to deliver a handoff to the Planner.
+   *
+   * `externally_confirmed` is unreachable in S1 and is deliberately declared, so
+   * that the only way to obtain it is a future exact Planner transport (S11)
+   * returning provider evidence. There is no other construction path.
    */
-  public async deliverHandoffToPlanner(handoffId: HandoffId): Promise<Handoff> {
+  public async attemptPlannerDelivery(handoffId: HandoffId): Promise<PlannerDeliveryAttempt> {
     const handoff = await this.repos.handoffs.findById(handoffId);
     if (!handoff) throw new RelayDomainError(`Handoff ${handoffId} not found`, 'NOT_FOUND');
 
-    handoff.markDeliveredToPlanner();
-    await this.repos.handoffs.save(handoff);
+    // EXACT PLANNER TRANSPORT DOES NOT EXIST (DESIGN_FREEZE §9.4, §9.4.1).
+    //
+    // There is no provider capability that delivers into a specific conversation:
+    // `IRuntimeProvider` has no such method and `OpenCodeSessionClient` is
+    // read-only. RelayX therefore performs NO external contact here. It must not
+    // call `Handoff.markDeliveredToPlanner()` (which now requires provider
+    // evidence and throws without it) and it must not emit `planner.notified`,
+    // which asserts an external fact that was never established.
+    //
+    // The Handoff is left exactly as it was found. `ready` truthfully means "the
+    // result exists and delivery is intended", so no durable data is rewritten
+    // and no external claim is manufactured.
+    const attempt: PlannerDeliveryAttempt = {
+      handoff,
+      outcome: 'unverified',
+      reason:
+        'Exact Planner conversation transport does not exist. No provider capability delivers into a ' +
+        'specific conversation, so no external effect can be attempted or confirmed (DESIGN_FREEZE ' +
+        '§9.4/§9.4.1; exact transport is S11).',
+      externalContactAttempted: false,
+    };
 
-    await this.emitEvent('handoff', handoff.id, 'planner.notified', {
+    await this.emitEvent('handoff', handoff.id, 'planner.delivery.unverified', {
       actor: 'engine',
-      previousState: 'ready',
-      newState: 'delivered',
+      previousState: handoff.status,
+      // Unchanged: this operation does not advance the handoff.
+      newState: handoff.status,
+      details: {
+        outcome: attempt.outcome,
+        externalContactAttempted: attempt.externalContactAttempted,
+        providerCapability: 'none',
+        reason: attempt.reason,
+      },
     });
 
-    return handoff;
+    return attempt;
+  }
+
+  /**
+   * @deprecated Retained only for API compatibility. Use
+   * {@link attemptPlannerDelivery}, which reports a truthful outcome instead of
+   * throwing.
+   *
+   * This method previously recorded the handoff as delivered to the Planner and
+   * emitted `planner.notified` while contacting nothing at all
+   * (DESIGN_FREEZE §9.4.1). That was an evidence-integrity defect: durable state
+   * asserted an external effect that never happened. It is now fenced — it
+   * contacts no provider, marks no external delivery, and emits no
+   * externally-confirming event — and it rejects so that a caller which
+   * discards the return value cannot read success as "the Planner was told".
+   *
+   * Invariant 6 is unchanged and still holds: handoff completion does not
+   * complete an assignment.
+   */
+  public async deliverHandoffToPlanner(handoffId: HandoffId): Promise<Handoff> {
+    const attempt = await this.attemptPlannerDelivery(handoffId);
+    if (attempt.outcome === 'externally_confirmed') return attempt.handoff;
+    throw new RelayDomainError(
+      `Handoff ${handoffId} was NOT delivered to the Planner: ${attempt.reason}`,
+      'PLANNER_DELIVERY_UNSUPPORTED',
+    );
   }
 
   public async completeHandoff(handoffId: HandoffId): Promise<Handoff> {
     const handoff = await this.repos.handoffs.findById(handoffId);
     if (!handoff) throw new RelayDomainError(`Handoff ${handoffId} not found`, 'NOT_FOUND');
 
+    // Recorded BEFORE the transition. This used to be the hardcoded literal
+    // 'delivered', which wrote an assertion that the Planner had been notified
+    // into the audit stream for handoffs that were never delivered at all — the
+    // same evidence-integrity defect as `planner.notified` (DESIGN_FREEZE §9.4.1).
+    const previousStatus = handoff.status;
     handoff.completeHandoff();
     await this.repos.handoffs.save(handoff);
 
     await this.emitEvent('handoff', handoff.id, 'handoff.complete', {
       actor: 'engine',
-      previousState: 'delivered',
+      previousState: previousStatus,
       newState: 'complete',
     });
 
@@ -1281,9 +1455,132 @@ export class RelayEngine {
   }
 
   /* --- Tier 1 Deterministic Recovery --- */
+
+  /**
+   * S6 CLOSURE — the ONE authoritative runtime -> Pair ownership resolution.
+   *
+   * ## Why this is a single public method rather than two private checks
+   *
+   * Two runtime-addressed provider operations existed with two *different* ad-hoc
+   * resolutions, and the one on the service side had no resolution at all. That
+   * asymmetry is precisely how the hole opened. Routing every runtime-addressed
+   * provider operation through this one method is the enforcement architecture:
+   *
+   * ```
+   * provider operation requested (by RuntimeSessionId)
+   *          ↓
+   *   resolveRuntimePairGovernance()
+   *          ↓
+   *   unpaired ─────→ standalone runtime semantics (no Pair to govern)
+   *        │ paired (exactly one)
+   *   ambiguous ─────→ DENY, fail closed, never pick a candidate
+   *        │ paired
+   *      operationalState
+   *     ↙              ↘
+   *  IDLE                ACTIVE
+   *   ↓                     ↓
+   *  DENY                continue
+   * ```
+   *
+   * ## The ownership source
+   *
+   * `IPairRepository.findByRuntimeSessionId` — the durable binding columns
+   * `planner_session_id` / `worker_session_id`, compared by runtime session id.
+   * Never a title, a project name, a workspace basename, a lifecycle `status`, or
+   * the frontmost window (I-11).
+   *
+   * ## What it does NOT do
+   *
+   * It never activates anything, never repairs a binding, and never infers an owner
+   * from a heuristic. It is a read and a decision, nothing else.
+   */
+  public async resolveRuntimePairGovernance(
+    runtimeSessionId: RuntimeSessionId,
+  ): Promise<RuntimePairGovernance> {
+    const owners = await this.repos.pairs.findByRuntimeSessionId(runtimeSessionId);
+
+    if (owners.length === 0) return { kind: 'unpaired' };
+    if (owners.length === 1) {
+      const pair = owners[0];
+      // Read the state THROUGH the entity's own accessors, never off a raw row,
+      // so `isProviderContactPermitted()` remains the single I-2 decision point.
+      return {
+        kind: 'paired',
+        pairId: pair.id,
+        operationalState: pair.isProviderContactPermitted() ? 'ACTIVE' : pair.operationalState,
+      };
+    }
+    return { kind: 'ambiguous', pairIds: owners.map((p) => p.id) };
+  }
+
+  /**
+   * S6 CLOSURE — the enforcement half of `resolveRuntimePairGovernance`.
+   *
+   * Every runtime-addressed provider operation calls this immediately before
+   * touching a provider. It throws for the two deny cases and returns the
+   * governance for the two allow cases, so the caller can distinguish "allowed
+   * because unpaired" from "allowed because ACTIVE" — a distinction that matters
+   * for truthful reporting, and that a bare `if` would erase.
+   *
+   * ## Why a public engine method rather than a check inside RelayApiService
+   *
+   * The service is the presentation/IPC layer. Putting the rule there would make
+   * the invariant true only for callers that happen to route through the service,
+   * and false for every other caller. The engine is where the invariant lives.
+   */
+  public async assertRuntimeProviderContactPermitted(
+    runtimeSessionId: RuntimeSessionId,
+  ): Promise<RuntimePairGovernance> {
+    const governance = await this.resolveRuntimePairGovernance(runtimeSessionId);
+
+    if (governance.kind === 'ambiguous') {
+      // Fail closed. Choosing one of several candidate Pairs would be a heuristic
+      // authorisation decision, and an unjustifiable one.
+      throw new RelayDomainError(
+        `Runtime ${runtimeSessionId} is bound to more than one Pair (${governance.pairIds.join(', ')}), ` +
+          'so its owning Pair cannot be determined authoritatively. Refusing provider contact rather ' +
+          'than guessing which Pair governs it. Repair the duplicate binding first.',
+        RUNTIME_PAIR_OWNERSHIP_AMBIGUOUS,
+      );
+    }
+
+    if (governance.kind === 'paired' && governance.operationalState !== 'ACTIVE') {
+      throw new RelayDomainError(
+        `Pair ${governance.pairId} is ${governance.operationalState}, so runtime ` +
+          `${runtimeSessionId} cannot be inspected: provider contact is not permitted and persisted ` +
+          'provider information is last-known evidence only (DESIGN_FREEZE I-2, I-3, §11.5). Run Load & ' +
+          'Activate on the Pair first.',
+        RUNTIME_PAIR_NOT_ACTIVE,
+      );
+    }
+
+    return governance;
+  }
+
+  /**
+   * I-2 GATE — ARMED (S6). This is the seventh provider-contact site, and it was
+   * NOT in the original S1B call graph. It is addressed by `RuntimeSessionId`
+   * rather than `PairId`, which is exactly why it was easy to miss: there was no
+   * `Pair` in scope to gate against.
+   *
+   * `provider.inspectRuntime(...)` below is real external contact, so §11.5 gates
+   * it, through the single shared path above.
+   *
+   * ## An unpaired runtime is NOT given permission by default
+   *
+   * If no Pair binds this runtime, the operation proceeds, because there is no
+   * Pair whose IDLE state could be violated: standalone runtime management is an
+   * established product capability (a runtime can be discovered, inspected,
+   * archived, unarchived and adopted before it is ever paired). This is a
+   * documented boundary, not an oversight — and it is the ABSENCE of a governance
+   * subject, not a grant of permission. Case C in the S6 closure report pins this
+   * behaviour with call counts.
+   */
   public async reconcileAndRecoverRuntime(sessionId: RuntimeSessionId): Promise<RuntimeSession> {
     const runtime = await this.repos.runtimes.findById(sessionId);
     if (!runtime) throw new RelayDomainError(`Runtime ${sessionId} not found`, 'NOT_FOUND');
+
+    await this.assertRuntimeProviderContactPermitted(sessionId);
 
     const provider = this.getProvider(runtime.providerType);
     const inspection = await provider.inspectRuntime(runtime.id);
@@ -1381,9 +1678,496 @@ export class RelayEngine {
     return delivery;
   }
 
+  /* ================================================================== *
+   * S6 — Load & Activate / Make Idle
+   *
+   * Frozen source: DESIGN_FREEZE_SESSION_PAIR_OPERATIONS.md §4.2, §4.4, §4.5,
+   * §5.2, §5.3, §9.5, §11.1, §11.2, §11.3, §11.4, §11.5; I-1, I-2, I-4, I-6, I-10, I-11.
+   * ================================================================== */
+
+  /**
+   * S5 — resolve and verify ONE side, independently (freeze §11.3).
+   *
+   * This is the only place in the engine that contacts a provider while a Pair is
+   * still IDLE, and it does so for exactly one purpose: to establish whether that
+   * side's identity can be resolved. It is not a generic observation pass and it
+   * is not a dispatch path.
+   *
+   * Per-side isolation is structural: a throw on one side cannot reach the other,
+   * because each side is resolved inside its own try/catch and a caught failure
+   * becomes `unknown` rather than propagating (§11.3).
+   *
+   * ## The `checked-and-negative` vs `could-not-check` line
+   *
+   * This is the single most important distinction in the operation, and it is I-6
+   * made load-bearing:
+   *
+   *   `verified`    the provider confirmed the id           -> may activate
+   *   `unknown`     no capability, or the read failed/       -> may activate, and
+   *                 was inconclusive                         the side is REPORTED
+   *   `mismatched`  / `absent`
+   *                 the provider was asked and answered no  -> TERMINAL, stay IDLE
+   *
+   * §4.4 requires "resolvable identity on both sides". A side that positively
+   * contradicts the binding fails that precondition and aborts. A side we could
+   * not ask does not: LEVEL 0 ChatGPT can never be fully verified (§9.5), and
+   * refusing to activate every ChatGPT Pair would make §11.3's per-side reporting
+   * and §9.5's asymmetry requirement unreachable. The freeze resolves this
+   * itself — §11.2 says a terminal failure ends at IDLE, and a side we cannot
+   * query has not failed, it is unknown.
+   */
+  private async resolveSideIdentity(
+    pair: Pair,
+    sideRole: PairSideRole,
+  ): Promise<PairSideIdentity> {
+    const observedAt = Date.now();
+    const runtimeSessionId = sideRole === 'planner' ? pair.plannerSessionId : pair.workerSessionId;
+
+    // An unbound side cannot be addressed at all. This is a §4.4 precondition
+    // ("both sides bound") and it is reported per side, never silently omitted.
+    if (!runtimeSessionId) {
+      return {
+        sessionPairId: pair.id,
+        sideRole,
+        providerType: sideRole === 'planner' ? 'chatgpt' : 'opencode',
+        runtimeSessionId: null,
+        externalSessionId: null,
+        identityState: 'unknown',
+        identityValue: null,
+        verificationState: 'unknown',
+        verificationValue: null,
+        existenceState: 'unknown',
+        capability: 'not_verifiable',
+        sourceCapability: NO_IDENTITY_CAPABILITY,
+        observedAt,
+        reason: `No ${sideRole} runtime is bound to this Pair, so there is no session to address`,
+        evidence: null,
+      };
+    }
+
+    const runtime = await this.repos.runtimes.findById(runtimeSessionId);
+    if (!runtime) {
+      return {
+        sessionPairId: pair.id,
+        sideRole,
+        providerType: sideRole === 'planner' ? 'chatgpt' : 'opencode',
+        runtimeSessionId,
+        externalSessionId: null,
+        identityState: 'unknown',
+        identityValue: null,
+        verificationState: 'unknown',
+        verificationValue: null,
+        existenceState: 'unknown',
+        capability: 'not_verifiable',
+        sourceCapability: NO_IDENTITY_CAPABILITY,
+        observedAt,
+        reason: `Bound ${sideRole} runtime ${runtimeSessionId} no longer exists`,
+        evidence: null,
+      };
+    }
+
+    const providerType = runtime.providerType;
+
+    // §4.4 precondition "provider capabilities present". A provider that is not
+    // registered at all is a genuine unmet precondition and aborts the operation
+    // below, rather than being softened into a per-side `unknown`.
+    let provider: IRuntimeProvider;
+    try {
+      provider = this.getProvider(providerType);
+    } catch {
+      return {
+        sessionPairId: pair.id,
+        sideRole,
+        providerType,
+        runtimeSessionId,
+        externalSessionId: runtime.externalSessionId ?? null,
+        identityState: 'unknown',
+        identityValue: null,
+        verificationState: 'unknown',
+        verificationValue: null,
+        existenceState: 'unknown',
+        capability: 'not_verifiable',
+        sourceCapability: NO_IDENTITY_CAPABILITY,
+        observedAt,
+        reason: `No provider is registered for '${providerType}', so the ${sideRole} side cannot be resolved`,
+        evidence: null,
+      };
+    }
+
+    // I-11: the address is the provider's own external session id. The shared
+    // human-readable Pair Name is never used to identify anything.
+    const externalSessionId = runtime.externalSessionId ?? null;
+    if (!externalSessionId) {
+      return {
+        sessionPairId: pair.id,
+        sideRole,
+        providerType,
+        runtimeSessionId,
+        externalSessionId: null,
+        identityState: 'unknown',
+        identityValue: null,
+        verificationState: 'unknown',
+        verificationValue: null,
+        existenceState: 'unknown',
+        capability: 'not_verifiable',
+        sourceCapability: NO_IDENTITY_CAPABILITY,
+        observedAt,
+        reason:
+          `The ${sideRole} runtime has no external session id, so there is no provider-owned ` +
+          'identity to address. Per I-11 a name is not a substitute.',
+        evidence: null,
+      };
+    }
+
+    // No identity capability on this provider: LEVEL 0. Reported as `unknown`,
+    // never as a negative (§5.3, §9.5). This is the ChatGPT case.
+    if (typeof provider.resolveSideIdentity !== 'function') {
+      return {
+        sessionPairId: pair.id,
+        sideRole,
+        providerType,
+        runtimeSessionId,
+        externalSessionId,
+        identityState: 'unknown',
+        identityValue: null,
+        verificationState: 'unknown',
+        verificationValue: null,
+        existenceState: 'unknown',
+        capability: 'not_verifiable',
+        sourceCapability: NO_IDENTITY_CAPABILITY,
+        observedAt,
+        reason:
+          `Provider '${providerType}' exposes no exact-session identity capability, so the ` +
+          `${sideRole} side cannot be verified. This is a permanent capability gap ` +
+          '(LEVEL 0), not a failed check (freeze §9.5, I-6).',
+        evidence: null,
+      };
+    }
+
+    let projectPath: string | undefined;
+    try {
+      const project = await this.repos.projects.findById(pair.projectId);
+      projectPath = project?.workerWorkspacePath ?? project?.canonicalPath ?? undefined;
+    } catch {
+      projectPath = undefined;
+    }
+
+    try {
+      const resolution = await provider.resolveSideIdentity({ externalSessionId, projectPath });
+      return {
+        sessionPairId: pair.id,
+        sideRole,
+        providerType,
+        runtimeSessionId,
+        externalSessionId,
+        identityState: resolution.identityState,
+        identityValue: resolution.identityValue,
+        verificationState: resolution.verificationState,
+        verificationValue: resolution.verificationValue,
+        existenceState: resolution.existenceState,
+        capability: 'exact_session_verifiable',
+        // Dimension 8: the capability name, never just the provider (§5.2, C-8).
+        sourceCapability: resolution.sourceCapability || NO_IDENTITY_CAPABILITY,
+        observedAt: resolution.observedAt || observedAt,
+        reason: resolution.reason ?? null,
+        evidence: resolution.evidence ?? null,
+      };
+    } catch (err: any) {
+      // A thrown read is "could not check", never "not verified" (I-6).
+      return {
+        sessionPairId: pair.id,
+        sideRole,
+        providerType,
+        runtimeSessionId,
+        externalSessionId,
+        identityState: 'unknown',
+        identityValue: null,
+        verificationState: 'unknown',
+        verificationValue: null,
+        existenceState: 'unknown',
+        capability: 'exact_session_verifiable',
+        sourceCapability: NO_IDENTITY_CAPABILITY,
+        observedAt,
+        reason: `Identity resolution threw: ${err?.message ?? String(err)}`,
+        evidence: null,
+      };
+    }
+  }
+
+  /**
+   * S6 — `loadAndActivate(pairId)`.
+   *
+   * §4.4 preconditions, and how each is proven here:
+   *
+   *   Pair exists              -> `repos.pairs.findById` throws PAIR_NOT_FOUND.
+   *   IDLE only (§11.4)        -> an ACTIVE pair returns outcome 'rejected'.
+   *   Both sides bound         -> per-side `reason` names the unbound side; the
+   *                              operation rejects and the pair stays IDLE.
+   *   Provider capabilities    -> a registered provider is required per bound side.
+   *     present                   An unregistered provider is a real precondition
+   *                              failure and rejects. A REGISTERED provider with no
+   *                              identity capability yields per-side `unknown`
+   *                              (§9.5 LEVEL 0) and does not reject.
+   *   Resolvable identity on   -> `verified` passes. `mismatched`/`absent` is a
+   *   both sides                 checked-and-negative TERMINAL failure: the pair
+   *                              stays IDLE (§11.2 "any terminal failure -> IDLE").
+   *                              `unknown` does not reject, and is reported.
+   *
+   * ## What this deliberately does NOT do
+   *
+   * It does not derive readiness, does not persist any readiness value (I-5), does
+   * not compare messages, and does not capture or read a checkpoint. Those are
+   * S7/S8. See S6_LOAD_AND_ACTIVATE.md §2 for the §4.4-vs-§11.2 reading that puts
+   * those clauses out of scope, and §3 for the "provider capabilities present" one.
+   *
+   * It is the ONLY operation permitted to move a Pair to ACTIVE. `startPair()`
+   * remains execution authority only and never touches operational state
+   * (N-16, N-18, I-9); on an IDLE Pair it refuses truthfully rather than becoming a
+   * bridge into ACTIVE.
+   */
+  public async loadAndActivate(pairId: PairId): Promise<PairActivationResult> {
+    const pair = await this.repos.pairs.findById(pairId);
+    if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'PAIR_NOT_FOUND');
+
+    const reject = async (
+      reason: string,
+      sides?: Record<PairSideRole, PairSideIdentity>,
+    ): Promise<PairActivationResult> => {
+      // A rejected activation leaves the pair exactly as it found it: IDLE (I-1).
+      const current = await this.repos.pairs.findById(pairId);
+      const resolvedSides = sides ?? (await this.readBothSides(pair));
+      await this.emitEvent('pair', pairId, 'pair.activation_rejected', {
+        actor: 'user',
+        previousState: current?.operationalState ?? 'IDLE',
+        newState: current?.operationalState ?? 'IDLE',
+        details: {
+          reason,
+          planner: summariseSide(resolvedSides.planner),
+          worker: summariseSide(resolvedSides.worker),
+        },
+      });
+      return {
+        pairId,
+        outcome: 'rejected',
+        operationalStateBefore: pair.operationalState,
+        operationalStateAfter: current?.operationalState ?? 'IDLE',
+        sides: resolvedSides,
+        fullyVerified: false,
+        reason,
+      };
+    };
+
+    // §11.4: idempotent with respect to operational state. Re-running an activation
+    // is an explicit retry, not an implicit side effect of calling again.
+    if (pair.operationalState === 'ACTIVE') {
+      return reject(
+        'Pair is already ACTIVE. Re-running Load & Activate is rejected; a partial retry is a ' +
+          'distinct explicit operation (freeze §11.4).',
+      );
+    }
+
+    // §11.3: each side resolved independently. Sequential rather than parallel so
+    // the provider spy ordering in tests is deterministic; the isolation is
+    // structural, not an artefact of concurrency.
+    const plannerSide = await this.resolveSideIdentity(pair, 'planner');
+    const workerSide = await this.resolveSideIdentity(pair, 'worker');
+
+    // Persist the evidence BEFORE deciding, so a rejected activation still leaves
+    // durable last-known evidence for both sides (I-3). Make Idle preserves it (I-10).
+    await this.repos.sideIdentities.save(plannerSide);
+    await this.repos.sideIdentities.save(workerSide);
+
+    const sides: Record<PairSideRole, PairSideIdentity> = {
+      planner: plannerSide,
+      worker: workerSide,
+    };
+
+    // §4.4 "both sides bound". An unbound side has nothing to address, so the
+    // precondition cannot be met for that side.
+    const unbound = PAIR_SIDE_ROLES.find((role) => sides[role].runtimeSessionId === null);
+    if (unbound) {
+      return reject(
+        `Precondition failed: the ${unbound} side has no bound runtime, so its identity cannot ` +
+          'be resolved (freeze §4.4 "both sides bound").',
+        sides,
+      );
+    }
+
+    // §4.4 "provider capabilities present". A provider that is not registered at
+    // all is a configuration failure, distinct from a registered provider that
+    // simply cannot verify (which stays `unknown`, §9.5).
+    const unregistered = PAIR_SIDE_ROLES.find(
+      (role) => sides[role].reason?.startsWith('No provider is registered'),
+    );
+    if (unregistered) {
+      return reject(
+        `Precondition failed: no provider is registered for the ${unregistered} side ` +
+          '(freeze §4.4 "provider capabilities present").',
+        sides,
+      );
+    }
+
+    // "Resolvable identity on both sides". A checked-and-negative answer is a
+    // terminal failure; `unknown` is not (see resolveSideIdentity's contract).
+    const contradicted = PAIR_SIDE_ROLES.find(
+      (role) =>
+        sides[role].verificationState === 'mismatched' || sides[role].existenceState === 'absent',
+    );
+    if (contradicted) {
+      return reject(
+        `Precondition failed: the ${contradicted} side was checked by its provider and did not ` +
+          'resolve to the bound identity, so Load & Activate ends at IDLE (freeze §4.4, §11.2).',
+        sides,
+      );
+    }
+
+    // Every surviving path is IDLE here (I-1: the transition is one-way and the
+    // only writer is Pair.makeActive()).
+    pair.makeActive('load_and_activate');
+    await this.repos.pairs.save(pair);
+
+    const fullyVerified = PAIR_SIDE_ROLES.every((role) => sides[role].verificationState === 'verified');
+
+    await this.emitEvent('pair', pairId, 'pair.activated', {
+      actor: 'user',
+      previousState: 'IDLE',
+      newState: 'ACTIVE',
+      details: {
+        // §9.5: the asymmetry is part of the record, not a UI afterthought.
+        fullyVerified,
+        planner: summariseSide(plannerSide),
+        worker: summariseSide(workerSide),
+        unverifiedSides: PAIR_SIDE_ROLES.filter((r) => sides[r].verificationState !== 'verified'),
+      },
+    });
+
+    return {
+      pairId,
+      outcome: 'activated',
+      operationalStateBefore: 'IDLE',
+      operationalStateAfter: 'ACTIVE',
+      sides,
+      fullyVerified,
+      // A null reason is honest here: a side recorded as `unknown` carries its own
+      // reason on the side record itself.
+      reason: null,
+    };
+  }
+
+  /**
+   * S6 — `makeIdle(pairId, reason)`.
+   *
+   * §11.2: provider contact **No**. §4.5 + I-10: it stops observation and
+   * interaction and PRESERVES bindings, history, checkpoints, cursors, provenance
+   * and last-known evidence. Idempotent.
+   *
+   * It does not delete or rewrite the per-side identity rows, because those are
+   * the last-known evidence I-3 requires an IDLE Pair to be able to render.
+   */
+  public async makePairIdle(pairId: PairId, reason?: string): Promise<Pair> {
+    const pair = await this.repos.pairs.findById(pairId);
+    if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'PAIR_NOT_FOUND');
+
+    const wasActive = pair.operationalState === 'ACTIVE';
+
+    // Idempotent, and a no-op on an already-IDLE pair that still records the intent.
+    pair.makeIdle(reason);
+    await this.repos.pairs.save(pair);
+
+    await this.emitEvent('pair', pairId, 'pair.idled', {
+      actor: 'user',
+      previousState: wasActive ? 'ACTIVE' : 'IDLE',
+      newState: 'IDLE',
+      details: { reason: reason ?? null, idempotent: !wasActive },
+    });
+
+    return pair;
+  }
+
+  /**
+   * Reads both sides for reporting, preferring persisted last-known evidence and
+   * falling back to an explicit "never observed" record. A side is never omitted
+   * from the result (§11.3).
+   */
+  private async readBothSides(pair: Pair): Promise<Record<PairSideRole, PairSideIdentity>> {
+    const neverObserved = (sideRole: PairSideRole): PairSideIdentity => ({
+      sessionPairId: pair.id,
+      sideRole,
+      providerType: sideRole === 'planner' ? 'chatgpt' : 'opencode',
+      runtimeSessionId: sideRole === 'planner' ? (pair.plannerSessionId ?? null) : (pair.workerSessionId ?? null),
+      externalSessionId: null,
+      identityState: 'unknown',
+      identityValue: null,
+      verificationState: 'unknown',
+      verificationValue: null,
+      existenceState: 'unknown',
+      capability: 'not_verifiable',
+      sourceCapability: NO_IDENTITY_CAPABILITY,
+      observedAt: Date.now(),
+      reason: 'This side has never been observed by Load & Activate',
+      evidence: null,
+    });
+
+    const [planner, worker] = await Promise.all([
+      this.repos.sideIdentities.find(pair.id, 'planner'),
+      this.repos.sideIdentities.find(pair.id, 'worker'),
+    ]);
+    return {
+      planner: planner ?? neverObserved('planner'),
+      worker: worker ?? neverObserved('worker'),
+    };
+  }
+
+  /**
+   * `startPair` — EXECUTION authority. It is NOT the activation authority.
+   *
+   * ## It never grants ACTIVE, and never transitions IDLE -> ACTIVE
+   *
+   * Freeze §4.4: Start Pair "Changes operational state: No" (N-16, N-18, I-9).
+   * `Pair.resume()` writes the deprecated lifecycle `status` and nothing else;
+   * `operationalState` is untouched here. The ONLY `IDLE -> ACTIVE` transition in
+   * this tranche is `loadAndActivate` (S6). A deliberate, documented rejection of
+   * the "bridge" reading: Start Pair is never a compatibility path into ACTIVE.
+   *
+   * ## Why it refuses on an IDLE Pair
+   *
+   * Starting execution on an IDLE Pair would record a lifecycle status implying
+   * work is underway while the engine refuses every provider contact behind it
+   * (I-2). That is the silent, misleading outcome this refusal exists to prevent:
+   * the operator would see a started pair and see nothing happen, with no
+   * explanation. Refusing, and naming the operation that would succeed, is the
+   * truthful response.
+   *
+   * The thrown code is deliberately the same `PAIR_OPERATIONAL_STATE_IDLE` the I-2
+   * gate raises, so a caller has one code to handle for "this Pair may not contact
+   * providers" whether the block came from the gate or from here.
+   */
   public async startPair(pairId: PairId): Promise<Pair> {
     const pair = await this.repos.pairs.findById(pairId);
     if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'PAIR_NOT_FOUND');
+
+    if (!pair.isProviderContactPermitted()) {
+      // The advice must be true for THIS pair. Telling a pair with an unbound side
+      // to "run Load & Activate" would send the operator into a second, different
+      // failure, because §4.4 requires BOTH sides bound before activation succeeds.
+      const missing = [
+        !pair.plannerSessionId ? 'planner' : null,
+        !pair.workerSessionId ? 'worker' : null,
+      ].filter(Boolean);
+      const remedy = missing.length
+        ? `Pair ${pairId} has no bound ${missing.join(' or ')} runtime, so Load & Activate cannot ` +
+          `satisfy its §4.4 "both sides bound" precondition. Bind the ${missing.join(' and ')} ` +
+          'runtime first.'
+        : `Run Load & Activate on Pair ${pairId} first to grant ACTIVE, then Start Pair to begin ` +
+          'execution.';
+      throw new RelayDomainError(
+        `Pair ${pairId} is IDLE, so its execution cannot be started: execution needs provider ` +
+          `contact, which IDLE forbids (DESIGN_FREEZE I-2). Start Pair is execution authority ` +
+          `only and does not activate. ${remedy} (freeze §4.4, §11.5).`,
+        'PAIR_OPERATIONAL_STATE_IDLE',
+      );
+    }
+
     pair.resume();
     await this.repos.pairs.save(pair);
     await this.emitEvent('pair', pair.id, 'pair.started', {
@@ -1425,6 +2209,12 @@ export class RelayEngine {
 
   /**
    * Starts non-blocking background supervision loop (Phase 8).
+   *
+   * I-2 GATE — ARMED (S6), in `runSupervisionTick`. A ticking loop is continuous
+   * provider contact by construction, so §11.5 requires the tick to be gated on
+   * `operational_state === 'ACTIVE'`. This method only schedules the tick, so the
+   * gate there gates the loop completely; no second check is needed here and none
+   * is added, because one enforcement point is the point.
    */
   public startSupervisionLoop(intervalMs = 5000): void {
     if (this.supervisionTimer) return;
@@ -1567,6 +2357,28 @@ export class RelayEngine {
         kind: 'insufficient',
         reason: `Dispatch intent ${delivery.id} targets terminated runtime ${delivery.targetRuntimeId}`,
       };
+    }
+
+    // I-2 GATE — ARMED (S6). `provider.reconcileDispatch(...)` below is a real
+    // external contact, not a local read, so §11.5 gates it like every other
+    // contact. The owning Pair is reached through the Attempt's FROZEN authority
+    // (`sessionPairId`), never a mutable lookup, so the gate consults the same Pair
+    // the dispatch was authorized against.
+    //
+    // `insufficient` is the correct disposition: the probe was not performed, so
+    // RelayX genuinely does not know. It is NOT recorded as `not_delivered`, because
+    // that would assert an external fact that was never established (I-6, I-13).
+    if (attempt.sessionPairId) {
+      const owningPair = await this.repos.pairs.findById(attempt.sessionPairId);
+      if (owningPair && !owningPair.isProviderContactPermitted()) {
+        return {
+          kind: 'insufficient',
+          reason:
+            `Pair ${attempt.sessionPairId} is IDLE, so dispatch intent ${delivery.id} cannot be ` +
+            'probed against the provider. No provider contact was made and no external state ' +
+            'was inferred (DESIGN_FREEZE I-2, I-6, §11.5).',
+        };
+      }
     }
 
     let provider: IRuntimeProvider;
@@ -1756,6 +2568,18 @@ export class RelayEngine {
   /**
    * Recovers state upon application startup or following an unexpected restart (Phase 9).
    * Reconciles in-flight assignments and runtimes against active desktop processes.
+   *
+   * I-2 GATE — ARMED (S6). This path inspects provider runtimes at startup, so
+   * §11.5 requires it to be gated on `operational_state === 'ACTIVE'` like every
+   * other provider contact. An IDLE Pair is skipped, which is what makes restart
+   * deterministic: a persisted IDLE Pair costs zero provider calls.
+   *
+   * This path NEVER activates a Pair (§4.2: IDLE -> ACTIVE is never automatic), and
+   * a legacy `status='active'` cannot override `operationalState='IDLE'`.
+   *
+   * `reconcileUnresolvedDispatches` below reaches `provider.reconcileDispatch` —
+   * a real external contact — and is gated in its own right, in
+   * `probeDispatchOutcome`.
    */
   public async recoverOnStartup(): Promise<{
     reconciledAssignments: number;
@@ -1777,6 +2601,7 @@ export class RelayEngine {
     for (const assignment of activeAssignments) {
       const pair = await this.repos.pairs.findById(assignment.pairId);
       if (!pair) continue;
+      if (!pair.isProviderContactPermitted()) continue;
       if (!pair.workerSessionId) continue;
       const worker = await this.repos.runtimes.findById(pair.workerSessionId);
       if (!worker) continue;
@@ -2371,7 +3196,11 @@ export class RelayEngine {
     attempt: Attempt,
   ): Promise<PlanFirstTickResult> {
     const pair = await this.repos.pairs.findById(run.sessionPairId);
-    if (pair?.workerSessionId) {
+    // I-2 GATE — ARMED (S6). `provider.detectWorkingState(...)` below is a real
+    // external contact, so §11.5 gates it. The observation it produces is recorded
+    // on the runtime and never promotes a WorkUnit, so skipping it for an IDLE Pair
+    // loses no derived state — the only thing lost is a contact I-2 forbids.
+    if (pair?.workerSessionId && pair.isProviderContactPermitted()) {
       const worker = await this.repos.runtimes.findById(pair.workerSessionId);
       if (worker) {
         try {

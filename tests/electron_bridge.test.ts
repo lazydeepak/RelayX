@@ -116,13 +116,30 @@ describe('Electron IPC & RelayApiService Integration Tests', () => {
     const paused = await api.pausePair(targetPair.id);
     assert.equal(paused.status, 'paused');
 
-    // Resume pair. The demo pair deliberately selects no runtime sessions, so
-    // it has no active assignment and resumes to 'idle' rather than 'active':
-    // a pair with no adopted worker cannot carry work.
-    const resumed = await api.resumePair(targetPair.id);
-    assert.equal(resumed.status, 'idle');
-    assert.equal(resumed.plannerSessionId, undefined);
-    assert.equal(resumed.workerSessionId, undefined);
+    // Resume pair. The demo pair deliberately selects no runtime sessions, so it
+    // has no active assignment and nothing to execute.
+    //
+    // CONTRACT CHANGE (S6): Start Pair is execution authority only and never grants
+    // ACTIVE (§4.4 "Changes operational state: No"). On an IDLE Pair it refuses
+    // truthfully instead of silently becoming a path into ACTIVE. This demo pair is
+    // additionally UNBOUND, so the refusal must name that fact rather than advise
+    // Load & Activate, which could not succeed for a pair with nothing bound.
+    await assert.rejects(
+      () => api.resumePair(targetPair.id),
+      (err: any) => {
+        assert.strictEqual(err?.code, 'PAIR_OPERATIONAL_STATE_IDLE');
+        assert.match(err?.message ?? '', /no bound planner or worker runtime/);
+        return true;
+      },
+      'Start Pair must refuse an IDLE pair and must not activate it',
+    );
+    // The refusal must not have mutated the stored pair: this is the real-SQLite
+    // round-trip claim this test exists to make.
+    const stillStored = await db.pairs.findById(targetPair.id as any);
+    assert.equal(stillStored?.operationalState, 'IDLE');
+    assert.equal(stillStored?.status, 'paused', 'a refused Start must leave the persisted lifecycle state alone');
+    assert.equal(stillStored?.plannerSessionId, undefined);
+    assert.equal(stillStored?.workerSessionId, undefined);
 
     // Run supervision tick
     const tickResult = await api.runSupervisionTick();

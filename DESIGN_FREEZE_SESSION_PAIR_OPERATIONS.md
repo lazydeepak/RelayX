@@ -1105,6 +1105,13 @@ Operationally:
 
 `[FROZEN]` The `SESSION_PAIR_REPLACEMENT.md` contract conflict (C-1) is not a separate slice. It is resolved inside **S1 (Pair semantics)**, because stable Pair identity is a precondition for anchoring observations, checkpoints, and provenance in S2 and S3. Resolving C-1 later would leave S3 anchoring provenance to a mutable identity, which is the defect C-1 describes.
 
+`[VERIFIED]` **S1 execution note (narrow factual correction, added by the S1 implementation).** The *stable identity* half of C-1 is delivered in S1 as `pairs.stable_pair_id` / `Pair.stableId`, immutable once set and deliberately omitted from the upsert `DO UPDATE` set. The *replacement operation* half — making `updatePair()` create a new Pair — is **fenced, not delivered**, because two existing regression gates assert the current in-place behaviour and re-deciding them is outside S1's authority:
+
+- `tests/pair_mutation_association.test.ts:173` asserts `updated.id === pair.id` after a rebinding. This file is part of the executable preservation map in `OPENCODE_SESSION_DISCOVERY.md` (I-16).
+- `tests/management_lifecycle.test.ts:178-182` re-reads the Pair by its **pre-update** `pair.id` after the same call.
+
+`[VERIFIED]` Any implementation that made `updatePair()` return a different row would break both. The fence is therefore explicit rather than silent: `stableId` is the safe prerequisite that stops the in-place mutation from silently moving the ownership of a recorded fact, and the replacement operation itself waits until those two gates are re-decided. See `S1_PAIR_SEMANTICS_IMPLEMENTATION.md` §2.
+
 ---
 
 ## 19. Explicit non-goals
