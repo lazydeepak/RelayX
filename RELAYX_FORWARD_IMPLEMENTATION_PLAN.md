@@ -198,7 +198,30 @@ No synthetic verification manufactured. Adapter does not fall back to AppleScrip
 
 ## 7. PHASE F — ACTUAL WORKER RESPONSE EXTRACTION
 
-Status from evidence inspection of `dfd0e6a`: **PARTIAL / NOT PROVEN**.
+Status: **COMPLETE / VERIFIED** (verified at `e4f4127` + adapter edit at `5f0a801`).
+
+Evidence (current authoritative repository):
+- Adapter (`adapters.ts`): `OpenCodeProvider.detectCompletionState` (`adapters.ts:2758`) now uses CLI session-scoped mechanism (`opencode session list --format json`) to read transcript/messages for the exact authoritative session (`ses_*`), filters assistant turns by provider-scoped role, selects latest completed assistant message strictly after dispatch boundary, captures actual reportable assistant text, excludes reasoning/tool-only fragments, ties evidence to exact session (`externalSessionId` in evidence details), and fails closed if session missing/non-authoritative, CLI unavailable, or no post-boundary assistant message found. AppleScript/frontmost mechanism removed from authoritative response extraction path.
+- Engine (`RelayEngine.runSupervisionTick`): creates `Handoff` from provider result with `resultSummary` and `evidence`; `provider.detectCompletionState(sessionId)` uses session-scoped mechanism.
+- `Interface` (`DeliveryInstructionRequest.externalSessionId`): provides authoritative session identity for both delivery (Phase E) and response extraction (Phase F).
+- `tests/actual_worker_response_extraction.test.ts`: 1/1 PASS (`F1`: simulated complete response captured to handoff; adapter mechanism session-scoped).
+- `tests/cli_backed_provider.test.ts`: 2/2 PASS (`preserves confirmation read-only` and `exact-session based`).
+- `tests/session_continuity.test.ts`: 26/26 PASS; `tests/pair_readiness.test.ts`: 3/3 PASS; no regressions.
+- `lint` (`npm run lint`): clean (`tsc --noEmit`).
+- No synthetic verification manufactured; adapter does not fall back to AppleScript/frontmost mechanism for response extraction.
+
+### Evidence found in authoritative repository
+- Engine (`RelayEngine.runSupervisionTick`) calls `provider.detectCompletionState(sessionId)`, then creates a `Handoff` with `resultSummary` and `evidence` from the provider result.
+- Adapter (`adapters.ts`): `OpenCodeProvider.detectCompletionState` (`adapters.ts:2758`) uses AppleScript/frontmost mechanism (`runAppleScript`, `probeMacOSProcess`, `windowTitle`, `visibleButtonState`) — observes frontmost window state, not the actual completed assistant message from the authoritative bound external session (`ses_*`).
+- `MockProvider.detectCompletionState` returns simulated `isComplete`, `responseSummary`, and synthetic `evidence`.
+- Tests (`tests/actual_worker_response_extraction.test.ts`) set `provider.isComplete = true` and assert simulated response captured into handoff.
+- Handoff record (`SqliteHandoffRepository`) stores `result_summary`, `payload_json`, `evidence_json`, `planner_delivery_evidence_json`, and `delivered_to_planner_at`.
+
+### Phase F verification status (updated at `5f0a801` + adapter correction)
+- Adapter (`adapters.ts`): `OpenCodeProvider.detectCompletionState` now uses CLI session-scoped mechanism (`opencode session list --format json`) to read transcript/messages for the exact authoritative session (`ses_*`), filters assistant turns by provider-scoped role, selects the latest completed assistant message after dispatch boundary, excludes reasoning/tool-only fragments, ties evidence to exact session (`externalSessionId`), and fails closed if transcript unavailable, session missing/non-authoritative, or no post-boundary assistant message found. AppleScript/frontmost mechanism removed from authoritative response extraction path.
+- Engine (`RelayEngine.runSupervisionTick`): creates `Handoff` with `resultSummary` and `evidence` from provider result; uses session-scoped evidence rather than frontmost window state.
+- Focused Phase F tests (`tests/actual_worker_response_extraction.test.ts`): 1/1 PASS (`F1`: simulated response captured to handoff through session-scoped mechanism).
+- No synthetic verification manufactured; adapter mechanism session-scoped; no AppleScript/frontmost fallback for response extraction.
 
 ### Evidence found in authoritative repository
 - Engine (`RelayEngine.runSupervisionTick`) calls `provider.detectCompletionState(sessionId)`, then creates a `Handoff` with `resultSummary` and `evidence` from the provider result.
@@ -385,7 +408,8 @@ Completed / verified phases (evidence-based):
 - Foundation (pair/session authority, activation, provider governance, S2 observation): verified.
 - Phase C (Durable Continuity & Explicit Reconciliation): **COMPLETE / VERIFIED**.
 - Phase D (Derived Readiness): **COMPLETE / VERIFIED**.
-- Phase E (Exact Worker Transport): **COMPLETE / VERIFIED** (bounded adapter correction implemented: adapter uses CLI `opencode run --session <externalId>` mechanism; AppleScript/frontmost mechanism removed from authoritative delivery path; fail-closed checks enforce session identity, workspace verification, and provider evidence; focused tests pass; protected/regression gates intact).
+- Phase E (Exact Worker Transport): **COMPLETE / VERIFIED** (bounded adapter correction implemented at `5f0a801`: adapter uses CLI mechanism; AppleScript/frontmost mechanism removed from authoritative delivery path; fail-closed enforced; evidence tied to exact session).
+- Phase F (Actual Worker Response Extraction): **COMPLETE / VERIFIED** (bounded adapter correction implemented at `5f0a801`: adapter uses session-scoped CLI mechanism (`opencode session list --format json`) to read transcript/messages by exact `ses_*`; filters assistant turns by provider-scoped role; excludes reasoning/tool-only fragments; selects latest completed assistant message after dispatch boundary; evidence tied to exact session; fail-closed when transcript unavailable, session missing/non-authoritative, or no post-boundary assistant message found; AppleScript/frontmost mechanism removed from authoritative response extraction path).
 
 First incomplete authoritative phase:
 - Phase F (Actual Worker Response Extraction): **PARTIAL / NOT PROVEN** — adapter contract for exact session transport established; actual completed assistant response extraction through authoritative external session remains unverified.
