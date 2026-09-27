@@ -123,7 +123,17 @@ No contract defects found. No code changes required.
 
 ## 5. PHASE D — DERIVED READINESS
 
-Status from evidence inspection of `dfd0e6a`: **IMPLEMENTED** (derived evaluator exists; consumes continuity/state/bindings; pure local evaluation, zero provider contact).
+Status from authoritative evidence (verified this run): **COMPLETE / VERIFIED**.
+
+Verification performed against `bb589ae`:
+- `tests/pair_readiness.test.ts`: 3/3 pass (IDLE -> NOT_READY; missing checkpoints -> UNKNOWN; valid baseline + unchanged continuity -> READY).
+- `src/relay/domain/readiness.ts`: `evaluatePairReadiness` pure, zero provider contact; derives from `Pair`, `RuntimeSession`, `PairSideIdentity`, and `PairContinuityResult`.
+- Readiness does NOT alter `PairOperationalState` (separate concerns preserved).
+- `UNKNOWN` preserved honestly when continuity is missing (`continuity?.state ?? 'UNKNOWN'`); does not collapse to `READY` or `NOT_READY` falsely.
+- `NOT_READY` correctly returned for `BOTH_ADVANCED` (requires reconciliation before active operations).
+- `lint` (`tsc --noEmit`) clean at `bb589ae`.
+
+No contract defects found. No code changes required.
 
 ### Evidence found in authoritative repository
 - Domain (`src/relay/domain/readiness.ts`): `PairReadinessState` (`READY` | `NOT_READY` | `UNKNOWN`), `PairReadinessAssessment`, `evaluatePairReadiness`.
@@ -344,7 +354,7 @@ Authoritative base: `main` at `dfd0e6a` (`HEAD == origin/main`, working tree cle
 Completed / verified phases (evidence-based):
 - Foundation (pair/session authority, activation, provider governance, S2 observation): verified.
 - Phase C (Durable Continuity & Explicit Reconciliation): **COMPLETE / VERIFIED** (verified this run: 26/26 tests pass, contract satisfied, no defects).
-- Phase D (Derived Readiness): **IMPLEMENTED** (pure evaluator; consumes continuity and bindings; no provider contact).
+- Phase D (Derived Readiness): **COMPLETE / VERIFIED** (verified this run: 3/3 tests pass; pure evaluator; zero provider contact; preserves UNKNOWN; does not alter operational state).
 
 First incomplete authoritative phase:
 - Phase E (Exact Worker Transport): **PARTIAL / NOT PROVEN** — adapter contract exists but production exact-session provider targeting is not proven.
