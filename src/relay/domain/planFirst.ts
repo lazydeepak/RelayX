@@ -15,8 +15,6 @@
  *  - No `Strategy`, no retry budget, no planner-assistance architecture.
  */
 
-import { createHash } from 'node:crypto';
-
 import {
   ProjectId,
   PairId,
@@ -56,8 +54,10 @@ export function canonicalizeSemanticFields(fields: Record<string, unknown>): str
   return JSON.stringify(fields, Object.keys(fields).sort());
 }
 
+import { sha256 } from 'js-sha256';
+
 export function digestCanonicalText(canonicalText: string): string {
-  return createHash('sha256').update(canonicalText).digest('hex');
+  return sha256(canonicalText);
 }
 
 /* ------------------------------------------------------------------ *

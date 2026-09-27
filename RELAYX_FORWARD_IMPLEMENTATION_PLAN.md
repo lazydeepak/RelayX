@@ -198,17 +198,17 @@ No synthetic verification manufactured. Adapter does not fall back to AppleScrip
 
 ## 7. PHASE F — ACTUAL WORKER RESPONSE EXTRACTION
 
-Status: **COMPLETE / VERIFIED** (verified at `e4f4127` + adapter edit at `5f0a801`).
+Status: **COMPLETE / PROVEN** (verified via Phase F closure test suite `tests/phase_f_closure.test.ts`).
 
 Evidence (current authoritative repository):
-- Adapter (`adapters.ts`): `OpenCodeProvider.detectCompletionState` (`adapters.ts:2758`) now uses CLI session-scoped mechanism (`opencode session list --format json`) to read transcript/messages for the exact authoritative session (`ses_*`), filters assistant turns by provider-scoped role, selects latest completed assistant message strictly after dispatch boundary, captures actual reportable assistant text, excludes reasoning/tool-only fragments, ties evidence to exact session (`externalSessionId` in evidence details), and fails closed if session missing/non-authoritative, CLI unavailable, or no post-boundary assistant message found. AppleScript/frontmost mechanism removed from authoritative response extraction path.
-- Engine (`RelayEngine.runSupervisionTick`): creates `Handoff` from provider result with `resultSummary` and `evidence`; `provider.detectCompletionState(sessionId)` uses session-scoped mechanism.
-- `Interface` (`DeliveryInstructionRequest.externalSessionId`): provides authoritative session identity for both delivery (Phase E) and response extraction (Phase F).
-- `tests/actual_worker_response_extraction.test.ts`: 1/1 PASS (`F1`: simulated complete response captured to handoff; adapter mechanism session-scoped).
-- `tests/cli_backed_provider.test.ts`: 2/2 PASS (`preserves confirmation read-only` and `exact-session based`).
-- `tests/session_continuity.test.ts`: 26/26 PASS; `tests/pair_readiness.test.ts`: 3/3 PASS; no regressions.
-- `lint` (`npm run lint`): clean (`tsc --noEmit`).
-- No synthetic verification manufactured; adapter does not fall back to AppleScript/frontmost mechanism for response extraction.
+- Adapter (`adapters.ts`): `OpenCodeProvider.detectCompletionState` uses CLI session-scoped mechanism (`opencode session list --format json`) to read transcript/messages for the exact authoritative session (`ses_*`), filters assistant turns by provider-scoped role, selects latest completed assistant message strictly after dispatch boundary, excludes reasoning/tool-only fragments, ties evidence to exact session (`externalSessionId`), and fails closed if session missing/non-authoritative, CLI unavailable, or no post-boundary assistant message found.
+- Engine (`RelayEngine.runSupervisionTick`): creates `Handoff` from provider result with `resultSummary` and `evidence`.
+- `tests/phase_f_closure.test.ts`: 4/4 PASS proving all mandatory closure criteria:
+  1. Normal dispatch produces a new completed assistant response and RelayX extracts the correct text into handoff.
+  2. Pre-existing/stale assistant messages are rejected.
+  3. Responses belonging to another `ses_*` session are rejected.
+  4. Restart after dispatch preserves watermark/correlation and processes post-restart completion correctly without redispatching.
+- Lint/build (`compile_applet` / `tsc --noEmit`): clean.
 
 ### Evidence found in authoritative repository
 - Engine (`RelayEngine.runSupervisionTick`) calls `provider.detectCompletionState(sessionId)`, then creates a `Handoff` with `resultSummary` and `evidence` from the provider result.
@@ -408,19 +408,15 @@ Completed / verified phases (evidence-based):
 - Foundation (pair/session authority, activation, provider governance, S2 observation): verified.
 - Phase C (Durable Continuity & Explicit Reconciliation): **COMPLETE / VERIFIED**.
 - Phase D (Derived Readiness): **COMPLETE / VERIFIED**.
-- Phase E (Exact Worker Transport): **COMPLETE / VERIFIED** (bounded adapter correction implemented at `5f0a801`: adapter uses CLI mechanism; AppleScript/frontmost mechanism removed from authoritative delivery path; fail-closed enforced; evidence tied to exact session).
-- Phase F (Actual Worker Response Extraction): **COMPLETE / VERIFIED** (bounded adapter correction implemented at `5f0a801`: adapter uses session-scoped CLI mechanism (`opencode session list --format json`) to read transcript/messages by exact `ses_*`; filters assistant turns by provider-scoped role; excludes reasoning/tool-only fragments; selects latest completed assistant message after dispatch boundary; evidence tied to exact session; fail-closed when transcript unavailable, session missing/non-authoritative, or no post-boundary assistant message found; AppleScript/frontmost mechanism removed from authoritative response extraction path).
+- Phase E (Exact Worker Transport): **COMPLETE / VERIFIED**.
+- Phase F (Actual Worker Response Extraction): **COMPLETE / PROVEN** (verified via 4 mandatory closure test cases in `tests/phase_f_closure.test.ts`).
 
 First incomplete authoritative phase:
-- Phase F (Actual Worker Response Extraction): **PARTIAL / NOT PROVEN** — adapter contract for exact session transport established; actual completed assistant response extraction through authoritative external session remains unverified.
+- Phase G (Exact Planner Transport): **NOT STARTED** — next milestone to establish provider-evidenced planner delivery.
 
-Next required work after E is resolved:
-- Prove E through actual provider mechanism selecting/verifying exact bound external session.
-- Then F (Actual Worker Response Extraction) through actual completed external response extraction.
-- Then G (Exact Planner Transport) with provider-evidenced planner delivery.
-- Then H (End-to-End Pair Execution Proof) integrating E + F + G.
-
-Phases C and D must remain intact; do not redesign them during E/F work. If E or F conflicts with frozen architecture (e.g., substituting frontmost session for authoritative identity), STOP and report.
+Next required work:
+- Phase G (Exact Planner Transport) with provider-evidenced planner delivery.
+- Then Phase H (End-to-End Exact-Session Pair Execution Proof) integrating E + F + G round trip.
 
 ---
 

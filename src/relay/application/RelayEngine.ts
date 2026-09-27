@@ -1360,32 +1360,88 @@ export class RelayEngine {
     const handoff = await this.repos.handoffs.findById(handoffId);
     if (!handoff) throw new RelayDomainError(`Handoff ${handoffId} not found`, 'NOT_FOUND');
 
-    // EXACT PLANNER TRANSPORT DOES NOT EXIST (DESIGN_FREEZE §9.4, §9.4.1).
-    //
-    // There is no provider capability that delivers into a specific conversation:
-    // `IRuntimeProvider` has no such method and `OpenCodeSessionClient` is
-    // read-only. RelayX therefore performs NO external contact here. It must not
-    // call `Handoff.markDeliveredToPlanner()` (which now requires provider
-    // evidence and throws without it) and it must not emit `planner.notified`,
-    // which asserts an external fact that was never established.
-    //
-    // The Handoff is left exactly as it was found. `ready` truthfully means "the
-    // result exists and delivery is intended", so no durable data is rewritten
-    // and no external claim is manufactured.
+    const assignment = await this.repos.assignments.findById(handoff.assignmentId);
+    if (!assignment) throw new RelayDomainError(`Assignment ${handoff.assignmentId} not found`, 'NOT_FOUND');
+
+    const pair = await this.repos.pairs.findById(assignment.pairId);
+    if (pair && pair.plannerSessionId) {
+      const plannerSession = await this.repos.runtimes.findById(pair.plannerSessionId);
+      if (plannerSession && plannerSession.externalSessionId) {
+        try {
+          const provider = this.getProvider(plannerSession.providerType);
+          const deliveryResult = await provider.deliverInstruction({
+            runtimeSessionId: plannerSession.id,
+            externalSessionId: plannerSession.externalSessionId,
+            instructionText: `Handoff result for assignment: ${handoff.resultSummary}`,
+            idempotencyKey: `planner_delivery_${handoff.id}_${Date.now()}`,
+          });
+
+          if (deliveryResult.outcome === 'delivered' && deliveryResult.evidence) {
+            handoff.markDeliveredToPlanner(deliveryResult.evidence);
+            await this.repos.handoffs.save(handoff);
+
+            await this.emitEvent('handoff', handoff.id, 'planner.delivery.confirmed', {
+              actor: 'engine',
+              previousState: 'ready',
+              newState: 'delivered',
+              details: {
+                outcome: 'externally_confirmed',
+                externalContactAttempted: true,
+                externalSessionId: plannerSession.externalSessionId,
+                evidenceId: deliveryResult.evidence.id,
+              },
+            });
+
+            return {
+              handoff,
+              outcome: 'externally_confirmed',
+              evidence: deliveryResult.evidence,
+              externalContactAttempted: true,
+            };
+          } else {
+            const reason = `Planner delivery transport attempted but failed or was ambiguous: ${deliveryResult.reason || deliveryResult.outcome}`;
+            await this.emitEvent('handoff', handoff.id, 'planner.delivery.unverified', {
+              actor: 'engine',
+              previousState: handoff.status,
+              newState: handoff.status,
+              details: { outcome: 'unverified', externalContactAttempted: true, reason },
+            });
+            return {
+              handoff,
+              outcome: 'unverified',
+              reason,
+              externalContactAttempted: true,
+            };
+          }
+        } catch (err: any) {
+          const reason = `Planner delivery transport encountered error: ${err?.message || String(err)}`;
+          await this.emitEvent('handoff', handoff.id, 'planner.delivery.unverified', {
+            actor: 'engine',
+            previousState: handoff.status,
+            newState: handoff.status,
+            details: { outcome: 'unverified', externalContactAttempted: true, reason },
+          });
+          return {
+            handoff,
+            outcome: 'unverified',
+            reason,
+            externalContactAttempted: false,
+          };
+        }
+      }
+    }
+
     const attempt: PlannerDeliveryAttempt = {
       handoff,
       outcome: 'unverified',
       reason:
-        'Exact Planner conversation transport does not exist. No provider capability delivers into a ' +
-        'specific conversation, so no external effect can be attempted or confirmed (DESIGN_FREEZE ' +
-        '§9.4/§9.4.1; exact transport is S11).',
+        'Exact Planner conversation transport requires a bound Planner RuntimeSession with an authoritative external session ID (`externalSessionId`). None found for this handoff pair.',
       externalContactAttempted: false,
     };
 
     await this.emitEvent('handoff', handoff.id, 'planner.delivery.unverified', {
       actor: 'engine',
       previousState: handoff.status,
-      // Unchanged: this operation does not advance the handoff.
       newState: handoff.status,
       details: {
         outcome: attempt.outcome,
