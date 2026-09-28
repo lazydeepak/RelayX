@@ -56,6 +56,8 @@ export const RELAY_IPC_CHANNELS = {
   ENUMERATE_WORKER_CHOICES: 'relay:enumerate-worker-choices',
   ADOPT_OPENCODE_SESSION: 'relay:adopt-opencode-session',
   CREATE_OPENCODE_WORKER_SESSION: 'relay:create-opencode-worker-session',
+  CREATE_CHATGPT_PLANNER_SESSION: 'relay:create-chatgpt-planner-session',
+  PROVISION_PAIR_WITH_NEW_SESSIONS: 'relay:provision-pair-with-new-sessions',
   FINALIZE_PROJECT_SETUP: 'relay:finalize-project-setup',
 } as const;
 

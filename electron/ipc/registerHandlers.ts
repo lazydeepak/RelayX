@@ -140,6 +140,12 @@ export function registerRelayIpcHandlers(service: RelayApiService): void {
   ipcMain.handle(RELAY_IPC_CHANNELS.CREATE_OPENCODE_WORKER_SESSION, (_event, projectId, name) =>
     service.createOpenCodeWorkerSession(projectId, name),
   );
+  ipcMain.handle(RELAY_IPC_CHANNELS.CREATE_CHATGPT_PLANNER_SESSION, (_event, projectId, name) =>
+    service.createChatGPTPlannerSession(projectId, name),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.PROVISION_PAIR_WITH_NEW_SESSIONS, (_event, projectId, pairName, options) =>
+    service.provisionPairWithNewSessions(projectId, pairName, options),
+  );
   ipcMain.handle(RELAY_IPC_CHANNELS.FINALIZE_PROJECT_SETUP, (_event, setup) =>
     service.finalizeProjectSetup(setup),
   );

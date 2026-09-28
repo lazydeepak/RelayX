@@ -116,6 +116,21 @@ export interface OpenCodeWorkerSessionCreationResult {
   error?: string;
 }
 
+export interface ChatGPTPlannerSessionCreationResult {
+  conversationId: string;
+  conversationUrl: string;
+  adopted: boolean;
+  runtime?: UIRuntimeSession;
+  partial?: boolean;
+  error?: string;
+}
+
+export interface ProvisionPairWithNewSessionsResult {
+  pair: UIPair;
+  plannerRuntime: UIRuntimeSession;
+  workerRuntime: UIRuntimeSession;
+}
+
 export interface IRelayApi {
   getAppStatus(): Promise<AppStatus>;
   getDashboardState(): Promise<DashboardState>;
@@ -237,6 +252,12 @@ export interface IRelayApi {
   enumerateWorkerChoices(projectId: string): Promise<WorkerChoiceList>;
   adoptOpenCodeSession(projectId: string, sessionId: string, name?: string): Promise<UIRuntimeSession>;
   createOpenCodeWorkerSession(projectId: string, name?: string): Promise<OpenCodeWorkerSessionCreationResult>;
+  createChatGPTPlannerSession(projectId: string, name?: string): Promise<ChatGPTPlannerSessionCreationResult>;
+  provisionPairWithNewSessions(
+    projectId: string,
+    pairName: string,
+    options?: { plannerName?: string; workerName?: string },
+  ): Promise<ProvisionPairWithNewSessionsResult>;
   finalizeProjectSetup(setup: {
     name: string;
     description: string;

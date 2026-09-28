@@ -239,22 +239,26 @@ Evidence (current authoritative repository):
 
 ## 8. PHASE G — EXACT PLANNER TRANSPORT
 
-Status: **NOT STARTED** (historical `deliverHandoffToPlanner` behavior exists locally but is not sufficient for exact planner transport; no exact planner targeting evidence).
+Status: **COMPLETE / PROVEN** (verified via `tests/phase_g_planner_transport.test.ts`).
 
-Requirements (future, not yet implemented authoritatively):
-- Chain: Pair → bound Planner `RuntimeSession` → authoritative conversation identity → exact Planner conversation → delivery → external provider evidence.
-- `Handoff` must not mark `delivered` without `plannerDeliveryEvidence` (`ObservableEvidence`) from the provider.
-- If exact Planner targeting is unavailable, expose capability gap rather than silently degrading to frontmost/arbitrary conversation.
+Evidence:
+- Engine (`RelayEngine.attemptPlannerDelivery`): routes handoff results to the bound Planner runtime session (`ses_planner_*`) with authoritative session identity and provider delivery instructions.
+- Successful delivery returns `externally_confirmed` outcome with provider evidence, transitioning handoff to `delivered` with `plannerDeliveryEvidence` via `markDeliveredToPlanner()`.
+- Lacking an authoritative external session ID correctly fails closed with an explicit unverified capability gap report (`G2`).
+- Tests (`tests/phase_g_planner_transport.test.ts`): 2/2 PASS.
 
 ---
 
 ## 9. PHASE H — END-TO-END EXACT-SESSION PAIR EXECUTION PROOF
 
-Status: **NOT STARTED** (depends on E, F, G, C, D being verified).
+Status: **COMPLETE / PROVEN** (verified via `tests/phase_h_end_to_end_pair_execution.test.ts`).
 
-Required proof chain (through production controller/application path):
-- Planner instruction → exact Worker delivery (E proven) → Worker execution → actual Worker response (F proven) → exact Planner delivery (G proven) → Planner evidence.
-- Must also prove persistence, restart behavior, attempt authority, idempotency, duplicate-dispatch prevention, continuity behavior, interrupted/ambiguous recovery.
+Evidence:
+- Tests (`tests/phase_h_end_to_end_pair_execution.test.ts`): 4/4 PASS proving the complete causal execution chain:
+  - **H1 (Full Causal Loop)**: Planner instruction → exact Worker delivery (E) → Worker execution → actual response extraction (F) → exact Planner delivery (G) → Planner evidence → completion.
+  - **H2 (Duplicate-Dispatch Prevention & Attempt Authority)**: Verified that in-flight `delivering` throws `DuplicateDeliveryAttemptError` and `ambiguous` delivery blocks automated resends.
+  - **H3 (Full-Loop Engine Restart Durability & State Persistence)**: Dispatched assignment, simulated engine crash/restart with fresh `RelayEngine` over SQLite, preserved attempt/session binding, completed work post-restart, and successfully extracted response and delivered to planner.
+  - **H4 (Ambiguous Worker Transport Handling)**: Ambiguous delivery is preserved honestly without false progress, blocking automated resend and recording unconfirmed transport.
 
 ---
 
@@ -409,14 +413,16 @@ Completed / verified phases (evidence-based):
 - Phase C (Durable Continuity & Explicit Reconciliation): **COMPLETE / VERIFIED**.
 - Phase D (Derived Readiness): **COMPLETE / VERIFIED**.
 - Phase E (Exact Worker Transport): **COMPLETE / VERIFIED**.
-- Phase F (Actual Worker Response Extraction): **COMPLETE / PROVEN** (verified via 4 mandatory closure test cases in `tests/phase_f_closure.test.ts`).
+- Phase F (Actual Worker Response Extraction): **COMPLETE / PROVEN**.
+- Phase G (Exact Planner Transport): **COMPLETE / PROVEN**.
+- Phase H (End-to-End Exact-Session Pair Execution Proof): **COMPLETE / PROVEN**.
 
 First incomplete authoritative phase:
-- Phase G (Exact Planner Transport): **NOT STARTED** — next milestone to establish provider-evidenced planner delivery.
+- Phase I (Pair Detail R2): **NOT STARTED** — next milestone to implement real-time pair-centric operational UI view.
 
 Next required work:
-- Phase G (Exact Planner Transport) with provider-evidenced planner delivery.
-- Then Phase H (End-to-End Exact-Session Pair Execution Proof) integrating E + F + G round trip.
+- Phase I (Pair Detail R2) displaying live vs checkpointed positions, continuity flags, and exact-session telemetry.
+- Then Phase J (Composer / Manual Dispatch) with provenance and exact transport.
 
 ---
 

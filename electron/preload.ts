@@ -116,6 +116,10 @@ const relayApi: IRelayApi = {
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.ADOPT_OPENCODE_SESSION, projectId, sessionId, name),
   createOpenCodeWorkerSession: (projectId: string, name?: string) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.CREATE_OPENCODE_WORKER_SESSION, projectId, name),
+  createChatGPTPlannerSession: (projectId: string, name?: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.CREATE_CHATGPT_PLANNER_SESSION, projectId, name),
+  provisionPairWithNewSessions: (projectId: string, pairName: string, options?: any) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.PROVISION_PAIR_WITH_NEW_SESSIONS, projectId, pairName, options),
   finalizeProjectSetup: (setup: any) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.FINALIZE_PROJECT_SETUP, setup),
 };

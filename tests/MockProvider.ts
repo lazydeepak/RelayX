@@ -13,7 +13,7 @@ export class MockProvider implements IRuntimeProvider {
   public composerVisible = true;
   public isWorking = false;
   public isComplete = false;
-  public responseSummary = 'Task completed successfully.';
+  public responseSummary: string | undefined = 'Task completed successfully.';
   public deliveryOutcome: 'delivered' | 'ambiguous' | 'failed' = 'delivered';
   public deliveryFailureReason?: string;
 

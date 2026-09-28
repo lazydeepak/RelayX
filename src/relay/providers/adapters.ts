@@ -1429,6 +1429,13 @@ export function parseActiveTabReadResult(raw: string): {
  * ChatGPT macOS Application Provider.
  * Status: Partial (macOS process and window discovery via System Events).
  */
+export const RELAYX_PLANNER_BOOTSTRAP_PROMPT =
+  '[RelayX Provisioning] Fresh planner session initialized for RelayX project orchestration. Awaiting initial assignment.';
+// NOTE: This is a normal visible user message created by RelayX browser automation
+// for the planner provisioning bootstrap user turn. It is not a system-role message or system instruction.
+// Later conversation synchronization and response correlation treats this as the initial user turn
+// and excludes bootstrap initialization turns from real assignment execution records.
+
 export class ChatGPTProvider extends BaseMacOSProvider {
   readonly providerType: ProviderType = 'chatgpt';
   readonly integrationStatus: ProviderIntegrationStatus = 'partial';
@@ -1687,6 +1694,159 @@ export class ChatGPTProvider extends BaseMacOSProvider {
       return `https://chatgpt.com/g/${segment}/project`;
     }
     return null;
+  }
+
+  /**
+   * Causes the configured Planner provider to create/open a genuinely fresh conversation
+   * under the project, and obtains the authoritative external identity (conversation ID and URL).
+   *
+   * Fails closed: if the provider cannot prove which conversation was created, it returns
+   * an error rather than inventing an ID or guessing.
+   */
+  public async createPlannerSession(
+    projectUrlOrRef: string,
+    name?: string,
+    options?: { knownConversationIds?: Set<string> | string[] },
+  ): Promise<{
+    conversationId: string;
+    conversationUrl: string;
+    projectSlug: string;
+    error?: string;
+  }> {
+    const slug = this.extractChatGPTProjectId(projectUrlOrRef);
+    if (!slug) {
+      return {
+        conversationId: '',
+        conversationUrl: '',
+        projectSlug: '',
+        error: 'Invalid or missing ChatGPT project URL to scope the new conversation',
+      };
+    }
+
+    if (typeof process === 'undefined' || process.platform !== 'darwin') {
+      return {
+        conversationId: '',
+        conversationUrl: '',
+        projectSlug: slug,
+        error: 'macOS automation required for ChatGPT conversation creation',
+      };
+    }
+
+    const knownSet = new Set(
+      options?.knownConversationIds
+        ? Array.from(options.knownConversationIds)
+        : [],
+    );
+
+    // 1. Activate Chrome
+    this.runAppleScript('tell application "Google Chrome" to activate', 1500);
+
+    // 2. Open dedicated tab for the project's fresh chat composer
+    const targetUrl = `https://chatgpt.com/g/${slug}`;
+    const openScript = `
+      tell application "Google Chrome"
+        if (count of windows) = 0 then
+          make new window
+        end if
+        tell front window
+          make new tab with properties {URL:"${targetUrl}"}
+        end tell
+        return "opened"
+      end tell
+    `;
+    const openRes = this.runAppleScript(openScript, 4000);
+    if (!openRes.success) {
+      return {
+        conversationId: '',
+        conversationUrl: '',
+        projectSlug: slug,
+        error: `Failed to open ChatGPT project tab: ${openRes.error || 'unknown error'}`,
+      };
+    }
+
+    // Wait for the composer DOM to load
+    await this.sleep(1200);
+
+    // Check if the page spontaneously materialized a /c/<id> without a message
+    let url = await this.readTabUrl();
+    let parsed = url ? parseChatGPTConversationUrl(url) : null;
+
+    if (!parsed?.conversationId) {
+      // 3. Minimum safe bootstrap trigger:
+      // ChatGPT requires an initial submitted message before OpenAI allocates a new conversation ID
+      // and navigates the browser URL to /c/<conversationId>.
+      // Visible side effect: Submits a single explicit bootstrap prompt to initialize the thread.
+      const promptJs = `(() => {
+        const textarea = document.querySelector('#prompt-textarea') || document.querySelector('div[contenteditable="true"]');
+        if (!textarea) return 'NO_TEXTAREA';
+        textarea.focus();
+        if (textarea.tagName === 'TEXTAREA') {
+          textarea.value = '${escapeAppleScriptStringLiteral(RELAYX_PLANNER_BOOTSTRAP_PROMPT)}';
+        } else {
+          textarea.innerText = '${escapeAppleScriptStringLiteral(RELAYX_PLANNER_BOOTSTRAP_PROMPT)}';
+        }
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        const sendBtn = document.querySelector('button[data-testid="send-button"]') ||
+                        document.querySelector('button[aria-label="Send prompt"]') ||
+                        document.querySelector('button[aria-label*="Send"]');
+        if (sendBtn && !sendBtn.disabled) {
+          sendBtn.click();
+          return 'CLICKED_SEND';
+        }
+        return 'PROMPT_ENTERED';
+      })()`;
+
+      const jsRes = this.executeTabJavaScript(promptJs, 3000);
+      if (jsRes.success && jsRes.output === 'PROMPT_ENTERED') {
+        // Trigger Return key via System Events to submit prompt
+        this.runAppleScript(`
+          tell application "System Events"
+            tell application process "Google Chrome"
+              key code 36 -- Return
+            end tell
+          end tell
+        `, 2000);
+      }
+
+      // 4. Poll active tab URL for authoritative /c/<conversationId> navigation
+      for (let poll = 0; poll < 12; poll++) {
+        await this.sleep(600);
+        url = await this.readTabUrl();
+        if (url) {
+          parsed = parseChatGPTConversationUrl(url);
+          if (parsed?.conversationId) {
+            break;
+          }
+        }
+      }
+    }
+
+    if (parsed?.conversationId && url) {
+      // Uniqueness check: verify this conversation ID was not already known/discovered before creation
+      if (knownSet.has(parsed.conversationId)) {
+        return {
+          conversationId: '',
+          conversationUrl: '',
+          projectSlug: slug,
+          error: `Provider observed existing conversation '${parsed.conversationId}' instead of creating a fresh conversation`,
+        };
+      }
+
+      return {
+        conversationId: parsed.conversationId,
+        conversationUrl: url,
+        projectSlug: parsed.projectId,
+      };
+    }
+
+    // If ChatGPT does not allocate a /c/<id> or if verification timed out,
+    // fail closed: do NOT invent an ID, do NOT assume frontmost tab without evidence.
+    return {
+      conversationId: '',
+      conversationUrl: '',
+      projectSlug: slug,
+      error: 'Could not authoritatively verify newly created ChatGPT conversation: no conversation ID produced by provider after bootstrap trigger',
+    };
   }
 
   /**

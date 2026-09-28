@@ -191,6 +191,14 @@ export class MemoryRuntimeSessionRepository implements IRuntimeSessionRepository
   }
 
   async save(session: RuntimeSession): Promise<void> {
+    if (session.externalSessionId) {
+      const existing = await this.findByExternalSessionId(session.providerType, session.externalSessionId);
+      if (existing && existing.id !== session.id) {
+        throw new Error(
+          `UNIQUE constraint failed: runtime_sessions(provider_type, external_session_id) for ${session.providerType}:${session.externalSessionId}`,
+        );
+      }
+    }
     this.items.set(session.id, session);
   }
 

@@ -134,8 +134,7 @@ export type PlannerDeliveryAttempt =
       handoff: Handoff;
       outcome: 'unverified';
       reason: string;
-      /** Always false in S1: no external contact is possible at all. */
-      externalContactAttempted: false;
+      externalContactAttempted: boolean;
     }
   | {
       handoff: Handoff;

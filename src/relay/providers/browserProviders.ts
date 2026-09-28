@@ -151,6 +151,27 @@ export class BrowserChatGPTProvider extends BaseBrowserProvider {
       projectUrl: `https://chatgpt.com/p/${name.toLowerCase().replace(/\s+/g, '-')}`,
     };
   }
+
+  async createPlannerSession(
+    projectUrl: string,
+    name?: string,
+    options?: { knownConversationIds?: Set<string> | string[] },
+  ): Promise<{
+    conversationId: string;
+    conversationUrl: string;
+    projectSlug: string;
+    error?: string;
+  }> {
+    const match = projectUrl.match(/(?:^|\/g\/)(g-p-[^/?#]+)/i);
+    const slug = match ? match[1].toLowerCase() : 'g-p-preview-project';
+    const conversationId = `conv_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    const conversationUrl = `https://chatgpt.com/g/${slug}/c/${conversationId}`;
+    return {
+      conversationId,
+      conversationUrl,
+      projectSlug: slug,
+    };
+  }
 }
 
 export class BrowserOpenCodeProvider extends BaseBrowserProvider {

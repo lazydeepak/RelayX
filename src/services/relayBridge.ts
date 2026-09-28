@@ -414,6 +414,24 @@ export const relayBridge: IRelayApi = {
     return getLocalFallbackService().createOpenCodeWorkerSession(projectId, name);
   },
 
+  createChatGPTPlannerSession: async (projectId: string, name?: string) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.createChatGPTPlannerSession(projectId, name);
+    }
+    return getLocalFallbackService().createChatGPTPlannerSession(projectId, name);
+  },
+
+  provisionPairWithNewSessions: async (
+    projectId: string,
+    pairName: string,
+    options?: { plannerName?: string; workerName?: string },
+  ) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.provisionPairWithNewSessions(projectId, pairName, options);
+    }
+    return getLocalFallbackService().provisionPairWithNewSessions(projectId, pairName, options);
+  },
+
   enumerateChatGPTConversations: async (projectId: string) => {
     if (typeof window !== 'undefined' && window.relayApi) {
       return window.relayApi.enumerateChatGPTConversations(projectId);

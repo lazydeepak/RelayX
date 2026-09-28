@@ -14,6 +14,8 @@ import {
   ChatGPTConversationChoice,
   ChatGPTConversationChoiceList,
   OpenCodeWorkerSessionCreationResult,
+  ChatGPTPlannerSessionCreationResult,
+  ProvisionPairWithNewSessionsResult,
   WorkerChoice,
   WorkerChoiceList,
 } from '../../types/relayApi.ts';
@@ -1616,6 +1618,214 @@ export class RelayApiService implements IRelayApi {
         error: adoptErr?.message ?? String(adoptErr),
       };
     }
+  }
+
+  public async createChatGPTPlannerSession(
+    projectId: string,
+    name?: string,
+  ): Promise<ChatGPTPlannerSessionCreationResult> {
+    const proj = await this.db.projects.findById(projectId as ProjectId);
+    if (!proj) {
+      throw new Error(`Project not found: ${projectId}`);
+    }
+    const plannerProjectUrl = proj.plannerProjectUrl;
+    if (!plannerProjectUrl) {
+      return {
+        conversationId: '',
+        conversationUrl: '',
+        adopted: false,
+        partial: true,
+        error: 'Project has no ChatGPT planner URL configured to scope the new conversation',
+      };
+    }
+
+    let provider: any = null;
+    try {
+      provider = this.engine.getProvider('chatgpt') as any;
+    } catch {
+      provider = null;
+    }
+    if (!provider || typeof provider.createPlannerSession !== 'function') {
+      return {
+        conversationId: '',
+        conversationUrl: '',
+        adopted: false,
+        partial: true,
+        error: 'ChatGPT provider does not support authoritative planner session creation',
+      };
+    }
+
+    // Capture pre-existing known conversations for the project to ensure the created conversation is genuinely fresh
+    let knownConversationIds: Set<string> = new Set();
+    try {
+      const known = await this.enumerateChatGPTConversations(projectId);
+      knownConversationIds = new Set((known.conversations ?? []).map((c) => c.conversationId));
+    } catch {
+      // Best-effort enumeration before creation
+    }
+
+    let creationRes: { conversationId: string; conversationUrl: string; projectSlug: string; error?: string };
+    try {
+      creationRes = await provider.createPlannerSession(plannerProjectUrl, name, {
+        knownConversationIds,
+      });
+    } catch (err: any) {
+      return {
+        conversationId: '',
+        conversationUrl: '',
+        adopted: false,
+        partial: true,
+        error: err?.message ?? String(err),
+      };
+    }
+
+    if (!creationRes.conversationId || !creationRes.conversationUrl) {
+      return {
+        conversationId: creationRes.conversationId ?? '',
+        conversationUrl: creationRes.conversationUrl ?? '',
+        adopted: false,
+        partial: true,
+        error: creationRes.error ?? 'ChatGPT provider did not return an authoritative conversation identity',
+      };
+    }
+
+    // Verify the returned URL strictly matches project conversation shape
+    const parsed = parseChatGPTConversationUrl(creationRes.conversationUrl);
+    if (!parsed || !parsed.conversationId || parsed.conversationId !== creationRes.conversationId) {
+      return {
+        conversationId: creationRes.conversationId,
+        conversationUrl: creationRes.conversationUrl,
+        adopted: false,
+        partial: true,
+        error: 'Provider returned an unverified or malformed ChatGPT conversation URL',
+      };
+    }
+
+    // Uniqueness proof: the conversation ID must not have existed prior to this creation operation
+    if (knownConversationIds.has(creationRes.conversationId)) {
+      return {
+        conversationId: creationRes.conversationId,
+        conversationUrl: creationRes.conversationUrl,
+        adopted: false,
+        partial: true,
+        error: `Created conversation '${creationRes.conversationId}' was already observed before creation; fresh creation failed`,
+      };
+    }
+
+    // Verify project slug matches project's plannerProjectUrl
+    const normProjSlug = normalizeChatProjectSlug(plannerProjectUrl);
+    const normUrlSlug = normalizeChatProjectSlug(parsed.projectId);
+    if (normProjSlug && normUrlSlug && normProjSlug !== normUrlSlug) {
+      return {
+        conversationId: creationRes.conversationId,
+        conversationUrl: creationRes.conversationUrl,
+        adopted: false,
+        partial: true,
+        error: `Created conversation project '${normUrlSlug}' does not match project ChatGPT project '${normProjSlug}'`,
+      };
+    }
+
+    // Ensure this conversation ID is not already bound to another runtime
+    const existing = await this.db.runtimes.findByExternalSessionId('chatgpt', creationRes.conversationId);
+    if (existing) {
+      return {
+        conversationId: creationRes.conversationId,
+        conversationUrl: creationRes.conversationUrl,
+        adopted: false,
+        partial: true,
+        error: `ChatGPT conversation '${creationRes.conversationId}' is already bound to runtime '${existing.name}' (${existing.id})`,
+      };
+    }
+
+    // Adopt the newly created authoritative session
+    try {
+      const sessionName = name?.trim() || `ChatGPT Planner (${creationRes.conversationId.slice(0, 8)})`;
+      const runtime = RuntimeSession.create('chatgpt', sessionName);
+      const canonicalProjectUrl =
+        (typeof provider.canonicalizeChatGPTProjectUrl === 'function'
+          ? provider.canonicalizeChatGPTProjectUrl(creationRes.conversationUrl)
+          : null) ?? `https://chatgpt.com/g/${parsed.projectId}/project`;
+
+      runtime.updateExternalIdentity(creationRes.conversationId, canonicalProjectUrl);
+      await this.db.runtimes.save(runtime);
+
+      // Record authoritative adoption evidence
+      await this.recordAssociationEvidence(
+        runtime.id,
+        proj.id as ProjectId,
+        creationRes.conversationId,
+        'chatgpt',
+        'adoption',
+      );
+
+      const list = await this.listRuntimeSessions();
+      const ui = list.find((s) => s.id === runtime.id);
+      if (!ui) throw new Error('Failed to retrieve adopted planner runtime');
+
+      return {
+        conversationId: creationRes.conversationId,
+        conversationUrl: creationRes.conversationUrl,
+        adopted: true,
+        runtime: ui,
+      };
+    } catch (adoptErr: any) {
+      return {
+        conversationId: creationRes.conversationId,
+        conversationUrl: creationRes.conversationUrl,
+        adopted: false,
+        partial: true,
+        error: adoptErr?.message ?? String(adoptErr),
+      };
+    }
+  }
+
+  public async provisionPairWithNewSessions(
+    projectId: string,
+    pairName: string,
+    options?: { plannerName?: string; workerName?: string },
+  ): Promise<ProvisionPairWithNewSessionsResult> {
+    if (!pairName.trim()) {
+      throw new Error('Pair name is required');
+    }
+    const proj = await this.db.projects.findById(projectId as ProjectId);
+    if (!proj) {
+      throw new Error(`Project not found: ${projectId}`);
+    }
+
+    // Step A: Create and prove Planner session
+    const plannerRes = await this.createChatGPTPlannerSession(projectId, options?.plannerName);
+    if (!plannerRes.adopted || !plannerRes.runtime || !plannerRes.conversationId) {
+      throw new Error(plannerRes.error || 'Failed to create and verify new Planner session');
+    }
+
+    // Step B: Create and prove Worker session
+    const workerRes = await this.createOpenCodeWorkerSession(projectId, options?.workerName);
+    if (!workerRes.adopted || !workerRes.runtime || !workerRes.sessionId) {
+      // NOTE: Planner session was created and adopted above. Because Worker creation failed,
+      // we preserve the Planner session as an adoptable, unpaired session in RelayX DB.
+      throw new Error(
+        `Failed to create worker session: ${workerRes.error || 'unknown worker error'}. The created planner session (${plannerRes.runtime.id}) was preserved for adoption.`,
+      );
+    }
+
+    // Step C: Persist/adopt both authoritative sessions (already adopted above)
+    const plannerRuntime = plannerRes.runtime;
+    const workerRuntime = workerRes.runtime;
+
+    // Step D & E: Create Pair and bind exact sessions
+    const pair = await this.createPair(
+      projectId,
+      pairName,
+      plannerRuntime.id,
+      workerRuntime.id,
+      plannerRes.conversationUrl,
+    );
+
+    return {
+      pair,
+      plannerRuntime,
+      workerRuntime,
+    };
   }
 
   public async discoverChatGPTPlanner(name: string): Promise<{
