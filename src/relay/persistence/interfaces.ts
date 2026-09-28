@@ -265,6 +265,36 @@ export interface IVerificationResultRepository {
   save(result: VerificationResultRecord): Promise<void>;
 }
 
+/**
+ * One explicit operator/provider setting.
+ *
+ * `setBy` and `note` are part of the record, not decoration: a setting that changes how an
+ * external system is contacted must always be attributable to a decision.
+ */
+export interface ProviderSetting {
+  key: string;
+  value: string;
+  note: string | null;
+  /** Who established the value: an operator identity, or `recovery` / `engine`. */
+  setBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * Operator/provider settings.
+ *
+ * There is intentionally no defaulting read. An absent key is a fact ("nobody chose this"),
+ * not an invitation to substitute a value, and every caller states what absence means.
+ */
+export interface IProviderSettingsRepository {
+  get(key: string): Promise<ProviderSetting | null>;
+  list(): Promise<ProviderSetting[]>;
+  save(setting: ProviderSetting): Promise<void>;
+  /** Clear a setting. "Unset" is a real state and must be representable. */
+  delete(key: string): Promise<void>;
+}
+
 export interface IRelayRepositories {
   projects: IProjectRepository;
   pairs: IPairRepository;
@@ -282,5 +312,6 @@ export interface IRelayRepositories {
   workUnits: IWorkUnitRepository;
   contractRevisions: IContractRevisionRepository;
   verificationResults: IVerificationResultRepository;
+  providerSettings: IProviderSettingsRepository;
   runInTransaction<T>(work: () => Promise<T>): Promise<T>;
 }

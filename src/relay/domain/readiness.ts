@@ -92,6 +92,20 @@ export function evaluatePairReadiness(
     };
   }
 
+  const plannerExistence = plannerIdentity?.existenceState ?? 'unknown';
+  const workerExistence = workerIdentity?.existenceState ?? 'unknown';
+
+  if (plannerExistence === 'absent' || workerExistence === 'absent') {
+    return {
+      state: 'NOT_READY',
+      reasons: ['One or both bound session identities are absent in the authoritative provider store (e.g., session deleted, archived, or missing from provider scope).'],
+      operationalState,
+      continuityState: continuity?.state ?? null,
+      hasBothSidesBound: true,
+      identityVerified: false,
+    };
+  }
+
   const continuityState = continuity?.state ?? 'UNKNOWN';
 
   if (continuityState === 'UNKNOWN') {

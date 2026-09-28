@@ -51,6 +51,8 @@ import {
   IPlanFirstRunRepository,
   IWorkUnitRepository,
   IVerificationResultRepository,
+  IProviderSettingsRepository,
+  ProviderSetting,
   AssociationEvidenceCriteria,
 } from '../interfaces.ts';
 
@@ -804,6 +806,47 @@ export class MemoryWorkUnitRepository implements IWorkUnitRepository {
   }
 }
 
+/**
+ * In-memory twin of `SqliteProviderSettingsRepository`.
+ *
+ * Same contract, including the absence of any defaulting read: an unset key returns `null`,
+ * because "nobody chose this" is a fact the caller has to handle, not an empty string to
+ * paper over.
+ */
+export class MemoryProviderSettingsRepository implements IProviderSettingsRepository {
+  private readonly items = new Map<string, ProviderSetting>();
+
+  snapshotState(): MemoryRepoSnapshot<ProviderSetting> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<ProviderSetting>): void {
+    restoreMapItems(this.items, snapshot);
+  }
+
+  async get(key: string): Promise<ProviderSetting | null> {
+    return this.items.get(key) ?? null;
+  }
+
+  async list(): Promise<ProviderSetting[]> {
+    return [...this.items.values()].sort((a, b) => a.key.localeCompare(b.key));
+  }
+
+  async save(setting: ProviderSetting): Promise<void> {
+    const existing = this.items.get(setting.key);
+    this.items.set(setting.key, {
+      ...setting,
+      // `created_at` is preserved across updates so the record shows when the setting was
+      // FIRST established, not merely when it was last touched.
+      createdAt: existing?.createdAt ?? setting.createdAt,
+    });
+  }
+
+  async delete(key: string): Promise<void> {
+    this.items.delete(key);
+  }
+}
+
 export class MemoryVerificationResultRepository implements IVerificationResultRepository {
   private readonly items = new Map<string, VerificationResult>();
   private readonly byAttempt = new Map<string, string>();
@@ -857,6 +900,7 @@ export class MemoryRelayDatabase implements IRelayRepositories {
   public readonly workUnits: MemoryWorkUnitRepository;
   public readonly contractRevisions: MemoryContractRevisionRepository;
   public readonly verificationResults: MemoryVerificationResultRepository;
+  public readonly providerSettings: MemoryProviderSettingsRepository;
 
   constructor() {
     this.projects = new MemoryProjectRepository();
@@ -875,6 +919,7 @@ export class MemoryRelayDatabase implements IRelayRepositories {
     this.workUnits = new MemoryWorkUnitRepository();
     this.contractRevisions = new MemoryContractRevisionRepository();
     this.verificationResults = new MemoryVerificationResultRepository();
+    this.providerSettings = new MemoryProviderSettingsRepository();
   }
 
   /**
@@ -903,6 +948,7 @@ export class MemoryRelayDatabase implements IRelayRepositories {
       this.workUnits,
       this.contractRevisions,
       this.verificationResults,
+      this.providerSettings,
     ];
     const snapshots = repos.map((repo) => repo.snapshotState());
     try {

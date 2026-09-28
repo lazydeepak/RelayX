@@ -1001,6 +1001,118 @@ export class RelayApiService implements IRelayApi {
     return { success: true };
   }
 
+  /* --- Recovery & reconciliation operations (no SQL required) --- */
+
+  /**
+   * Reconcile ONE Delivery against its exact provider session, through the domain.
+   *
+   * This exists so that "what really happened to that delivery" is an application operation
+   * rather than a hand-written `UPDATE`. Before, correcting a mis-recorded delivery meant
+   * editing the database directly, which skipped the transition rules, emitted no event,
+   * and left no record of who decided or why. The decision is now made by the engine, with
+   * the transcript evidence attached, and it is reported rather than silently applied.
+   *
+   * `resendPermitted` is returned so a caller cannot act on the classification without seeing
+   * it. It is `true` only when the exact session was READ SUCCESSFULLY and shown not to hold
+   * the instruction — the single case in which a retry is defensible.
+   */
+  public async reconcileDeliveryAgainstExactSession(
+    deliveryId: string,
+  ): Promise<{
+    deliveryId: string;
+    status: string;
+    attemptStatus: string | null;
+    classification: string;
+    workerExecution: string;
+    matchingUserTurnId: string | null;
+    changes: string[];
+    resendPermitted: boolean;
+    reason: string;
+  }> {
+    const result = await this.engine.reconcileDeliveryAgainstExactSession(deliveryId as DeliveryId);
+    const attempt = await this.db.attempts.findById(result.delivery.attemptId);
+    return {
+      deliveryId: result.delivery.id,
+      status: result.delivery.status,
+      attemptStatus: attempt?.status ?? null,
+      classification: result.reconciliation.classification,
+      workerExecution: result.reconciliation.workerExecution,
+      matchingUserTurnId: result.reconciliation.matchingUserTurn?.messageId ?? null,
+      changes: result.changes,
+      resendPermitted: result.resendPermitted,
+      reason: result.reconciliation.reason,
+    };
+  }
+
+  /**
+   * Repair a Pair's execution-slot authority from its own Assignment records.
+   *
+   * Every transition this performs goes through the Assignment lifecycle and emits an event,
+   * so the repair is auditable. It deliberately refuses to guess when several unresolved
+   * Assignments remain: promoting the newest would re-create the exact orphan state this
+   * operation exists to remove.
+   */
+  public async reconcilePairAssignmentAuthority(pairId: string): Promise<{
+    pairId: string;
+    activeAssignmentId: string | null;
+    adoptedAssignmentId: string | null;
+    transitions: Array<{ assignmentId: string; from: string; to: string; reason: string }>;
+    unresolvedCandidates: string[];
+  }> {
+    const result = await this.engine.reconcilePairAssignmentAuthority(pairId as PairId);
+    return {
+      pairId: result.pair.id,
+      activeAssignmentId: result.pair.activeAssignmentId ?? null,
+      adoptedAssignmentId: result.adoptedAssignmentId,
+      transitions: result.transitions,
+      unresolvedCandidates: result.unresolvedCandidates,
+    };
+  }
+
+  /* --- Explicit operator/provider settings --- */
+
+  /**
+   * Read one provider setting, or `null` when unset.
+   *
+   * Unset is reported as `null` rather than as a built-in default. A caller must decide what
+   * absence means and say so, because the difference between "an operator chose this" and
+   * "the product chose this" is exactly what the delivery evidence has to be able to show.
+   */
+  public async getProviderSetting(key: string): Promise<{
+    key: string;
+    value: string;
+    note: string | null;
+    setBy: string;
+    updatedAt: number;
+  } | null> {
+    const setting = await this.engine.getProviderSetting(key);
+    if (!setting) return null;
+    return {
+      key: setting.key,
+      value: setting.value,
+      note: setting.note,
+      setBy: setting.setBy,
+      updatedAt: setting.updatedAt,
+    };
+  }
+
+  public async listProviderSettings(): Promise<Array<{ key: string; value: string; setBy: string }>> {
+    const settings = await this.engine.listProviderSettings();
+    return settings.map((s) => ({ key: s.key, value: s.value, setBy: s.setBy }));
+  }
+
+  /**
+   * Set an explicit provider setting. An empty value CLEARS it, which is also recorded.
+   */
+  public async setProviderSetting(
+    key: string,
+    value: string,
+    opts: { setBy?: string; note?: string } = {},
+  ): Promise<{ key: string; value: string | null }> {
+    const setting = await this.engine.setProviderSetting(key, value, opts);
+    return { key, value: setting?.value ?? null };
+  }
+
   public async deliverHandoff(handoffId: string): Promise<{ success: boolean }> {
     await this.engine.deliverHandoffToPlanner(handoffId as HandoffId);
     return { success: true };

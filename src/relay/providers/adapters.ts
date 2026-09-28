@@ -19,6 +19,8 @@ import {
   RuntimeTargetDescriptor,
   DeliveryInstructionRequest,
   DeliveryInstructionResult,
+  TransportBoundaryRequest,
+  TransportBoundaryResult,
   ProviderSessionConfirmation,
   SideIdentityRequest,
   SideIdentityResolution,
@@ -32,6 +34,12 @@ import {
   type OpenCodeSessionSummary,
   type ServiceDiscoveryFailure,
 } from './opencodeSessionClient.ts';
+import {
+  buildWatermark,
+  reconcileTransportOutcome,
+  type ExactSessionWatermark,
+  type ReconciliationMessage,
+} from './exactSessionReconciliation.ts';
 
 /**
  * S2 observation helpers.
@@ -1431,10 +1439,26 @@ export function parseActiveTabReadResult(raw: string): {
  */
 export const RELAYX_PLANNER_BOOTSTRAP_PROMPT =
   '[RelayX Provisioning] Fresh planner session initialized for RelayX project orchestration. Awaiting initial assignment.';
+
+// Actual production exclusion guard (not just a comment).
+export function isBootstrapProvisioningTurn(text: string): boolean {
+  return typeof text === 'string' && text.includes('[RelayX Provisioning]') && text.includes('Fresh planner session initialized');
+}
+
+export function isExcludedFromAssignmentCorrelation(turnText: string, responseText?: string): boolean {
+  return isBootstrapProvisioningTurn(turnText) || (typeof responseText === 'string' && isBootstrapProvisioningTurn(responseText));
+}
+
 // NOTE: This is a normal visible user message created by RelayX browser automation
 // for the planner provisioning bootstrap user turn. It is not a system-role message or system instruction.
 // Later conversation synchronization and response correlation treats this as the initial user turn
 // and excludes bootstrap initialization turns from real assignment execution records.
+
+/** Stable operation-local Chrome identity for one provisioning attempt. */
+export interface BrowserHandle {
+  windowId: number;
+  tabId: number;
+}
 
 export class ChatGPTProvider extends BaseMacOSProvider {
   readonly providerType: ProviderType = 'chatgpt';
@@ -1703,6 +1727,123 @@ export class ChatGPTProvider extends BaseMacOSProvider {
    * Fails closed: if the provider cannot prove which conversation was created, it returns
    * an error rather than inventing an ID or guessing.
    */
+  /** Creates a dedicated Chrome window + tab, returns stable handle (windowId, tabId). */
+  private openDedicatedWindowAndCaptureId(url: string): BrowserHandle | null {
+    const script = `
+      tell application "Google Chrome"
+        make new window
+        set w to front window
+        set winId to id of w
+        tell w
+          make new tab with properties {URL:"${url}"}
+          delay 0.5
+          set activeTab to active tab
+          set tabId to id of activeTab
+        end tell
+        return "WIN:" & winId & "|TAB:" & tabId
+      end tell
+    `;
+    const res = this.runAppleScript(script, 6000);
+    if (!res.success) return null;
+    const match = res.output.match(/WIN:(\d+)\|TAB:(\d+)/);
+    if (!match) return null;
+    return { windowId: parseInt(match[1], 10), tabId: parseInt(match[2], 10) };
+  }
+
+  /** Reads URL from the exact retained browser handle. Fails if identity lost. */
+  private readHandleUrl(handle: BrowserHandle): string | null {
+    const script = `
+      tell application "Google Chrome"
+        try
+          set t to tab id ${handle.tabId} of window id ${handle.windowId}
+          return URL of t
+        on error
+          return "ERR::TAB_OR_WINDOW_NOT_FOUND"
+        end try
+      end tell
+    `;
+    const res = this.runAppleScript(script, 5000);
+    if (!res.success) return null;
+    const trimmed = (res.output || '').trim();
+    if (trimmed === 'ERR::TAB_OR_WINDOW_NOT_FOUND') return null;
+    return trimmed || null;
+  }
+
+  /** Executes JavaScript on the exact retained tab. */
+  private executeHandleJavaScript(handle: BrowserHandle, javaScript: string, timeoutMs = 3000): { success: boolean; output?: string; error?: string } {
+    const script = `
+      tell application "Google Chrome"
+        try
+          set t to tab id ${handle.tabId} of window id ${handle.windowId}
+          set jsOut to (execute t javascript "${escapeAppleScriptStringLiteral(javaScript)}")
+          return "OK::" & jsOut
+        on error errMsg
+          return "ERR::" & errMsg
+        end try
+      end tell
+    `;
+    const res = this.runAppleScript(script, timeoutMs);
+    if (!res.success) return { success: false, error: res.error };
+    const trimmed = (res.output || '').trim();
+    if (trimmed.startsWith('ERR::')) {
+      return { success: false, output: trimmed, error: trimmed.replace('ERR::', '') };
+    }
+    return { success: true, output: trimmed.replace(/^OK::/, '') };
+  }
+
+  /** Verifies the retained handle is still resolvable in Chrome. */
+  private verifyHandleExists(handle: BrowserHandle): boolean {
+    const script = `
+      tell application "Google Chrome"
+        try
+          set t to tab id ${handle.tabId} of window id ${handle.windowId}
+          return "FOUND"
+        on error
+          return "MISSING"
+        end try
+      end tell
+    `;
+    const res = this.runAppleScript(script, 3000);
+    return res.success && (res.output || '').trim() === 'FOUND';
+  }
+
+  /** Observes that the bootstrap user turn was accepted in the retained tab. */
+  private async observeBootstrapSubmission(
+    handle: BrowserHandle,
+    slug: string,
+    timeoutMs = 3000,
+  ): Promise<{ acknowledged: boolean; reason?: string }> {
+    // Read the exact tab's content or title/state through the handle.
+    const script = `
+      tell application "Google Chrome"
+        try
+          set t to tab id ${handle.tabId} of window id ${handle.windowId}
+          -- Evidence of submission: either user message appears in visible chat or composer state changes.
+          -- We observe the URL transition or visible message content.
+          set pageUrl to URL of t
+          return pageUrl
+        on error
+          return "ERR::TAB_OR_WINDOW_NOT_FOUND"
+        end try
+      end tell
+    `;
+    const res = this.runAppleScript(script, timeoutMs);
+    if (!res.success) {
+      return { acknowledged: false, reason: `Identity lost during observation: ${res.error}` };
+    }
+    const trimmed = (res.output || '').trim();
+    if (trimmed === 'ERR::TAB_OR_WINDOW_NOT_FOUND') {
+      return { acknowledged: false, reason: 'Browser identity lost during bootstrap submission observation' };
+    }
+    // If the URL has moved to /c/<id>, that proves the bootstrap was accepted and materialized.
+    const parsed = trimmed ? parseChatGPTConversationUrl(trimmed) : null;
+    if (parsed?.conversationId) {
+      return { acknowledged: true };
+    }
+    // If URL is still project composer but page hasn't thrown an error, consider partial.
+    return { acknowledged: false, reason: 'Bootstrap submission not acknowledged: no conversation materialization observed' };
+  }
+
   public async createPlannerSession(
     projectUrlOrRef: string,
     name?: string,
@@ -1738,44 +1879,54 @@ export class ChatGPTProvider extends BaseMacOSProvider {
         : [],
     );
 
-    // 1. Activate Chrome
+    // 1. Create a dedicated Chrome window + tab and capture stable identity.
     this.runAppleScript('tell application "Google Chrome" to activate', 1500);
-
-    // 2. Open dedicated tab for the project's fresh chat composer
     const targetUrl = `https://chatgpt.com/g/${slug}`;
-    const openScript = `
-      tell application "Google Chrome"
-        if (count of windows) = 0 then
-          make new window
-        end if
-        tell front window
-          make new tab with properties {URL:"${targetUrl}"}
-        end tell
-        return "opened"
-      end tell
-    `;
-    const openRes = this.runAppleScript(openScript, 4000);
-    if (!openRes.success) {
+    const handle = this.openDedicatedWindowAndCaptureId(targetUrl);
+    if (!handle) {
       return {
         conversationId: '',
         conversationUrl: '',
         projectSlug: slug,
-        error: `Failed to open ChatGPT project tab: ${openRes.error || 'unknown error'}`,
+        error: 'Failed to create dedicated browser window/tab for planner session',
       };
     }
 
-    // Wait for the composer DOM to load
-    await this.sleep(1200);
+    // Verify identity survives before proceeding.
+    if (!this.verifyHandleExists(handle)) {
+      return {
+        conversationId: '',
+        conversationUrl: '',
+        projectSlug: slug,
+        error: 'Browser identity lost immediately after creation (tab/window not resolvable)',
+      };
+    }
 
-    // Check if the page spontaneously materialized a /c/<id> without a message
-    let url = await this.readTabUrl();
+    // 2. Read initial URL through the retained handle (not active/frontmost).
+    await this.sleep(1200);
+    let url = this.readHandleUrl(handle);
     let parsed = url ? parseChatGPTConversationUrl(url) : null;
 
+    // Confirm initial state: project composer, no conversation ID.
+    if (url && parsed?.conversationId) {
+      // Unexpected early conversation materialization — but still must verify it's ours.
+      if (knownSet.has(parsed.conversationId)) {
+        return {
+          conversationId: '',
+          conversationUrl: '',
+          projectSlug: slug,
+          error: `Provider observed existing conversation '${parsed.conversationId}' instead of creating a fresh conversation`,
+        };
+      }
+      return {
+        conversationId: parsed.conversationId,
+        conversationUrl: url,
+        projectSlug: parsed.projectId,
+      };
+    }
+
     if (!parsed?.conversationId) {
-      // 3. Minimum safe bootstrap trigger:
-      // ChatGPT requires an initial submitted message before OpenAI allocates a new conversation ID
-      // and navigates the browser URL to /c/<conversationId>.
-      // Visible side effect: Submits a single explicit bootstrap prompt to initialize the thread.
+      // 3. Submit provisioning bootstrap through the exact retained handle.
       const promptJs = `(() => {
         const textarea = document.querySelector('#prompt-textarea') || document.querySelector('div[contenteditable="true"]');
         if (!textarea) return 'NO_TEXTAREA';
@@ -1796,9 +1947,13 @@ export class ChatGPTProvider extends BaseMacOSProvider {
         return 'PROMPT_ENTERED';
       })()`;
 
-      const jsRes = this.executeTabJavaScript(promptJs, 3000);
-      if (jsRes.success && jsRes.output === 'PROMPT_ENTERED') {
-        // Trigger Return key via System Events to submit prompt
+      const jsRes = this.executeHandleJavaScript(handle, promptJs, 3000);
+      const outputTrimmed = (jsRes.output || '').trim();
+
+      if (jsRes.success && outputTrimmed === 'CLICKED_SEND') {
+        // Send triggered via JS directly; observe acknowledgement through handle.
+      } else if (jsRes.success && outputTrimmed === 'PROMPT_ENTERED') {
+        // Fallback: trigger Return via System Events.
         this.runAppleScript(`
           tell application "System Events"
             tell application process "Google Chrome"
@@ -1806,12 +1961,52 @@ export class ChatGPTProvider extends BaseMacOSProvider {
             end tell
           end tell
         `, 2000);
+      } else if (!jsRes.success) {
+        return {
+          conversationId: '',
+          conversationUrl: '',
+          projectSlug: slug,
+          error: `Bootstrap insertion failed: ${jsRes.error || 'JavaScript execution error on retained handle'}`,
+        };
+      } else if (outputTrimmed === 'NO_TEXTAREA') {
+        return {
+          conversationId: '',
+          conversationUrl: '',
+          projectSlug: slug,
+          error: 'Planner composer not ready: no prompt-textarea or contenteditable found',
+        };
+      } else {
+        return {
+          conversationId: '',
+          conversationUrl: '',
+          projectSlug: slug,
+          error: `Bootstrap submission unexpected result: ${outputTrimmed}`,
+        };
       }
 
-      // 4. Poll active tab URL for authoritative /c/<conversationId> navigation
+      // 4. Observe bootstrap submission acknowledgement before polling URL.
+      const submissionEvidence = await this.observeBootstrapSubmission(handle, slug, 3000);
+      if (!submissionEvidence.acknowledged) {
+        return {
+          conversationId: '',
+          conversationUrl: '',
+          projectSlug: slug,
+          error: submissionEvidence.reason || 'Bootstrap submission not acknowledged by retained handle',
+        };
+      }
+
+      // 4. Poll through the retained handle (never active/frontmost fallback).
       for (let poll = 0; poll < 12; poll++) {
         await this.sleep(600);
-        url = await this.readTabUrl();
+        if (!this.verifyHandleExists(handle)) {
+          return {
+            conversationId: '',
+            conversationUrl: '',
+            projectSlug: slug,
+            error: 'Browser identity lost during provisioning: retained tab/window no longer exists',
+          };
+        }
+        url = this.readHandleUrl(handle);
         if (url) {
           parsed = parseChatGPTConversationUrl(url);
           if (parsed?.conversationId) {
@@ -1821,8 +2016,20 @@ export class ChatGPTProvider extends BaseMacOSProvider {
       }
     }
 
+    // Final identity verification: must still resolve.
+    if (!this.verifyHandleExists(handle)) {
+      return {
+        conversationId: '',
+        conversationUrl: '',
+        projectSlug: slug,
+        error: 'Browser identity lost before verification complete',
+      };
+    }
+    url = this.readHandleUrl(handle);
+    parsed = url ? parseChatGPTConversationUrl(url) : null;
+
     if (parsed?.conversationId && url) {
-      // Uniqueness check: verify this conversation ID was not already known/discovered before creation
+      // Uniqueness check: verify this conversation ID was not already known.
       if (knownSet.has(parsed.conversationId)) {
         return {
           conversationId: '',
@@ -2659,9 +2866,31 @@ export class OpenCodeProvider extends BaseMacOSProvider {
   }
 
   /**
-   * Visibly focuses OpenCode, locates composer, inserts instruction, verifies insertion,
-   * triggers Send, and verifies post-send clearing and worker activity.
-   * If post-send state cannot be proven, marks delivery as ambiguous.
+   * Exact-session transport, with post-transport reconciliation against the SAME session.
+   *
+   * ## The delivery verdict comes from the SESSION, never from the exit code
+   *
+   * The previous implementation ran the transport inside `execFileSync`, whose non-zero exit
+   * threw, and the `catch` returned `outcome: 'failed'`. That made a *process* fact stand in
+   * for an *external-world* fact, and it failed in the most damaging direction: OpenCode had
+   * already durably written the instruction as a user turn before the provider rejected the
+   * completion, so a genuinely DELIVERED delivery was recorded as "nothing was delivered".
+   * The post-write check could not catch it either, because it re-listed the session rather
+   * than reading the session's turns.
+   *
+   * The sequence is now the one frozen in PROVIDER_DISPATCH_GROUND_TRUTH.md Part 6:
+   *
+   * ```
+   * 1. verify the exact session exists in the provider's own store
+   * 2. read the exact session  -> pre-dispatch watermark (durable dispatch-intent boundary)
+   * 3. run the transport WITHOUT throwing; capture exit code and stderr as evidence
+   * 4. re-read the exact session  -> reconcile
+   * 5. classify transport and worker execution SEPARATELY and return both
+   * ```
+   *
+   * Step 4 runs on EVERY exit path, including success, because the whole point is that the
+   * exit code is not evidence. §9's "RelayX cannot address a conversation" constraint is why
+   * an unreadable session in step 4 yields `ambiguous` rather than a fabricated `failed`.
    */
   override async deliverInstruction(
     request: DeliveryInstructionRequest,
@@ -2716,32 +2945,73 @@ export class OpenCodeProvider extends BaseMacOSProvider {
     }
 
     // Verify target session exists and belongs to the expected workspace before delivery.
-    // Use CLI session list (authoritative provider-scoped) for verification.
+    //
+    // The CLI session list is a DISCOVERY convenience, not the authority: it is scoped to
+    // the CLI's own workspace view and has already been observed to omit sessions that the
+    // shared service holds. So a miss here is never a verdict; it only decides whether the
+    // shared service is asked. The shared service IS the authority for both existence and
+    // workspace, and its failure is reported as "could not check", never as "absent" (I-6).
     try {
       const { execFileSync } = await import('child_process');
-      const sessionCheckOutput = execFileSync(
-        cliPath,
-        ['session', 'list', '--format', 'json', '--standalone'],
-        { encoding: 'utf8', timeout: 4000 },
-      ).trim();
-
       let targetExists = false;
       let sessionWorkspaceMatch = false;
       let sessionDirFromRecord: string | undefined;
+      let sessionCheckFailure: string | null = null;
+      let sharedServiceReadCompleted = false;
+      let sharedServiceReadFailure: string | null = null;
 
-      if (sessionCheckOutput) {
-        const parsed = JSON.parse(sessionCheckOutput);
-        const sessions = Array.isArray(parsed) ? parsed : (parsed.data ?? parsed.sessions ?? []);
-        for (const item of sessions) {
-          if (item.id === externalId || (item.sessionId && item.sessionId === externalId)) {
-            targetExists = true;
-            sessionDirFromRecord = item.directory || item.projectPath || item.projectID || undefined;
-            break;
+      try {
+        const sessionCheckOutput = execFileSync(
+          cliPath,
+          ['session', 'list', '--format', 'json', '--standalone'],
+          { encoding: 'utf8', timeout: 4000 },
+        ).trim();
+
+        if (sessionCheckOutput) {
+          const parsed = JSON.parse(sessionCheckOutput);
+          const sessions = Array.isArray(parsed) ? parsed : (parsed.data ?? parsed.sessions ?? []);
+          for (const item of sessions) {
+            if (item.id === externalId || (item.sessionId && item.sessionId === externalId)) {
+              targetExists = true;
+              sessionDirFromRecord = item.directory || item.projectPath || item.projectID || undefined;
+              break;
+            }
           }
+        }
+      } catch (listErr: any) {
+        // Not a failure of the provider: the listing is workspace-scoped and can fail
+        // independently. Recorded and superseded by the shared-service read below.
+        sessionCheckFailure = listErr?.message ?? String(listErr);
+      }
+
+      if (!targetExists) {
+        // Fallback: authoritative session may exist in the shared service (service.json)
+        // but not appear in the CLI session list because of workspace scoping differences.
+        // Verify via the shared service directly before declaring failure.
+        try {
+          const { discovery, client } = await this.resolveSharedServiceClient();
+          if (discovery.status === 'available' && client) {
+            const directResult = await client.getSession(externalId);
+            sharedServiceReadCompleted = true;
+            if (directResult.session && directResult.session.sessionId === externalId) {
+              targetExists = true;
+              sessionDirFromRecord = directResult.session.directory || undefined;
+              sessionWorkspaceMatch = !!sessionDirFromRecord;
+            }
+          }
+        } catch (serviceErr: any) {
+          sharedServiceReadFailure = serviceErr?.message ?? String(serviceErr);
         }
       }
 
       if (!targetExists) {
+        // "Not found" is only a VERDICT when an authoritative read actually completed and
+        // returned a session list not containing the id. If the shared service was never
+        // reached, this is "could not check" (I-6) and the honest outcome is `ambiguous`,
+        // because an unverified session may still hold a real session and a retry could
+        // duplicate work inside it. Ground-truth Part 3 Case 1 permits concluding
+        // "not delivered" only from a read that SUCCEEDED.
+        const absenceIsEstablished = sharedServiceReadCompleted;
         const evidence: ObservableEvidence = {
           id: `ev_exact_transport_session_not_found_${Date.now()}`,
           timestamp: Date.now(),
@@ -2749,86 +3019,108 @@ export class OpenCodeProvider extends BaseMacOSProvider {
           runtimeSessionId: request.runtimeSessionId,
           bundleIdentifier: this.defaultBundleId,
           details: {
-            reason: `Exact session ${externalId} not found in OpenCode session list`,
-            checkedVia: 'cli_session_list',
+            reason: absenceIsEstablished
+              ? `Exact session ${externalId} is absent from the provider's own session store`
+              : `Exact session ${externalId} could not be confirmed present or absent`,
+            checkedVia: 'cli_session_list_then_shared_service',
+            cliSessionListFailure: sessionCheckFailure,
+            sharedServiceReadFailure,
+            absenceIsEstablished,
           },
         };
         return {
-          outcome: 'failed',
-          reason: `Exact-session transport blocked: authoritative session ${externalId} does not exist in provider session store.`,
+          outcome: absenceIsEstablished ? 'failed' : 'ambiguous',
+          reason: absenceIsEstablished
+            ? `Exact-session transport blocked: authoritative session ${externalId} does not exist in provider session store.`
+            : `Exact-session transport blocked: session ${externalId} could not be verified in the provider session store ` +
+              `(CLI list: ${sessionCheckFailure ?? 'no match'}; shared service: ${sharedServiceReadFailure ?? 'no match'}). ` +
+              `Absence is not claimed from an incomplete read, and no instruction was sent.`,
           evidence,
         };
       }
 
-      // Workspace verification: session directory must align with expected workspace/project.
-      // The adapter uses its own workspace/project context. For bounded verification, require
-      // that the session directory is non-empty and that no workspace ambiguity is introduced.
+      // Workspace verification against the provider's own session record.
+      //
+      // An absent directory is reported as `unverified`, NOT as verified. The old code
+      // set `sessionWorkspaceMatch = true` in that case, which was a fabricated positive
+      // (C-8, I-6) and also meant the transport's `cwd` silently fell back to RelayX's own
+      // process directory. Both are now visible: an unverifiable workspace is recorded as
+      // such in the evidence, and the transport still runs because the session id itself is
+      // authoritative — addressing the exact session does not depend on knowing its folder.
+      const workspaceVerification = sessionDirFromRecord
+        ? 'verified'
+        : 'unverified_session_record_has_no_directory';
+
       if (sessionDirFromRecord) {
-        sessionWorkspaceMatch = !!sessionDirFromRecord;
-      } else {
-        // If directory not present, do not treat as failure unless workspace verification requires it.
-        // For bounded Phase E, accept that workspace verification is best-effort and not fabricated.
         sessionWorkspaceMatch = true;
       }
 
-      if (!sessionWorkspaceMatch) {
-        const evidence: ObservableEvidence = {
-          id: `ev_exact_transport_workspace_mismatch_${Date.now()}`,
-          timestamp: Date.now(),
-          source: 'reconciliation_probe',
-          runtimeSessionId: request.runtimeSessionId,
-          bundleIdentifier: this.defaultBundleId,
-          details: {
-            reason: 'Workspace/directory verification could not be established for the target session',
-            sessionDir: sessionDirFromRecord,
-          },
-        };
-        return {
-          outcome: 'failed',
-          reason: `Exact-session transport blocked: workspace verification failed for session ${externalId}.`,
-          evidence,
-        };
-      }
+      // ---- Step 2: the durable dispatch-intent boundary, read BEFORE the send ----
+      // Ground-truth Part 6: the intent boundary must be persisted before the external
+      // side effect, so a crash between send and acknowledgement is still reconcilable.
+      // A boundary captured here is only usable if the session is readable; an unreadable
+      // session yields `null`, which forces `ambiguous` later rather than a guess.
+      const preRead = await this.readExactSessionMessages(externalId);
+      const preWatermark: ExactSessionWatermark | null = preRead.readable
+        ? buildWatermark(externalId, preRead.messages, Date.now())
+        : null;
 
-      // Execute exact-session delivery via CLI mechanism (authoritative transport).
-      // Safe process invocation: argument array (not shell interpolation) so instruction content is never interpreted.
-      const cliInstructionText = request.instructionText;
-      const cliResultOutput = execFileSync(
-        cliPath,
-        ['run', '--session', externalId, '--continue', cliInstructionText],
-        {
-          encoding: 'utf8',
-          timeout: 30000,
-          maxBuffer: 1024 * 1024,
-        },
-      );
+      // ---- Step 3: the transport, run WITHOUT throwing ----
+      //
+      // `spawnSync` is used precisely because it does not throw on a non-zero exit. The
+      // exit code is captured as evidence and is never consulted to classify. Instruction
+      // text is passed as a single argv element, so it is never shell-interpreted.
+      const runArgs = ['run', '--session', externalId, '--continue', request.instructionText];
+      // The model override is an explicit RelayX provider setting applied to THIS dispatch
+      // only. It is never written to any global config file, and it is recorded in the
+      // evidence so the model that served a delivery is always auditable.
+      const modelOverride = typeof request.modelOverride === 'string' && request.modelOverride.length > 0
+        ? request.modelOverride
+        : null;
+      if (modelOverride) runArgs.splice(1, 0, '--model', modelOverride);
 
-      // Post-delivery verification: inspect the same session to confirm user message persistence.
-      const transcriptCheckOutput = execFileSync(
-        cliPath,
-        ['session', 'list', '--format', 'json', '--standalone'],
-        { encoding: 'utf8', timeout: 4000 },
-      ).trim();
+      const { spawnSync } = await import('child_process');
+      const run = spawnSync(cliPath, runArgs, {
+        encoding: 'utf8',
+        timeout: 120000,
+        maxBuffer: 8 * 1024 * 1024,
+        cwd: sessionDirFromRecord || process.cwd(),
+      }) as { error?: Error; status?: number | null; stdout?: string; stderr?: string };
 
-      let postWriteMessageFound = false;
-      if (transcriptCheckOutput) {
-        const parsedPost = JSON.parse(transcriptCheckOutput);
-        const postSessions = Array.isArray(parsedPost) ? parsedPost : (parsedPost.data ?? parsedPost.sessions ?? []);
-        for (const item of postSessions) {
-          if (item.id === externalId || (item.sessionId && item.sessionId === externalId)) {
-            const sessionIdStr = item.id || item.sessionId;
-            // Verify the session contains at least one user message or evidence of interaction.
-            // Because the CLI mechanism sends the message, we check for updated session metadata.
-            // A minimal authoritative proof is that the session record continues to exist with the same ID
-            // and that no replacement session was created.
-            postWriteMessageFound = true;
-            break;
-          }
-        }
-      }
+      const transportExitCode = typeof run.status === 'number' ? run.status : null;
+      const transportError = run.error
+        ? (run.error.message || String(run.error))
+        : (run.status === null ? 'transport process did not report an exit status' : null);
+
+      // ---- Step 4: reconcile against the EXACT session, on EVERY exit path ----
+      //
+      // Including the failure path. A non-zero exit, a timeout and a crash are all
+      // execution facts that say nothing about whether the instruction landed, and the one
+      // case that motivated this rewrite is precisely "the instruction landed and the
+      // process then failed".
+      const postRead = await this.readExactSessionMessages(externalId);
+      const reconciliation = reconcileTransportOutcome({
+        expectedText: request.instructionText,
+        // The caller's watermark wins when it supplied one; otherwise this adapter's own
+        // pre-send read is used. Either way the boundary predates the send.
+        watermark: request.preDispatchWatermark ?? preWatermark,
+        messages: postRead.readable ? postRead.messages : [],
+        transcriptReadable: postRead.readable,
+        transcriptReadFailure: postRead.readable ? null : postRead.failure,
+        transportExitCode,
+        transportError,
+      });
+
+      // ---- Step 5: two verdicts, one return value ----
+      const outcome: DeliveryInstructionResult['outcome'] =
+        reconciliation.classification === 'delivered'
+          ? 'delivered'
+          : reconciliation.classification === 'not_delivered'
+            ? 'failed'
+            : 'ambiguous';
 
       const evidence: ObservableEvidence = {
-        id: `ev_delivered_${Date.now()}`,
+        id: `ev_exact_transport_reconciled_${Date.now()}`,
         timestamp: Date.now(),
         source: 'reconciliation_probe',
         runtimeSessionId: request.runtimeSessionId,
@@ -2838,36 +3130,211 @@ export class OpenCodeProvider extends BaseMacOSProvider {
           cliPath,
           cliBinarySource: binaryResolution?.source ?? 'unknown',
           externalSessionTargeted: externalId,
-          postWriteVerification: postWriteMessageFound ? 'session_persisted' : 'session_not_confirmed',
           workspaceVerified: sessionWorkspaceMatch,
+          workspaceVerification,
+          sessionDirectory: sessionDirFromRecord ?? null,
+          sessionCheckFailure,
+          sharedServiceReadFailure,
+          // The delivery verdict, and its basis.
+          transportClassification: reconciliation.classification,
+          transportReason: reconciliation.reason,
+          boundaryEstablished: reconciliation.boundaryEstablished,
+          preDispatchWatermarkMessageCount: (request.preDispatchWatermark ?? preWatermark)?.messageCount ?? null,
+          // The FULL boundary, ids included, travels with the outcome record.
+          //
+          // The pre-dispatch boundary is first written to the Delivery as its own evidence
+          // row, but this outcome overwrites that row — and an earlier revision of this code
+          // stored only the boundary's COUNT here, so the authoritative id set was destroyed
+          // by the very record that described the delivery. Every later reconciliation was
+          // then forced onto the weaker reconstructed boundary. Embedding the ids makes the
+          // boundary travel with the verdict it supports, so no later write can separate them.
+          boundary: request.preDispatchWatermark ?? preWatermark,
+          expectedFingerprint: reconciliation.expectedFingerprint,
+          matchedFingerprint: reconciliation.matchedFingerprint,
+          matchKind: reconciliation.matchKind,
+          matchingUserTurnId: reconciliation.matchingUserTurn?.messageId ?? null,
+          matchingUserTurnCreatedAt: reconciliation.matchingUserTurn?.createdAt ?? null,
+          postBoundaryUserTurns: reconciliation.postBoundaryUserTurns,
+          // The execution verdict, and its basis. Explicitly a different fact from the above.
+          workerExecution: reconciliation.workerExecution,
+          workerExecutionErrorType: reconciliation.workerExecutionEvidence.errorType,
+          workerExecutionErrorStatus: reconciliation.workerExecutionEvidence.errorStatus,
+          workerExecutionErrorMessage: reconciliation.workerExecutionEvidence.errorMessage,
+          workerExecutionAssistantMessageId: reconciliation.workerExecutionEvidence.assistantMessageId,
+          workerExecutionFinish: reconciliation.workerExecutionEvidence.finish,
+          workerExecutionModel: reconciliation.workerExecutionEvidence.providerId
+            ? `${reconciliation.workerExecutionEvidence.providerId}/${reconciliation.workerExecutionEvidence.modelId ?? 'unknown'}`
+            : null,
+          workerExecutionRunOutcomeMarkers: reconciliation.workerExecutionEvidence.runOutcomeMarkers,
+          chronologicalOrder: reconciliation.chronologicalOrder,
+          // Process facts, recorded because they were the wrong basis and must stay visible
+          // as evidence of what the process did.
+          transportExitCode,
+          transportStderrExcerpt: (run.stderr ?? '').slice(0, 2000) || null,
+          transportStdoutExcerpt: (run.stdout ?? '').slice(0, 2000) || null,
+          modelOverride,
+          modelSelectionSource: modelOverride ? 'relayx_provider_setting' : 'opencode_default_model',
+          authorizationCheck: 'externalSessionId_present',
         },
       };
 
       return {
-        outcome: postWriteMessageFound ? 'delivered' : 'ambiguous',
-        reason: postWriteMessageFound
-          ? `Instruction delivered to exact OpenCode session ${externalId} via CLI transport.`
-          : `CLI transport executed but post-write session persistence for ${externalId} could not be confirmed.`,
+        outcome,
+        reason: reconciliation.reason,
         evidence,
+        reconciliation,
       };
     } catch (err: any) {
-      const cliErrorDetail = err?.message || String(err) || 'unknown';
-      const evidence: ObservableEvidence = {
-        id: `ev_exact_transport_failed_${Date.now()}`,
-        timestamp: Date.now(),
-        source: 'reconciliation_probe',
-        runtimeSessionId: request.runtimeSessionId,
-        bundleIdentifier: this.defaultBundleId,
-        details: {
-          reason: 'Exact-session CLI delivery failed',
-          cliError: cliErrorDetail,
-          authorizationCheck: 'externalSessionId_present',
+      // Reaching here means the ADAPTER itself failed (spawn import, bad arguments, ...),
+      // not that the provider rejected the delivery. The provider's own session is
+      // therefore still the authority, and it is read here before returning — a throwing
+      // adapter path must not silently re-introduce the exit-code-is-the-verdict defect.
+      const adapterError = err?.message || String(err) || 'unknown';
+      const postRead = await this.readExactSessionMessages(externalId);
+      const reconciliation = reconcileTransportOutcome({
+        expectedText: request.instructionText,
+        watermark: request.preDispatchWatermark ?? null,
+        messages: postRead.readable ? postRead.messages : [],
+        transcriptReadable: postRead.readable,
+        transcriptReadFailure: postRead.readable ? null : postRead.failure,
+        transportExitCode: null,
+        transportError: `adapter transport error: ${adapterError}`,
+      });
+      const outcome: DeliveryInstructionResult['outcome'] =
+        reconciliation.classification === 'delivered'
+          ? 'delivered'
+          : reconciliation.classification === 'not_delivered'
+            ? 'failed'
+            : 'ambiguous';
+
+      return {
+        outcome,
+        reason:
+          `Adapter transport raised before an exit status could be read (${adapterError}). ` +
+          `The exact session was re-read and classified on its own evidence: ${reconciliation.reason}`,
+        reconciliation,
+        evidence: {
+          id: `ev_exact_transport_adapter_error_${Date.now()}`,
+          timestamp: Date.now(),
+          source: 'reconciliation_probe',
+          runtimeSessionId: request.runtimeSessionId,
+          bundleIdentifier: this.defaultBundleId,
+          details: {
+            reason: 'Adapter transport raised; classification still taken from the exact session',
+            adapterError,
+            externalSessionTargeted: externalId,
+            transportClassification: reconciliation.classification,
+            transportReason: reconciliation.reason,
+            matchingUserTurnId: reconciliation.matchingUserTurn?.messageId ?? null,
+            workerExecution: reconciliation.workerExecution,
+            authorizationCheck: 'externalSessionId_present',
+          },
         },
       };
+    }
+  }
+
+  /**
+   * Read the pre-dispatch boundary of ONE exact session.
+   *
+   * Read-only: a single authenticated GET of the session's own turns. It is called after the
+   * dispatch intent is committed and immediately before the send, so the resulting set of
+   * message ids is the smallest, most faithful boundary available — the tightest possible
+   * answer to "what did this session already contain?".
+   *
+   * A null watermark is returned, never a guess, when the session cannot be read. The
+   * downstream classifier then reports `ambiguous`, which is the honest verdict: without a
+   * boundary, no turn can be shown to be this Attempt's.
+   */
+  async captureTransportBoundary(
+    request: TransportBoundaryRequest,
+  ): Promise<TransportBoundaryResult> {
+    const externalId = request.externalSessionId ?? null;
+    if (!externalId || typeof externalId !== 'string' || !externalId.startsWith('ses_')) {
       return {
-        outcome: 'failed',
-        reason: `Exact-session CLI transport failed: ${cliErrorDetail}`,
-        evidence,
+        watermark: null,
+        failure: `No authoritative external session id to read a boundary from (${String(externalId ?? 'null')}).`,
+      };
+    }
+    const read = await this.readExactSessionMessages(externalId);
+    if (!read.readable) {
+      return { watermark: null, failure: read.failure };
+    }
+    return { watermark: buildWatermark(externalId, read.messages, Date.now()), failure: null };
+  }
+
+  /**
+   * Read the turns of ONE exact session, for post-hoc reconciliation of an already-sent dispatch.
+   *
+   * This is deliberately a SEPARATE read from `captureTransportBoundary`. The boundary must
+   * describe the session as it stood BEFORE the send; this describes it as it stands NOW. If
+   * the same call served both purposes, the current state would become its own boundary, no
+   * turn could ever be post-boundary, and every delivery would reconcile to "never happened"
+   * — a confident, structurally-wrong verdict in exactly the direction that authorises a
+   * resend into a session that already has the instruction.
+   */
+  async readExactSessionTurnsForReconciliation(externalSessionId: string): Promise<{
+    readable: boolean;
+    messages: ReconciliationMessage[];
+    failure: string | null;
+  }> {
+    if (!externalSessionId || !externalSessionId.startsWith('ses_')) {
+      return {
+        readable: false,
+        messages: [],
+        failure: `"${String(externalSessionId)}" is not an authoritative OpenCode session id.`,
+      };
+    }
+    return this.readExactSessionMessages(externalSessionId);
+  }
+
+  /**
+   * Read the turns of ONE exact session through the provider's own authenticated service.
+   *
+   * ## Read-only, and honest about failure
+   *
+   * Every call is an HTTP GET against the same `service.json`-registered service the human
+   * OpenCode UI reads, so this observes the authoritative store rather than a private
+   * one (§9.1: RelayX addresses the exact session, it does not re-create one). There is no
+   * POST, no prompt, and no state change here.
+   *
+   * `readable: false` means "could not check", and the caller must not read it as
+   * "nothing is there" (I-6, C-8). A malformed or non-list response is equally unreadable.
+   *
+   * This helper exists because the transcript mapper previously returned no text for user
+   * turns, which made fingerprint matching impossible; it is a NEW read path and does not
+   * modify `resolveSideIdentity`, `observeSide`, `confirmSessionForProject` or any S4
+   * discovery member.
+   */
+  private async readExactSessionMessages(
+    sessionId: string,
+  ): Promise<{ readable: boolean; messages: ReconciliationMessage[]; failure: string | null }> {
+    try {
+      const { discovery, client } = await this.resolveSharedServiceClient();
+      if (discovery.status !== 'available' || !client) {
+        return {
+          readable: false,
+          messages: [],
+          failure: `The OpenCode shared service is not available: ${discovery.status}`,
+        };
+      }
+      const transcript = await client.getTranscript(sessionId, { limit: 200 });
+      const messages: ReconciliationMessage[] = transcript.messages.map((m) => ({
+        messageId: m.messageId,
+        role: m.role,
+        createdAt: m.createdAt,
+        text: m.text,
+        finish: m.finish ?? null,
+        error: m.error ?? null,
+        model: m.model ?? null,
+        outcome: m.outcome ?? null,
+      }));
+      return { readable: true, messages, failure: null };
+    } catch (err: any) {
+      return {
+        readable: false,
+        messages: [],
+        failure: `The exact session transcript could not be read: ${err?.message ?? String(err)}`,
       };
     }
   }
@@ -3207,6 +3674,52 @@ export class OpenCodeProvider extends BaseMacOSProvider {
         triedPaths,
       },
     };
+  }
+
+  /** Fallback to shared service when CLI session list does not include authoritative sessions. */
+  public async discoverPersistedSessionsWithServiceFallback(projectPath?: string): Promise<{
+    success: boolean;
+    sessions: Array<{
+      id: string;
+      projectId?: string;
+      directory?: string;
+      title?: string;
+      updatedAt?: number | string;
+      createdAt?: number | string;
+      [key: string]: any;
+    }>;
+    diagnostics?: Record<string, any>;
+  }> {
+    const cliResult = await this.discoverPersistedSessions();
+    if (cliResult.success && cliResult.sessions.length > 0) {
+      return cliResult;
+    }
+    // CLI either unavailable or did not return the session (workspace scoping gap).
+    // Fall back to the shared service to observe the exact same authoritative session store.
+    if (!projectPath) {
+      return cliResult;
+    }
+    const sharedRes = await this.discoverSessionsViaSharedService(projectPath);
+    if (sharedRes.ok && sharedRes.sessions.length > 0) {
+      return {
+        success: true,
+        sessions: sharedRes.sessions.map((s) => ({
+          id: s.sessionId,
+          projectId: s.projectId,
+          directory: s.directory,
+          title: s.title,
+          updatedAt: s.updatedAt,
+          createdAt: s.createdAt,
+        })),
+        diagnostics: {
+          ...cliResult.diagnostics,
+          source: 'shared_service_fallback',
+          sharedServiceAvailable: true,
+          sessionCount: sharedRes.sessions.length,
+        },
+      };
+    }
+    return cliResult;
   }
 
   /**

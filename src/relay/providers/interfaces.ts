@@ -6,6 +6,11 @@ import {
   ProviderIntegrationStatus,
   SideObservationReading,
 } from '../domain/types.ts';
+import type {
+  ExactSessionWatermark,
+  ReconciliationMessage,
+  TransportReconciliation,
+} from './exactSessionReconciliation.ts';
 
 export interface RuntimeTargetDescriptor {
   providerType: ProviderType;
@@ -37,12 +42,70 @@ export interface DeliveryInstructionRequest {
   externalSessionId?: string | null;
   instructionText: string;
   idempotencyKey: string;
+  /**
+   * The durable dispatch-intent boundary captured from the EXACT target session immediately
+   * before the external send (ground-truth Part 6 step 2).
+   *
+   * A provider that can read its own exact session MUST reconcile against it after the send
+   * rather than deriving delivery truth from a process exit code. Without a watermark there
+   * is no way to tell a turn this Attempt created from one that already existed, and the only
+   * honest outcome is `ambiguous`.
+   */
+  preDispatchWatermark?: ExactSessionWatermark | null;
+  /**
+   * Explicit operator-configured model for the transport, in `provider/model` form.
+   *
+   * This is a RelayX provider SETTING, never a machine-wide default: it applies to this
+   * dispatch only. A provider that supports per-run model selection MUST use it and MUST
+   * record it in the returned evidence, so the model that actually served a delivery is
+   * always auditable. A provider that has no way to select a model must ignore it.
+   */
+  modelOverride?: string | null;
+}
+
+/**
+ * Read the transport boundary of ONE exact session, immediately BEFORE an external send.
+ *
+ * ## Why this is a separate, optional capability
+ *
+ * §11.1 `[FROZEN]`: "Provider capability is extended only by adding NEW optional
+ * capabilities to `IRuntimeProvider`." The boundary read is a distinct concern from
+ * delivering an instruction, and a provider that cannot read its own exact session simply
+ * does not implement it — which is exactly the case where the post-transport verdict must be
+ * `ambiguous` rather than guessed.
+ *
+ * The boundary is captured AFTER the dispatch intent is committed and BEFORE the send, so a
+ * crash on either side of the send leaves a reconcilable record: with a boundary, the
+ * outcome is classifiable; without one, it is honestly `ambiguous`.
+ */
+export interface TransportBoundaryRequest {
+  runtimeSessionId: RuntimeSessionId;
+  externalSessionId?: string | null;
+}
+
+export interface TransportBoundaryResult {
+  /** `null` when the exact session could not be read. Never fabricated. */
+  watermark: ExactSessionWatermark | null;
+  /** Why the boundary could not be captured, when it could not. */
+  failure: string | null;
 }
 
 export interface DeliveryInstructionResult {
   outcome: 'delivered' | 'ambiguous' | 'failed';
   reason?: string;
   evidence: ObservableEvidence;
+  /**
+   * The post-transport exact-session reconciliation, when the provider was able to read the
+   * authoritative session after the send.
+   *
+   * `outcome` above is the DELIVERY verdict (was the instruction inserted?). This field
+   * additionally carries the WORKER EXECUTION verdict (did the worker then do it?), which is
+   * a separate fact with a separate owner and must never be folded into `outcome`.
+   *
+   * Absent when the provider cannot read its own exact session. Absence is not permission to
+   * guess: the caller must then treat execution as unknown.
+   */
+  reconciliation?: TransportReconciliation;
 }
 
 export interface ProviderSessionConfirmation {
@@ -107,6 +170,30 @@ export interface IRuntimeProvider {
   inspectRuntime(sessionId: RuntimeSessionId): Promise<RuntimeInspectionResult>;
   activateRuntime(sessionId: RuntimeSessionId): Promise<boolean>;
   deliverInstruction(request: DeliveryInstructionRequest): Promise<DeliveryInstructionResult>;
+  /**
+   * Optional: read the pre-dispatch boundary of the exact target session.
+   *
+   * Implementations MUST return `watermark: null` (with a reason) rather than an invented
+   * boundary when the session cannot be read. A fabricated boundary would make an unrelated
+   * pre-existing user turn look like this Attempt's delivery.
+   */
+  captureTransportBoundary?(request: TransportBoundaryRequest): Promise<TransportBoundaryResult>;
+  /**
+   * Optional: read the turns of ONE exact session for post-hoc reconciliation.
+   *
+   * Separate from `captureTransportBoundary` on purpose. The boundary must be captured BEFORE
+   * a send; this reads the session as it stands AFTER one. Reusing the boundary call for both
+   * would conflate "what existed before" with "what exists now", and a reconciliation that
+   * used the current state as its own boundary could never find a turn — it would report
+   * every delivery as never having happened.
+   *
+   * `readable: false` means "could not check". It must never be returned to mean "empty".
+   */
+  readExactSessionTurnsForReconciliation?(externalSessionId: string): Promise<{
+    readable: boolean;
+    messages: ReconciliationMessage[];
+    failure: string | null;
+  }>;
   detectWorkingState(sessionId: RuntimeSessionId): Promise<{ isWorking: boolean; evidence?: ObservableEvidence }>;
   detectCompletionState(sessionId: RuntimeSessionId): Promise<{ isComplete: boolean; responseSummary?: string; evidence?: ObservableEvidence }>;
   captureEvidence(sessionId: RuntimeSessionId, action: string): Promise<ObservableEvidence>;

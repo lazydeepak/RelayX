@@ -13,6 +13,7 @@ import {
   ProviderType,
   ObservableEvidence,
   createId,
+  AssignmentStatus,
   PairSideRole,
   PairSideIdentity,
   PairActivationResult,
@@ -63,12 +64,123 @@ import {
   RuntimeNotAvailableError,
   RelayDomainError,
 } from '../domain/errors.ts';
-import { IRelayRepositories } from '../persistence/interfaces.ts';
+import { IRelayRepositories, ProviderSetting } from '../persistence/interfaces.ts';
 import {
   IRuntimeProvider,
   RuntimeTargetDescriptor,
   RuntimeInspectionResult,
 } from '../providers/interfaces.ts';
+import {
+  reconcileTransportOutcome,
+  reconstructWatermarkFromIntentTime,
+  type ExactSessionWatermark,
+  type TransportReconciliation,
+} from '../providers/exactSessionReconciliation.ts';
+
+/**
+ * Recover the pre-dispatch boundary that was committed on a Delivery's evidence.
+ *
+ * The boundary is stored as ordinary evidence, so this reads it back rather than reaching
+ * into a side channel. Returns `null` — never a partial boundary — when the evidence does
+ * not carry a complete one, because a boundary with a missing id set cannot establish
+ * post-boundary-ness and would silently force `ambiguous` for the wrong reason.
+ */
+function extractRecordedWatermark(evidence: ObservableEvidence | undefined): ExactSessionWatermark | null {
+  const details = evidence?.details as Record<string, unknown> | undefined;
+  if (!details) return null;
+
+  // Two accepted shapes, because the boundary is recorded at two moments and the second
+  // overwrites the first. Rejecting either shape would force later reconciliation onto the
+  // weaker reconstructed boundary for no reason.
+  //   (a) its own evidence row, written before the send  (`phase: pre_dispatch_boundary`)
+  //   (b) embedded in the delivery's own outcome record   (`details.boundary`)
+  const source =
+    details.phase === 'pre_dispatch_boundary'
+      ? (details as Record<string, unknown>)
+      : ((details.boundary as Record<string, unknown> | undefined) ?? null);
+  if (!source) return null;
+
+  const sessionId = typeof source.sessionId === 'string' ? source.sessionId : null;
+  const messageIds = Array.isArray(source.messageIds)
+    ? source.messageIds.filter((v): v is string => typeof v === 'string')
+    : null;
+  if (!sessionId || messageIds === null) return null;
+
+  return {
+    sessionId,
+    messageIds,
+    latestCreatedAt:
+      typeof source.latestCreatedAt === 'number' ? source.latestCreatedAt : null,
+    messageCount:
+      typeof source.messageCount === 'number' ? source.messageCount : messageIds.length,
+    // `capturedAt` is the pre-send read time. For the embedded shape that is the timestamp of
+    // the delivery outcome, so the boundary's own capture time is read from it when present.
+    capturedAt:
+      typeof source.capturedAt === 'number'
+        ? source.capturedAt
+        : typeof evidence?.timestamp === 'number'
+          ? evidence.timestamp
+          : 0,
+    provenance: 'captured_pre_dispatch',
+  };
+}
+
+/**
+ * Build the evidence record for a post-hoc reconciliation decision.
+ *
+ * The transport verdict, the worker-execution verdict, the boundary, and the fingerprints are
+ * all included under distinct keys, because the decision this evidence supports is exactly
+ * the one that must never be read as a single undifferentiated "success".
+ */
+function reconciliationEvidence(
+  reconciliation: TransportReconciliation,
+  delivery: Delivery,
+  assignment: Assignment,
+): ObservableEvidence {
+  return {
+    id: `ev_reconciled_${Date.now()}`,
+    timestamp: Date.now(),
+    source: 'reconciliation_probe',
+    runtimeSessionId: delivery.targetRuntimeId,
+    details: {
+      phase: 'post_hoc_reconciliation',
+      deliveryId: delivery.id,
+      assignmentId: assignment.id,
+      expectedInstructionFingerprint: reconciliation.expectedFingerprint,
+      matchedFingerprint: reconciliation.matchedFingerprint,
+      matchKind: reconciliation.matchKind,
+      transportClassification: reconciliation.classification,
+      transportReason: reconciliation.reason,
+      boundaryEstablished: reconciliation.boundaryEstablished,
+      boundaryProvenance: reconciliation.boundaryProvenance,
+      preDispatchWatermarkMessageCount: reconciliation.watermark?.messageCount ?? null,
+      matchingUserTurnId: reconciliation.matchingUserTurn?.messageId ?? null,
+      matchingUserTurnCreatedAt: reconciliation.matchingUserTurn?.createdAt ?? null,
+      postBoundaryUserTurns: reconciliation.postBoundaryUserTurns,
+      // Separate fact, separate key, separate owner.
+      workerExecution: reconciliation.workerExecution,
+      workerExecutionAssistantMessageId:
+        reconciliation.workerExecutionEvidence.assistantMessageId ?? null,
+      workerExecutionFinish: reconciliation.workerExecutionEvidence.finish,
+      // A tool-using run is a CHAIN of assistant turns, so the turn that produced the answer
+      // and the turn that terminated the run are recorded separately.
+      workerExecutionResponseMessageId:
+        reconciliation.workerExecutionEvidence.responseMessageId ?? null,
+      workerExecutionAssistantTurnCount: reconciliation.workerExecutionEvidence.assistantTurnCount,
+      workerExecutionResponseText: reconciliation.workerExecutionEvidence.text,
+      workerExecutionErrorType: reconciliation.workerExecutionEvidence.errorType,
+      workerExecutionErrorStatus: reconciliation.workerExecutionEvidence.errorStatus,
+      workerExecutionErrorMessage: reconciliation.workerExecutionEvidence.errorMessage,
+      workerExecutionModel: reconciliation.workerExecutionEvidence.providerId
+        ? `${reconciliation.workerExecutionEvidence.providerId}/${reconciliation.workerExecutionEvidence.modelId ?? 'unknown'}`
+        : null,
+      workerExecutionRunOutcomeMarkers: reconciliation.workerExecutionEvidence.runOutcomeMarkers,
+      chronologicalOrder: reconciliation.chronologicalOrder,
+      transcriptReadable: reconciliation.transcriptReadable,
+      checkedVia: 'provider_exact_session_transcript',
+    },
+  };
+}
 
 /**
  * Provenances that may authorize pairing. Anything else (e.g. a historical
@@ -565,6 +677,7 @@ export class RelayEngine {
     if (plannerSessionId) {
       const planner = await this.repos.runtimes.findById(plannerSessionId);
       if (!planner) throw new RelayDomainError('Planner runtime not found', 'RUNTIME_NOT_FOUND');
+      if (planner.providerType !== 'chatgpt') throw new RelayDomainError('Planner session must be ChatGPT', 'INVALID_PLANNER_PROVIDER');
       const existingPairs = await this.repos.pairs.findAll();
       const alreadyPaired = existingPairs.find(
         (p) => p.status !== 'archived' && (p.plannerSessionId === plannerSessionId || p.workerSessionId === plannerSessionId),
@@ -578,6 +691,7 @@ export class RelayEngine {
     if (workerSessionId) {
       const worker = await this.repos.runtimes.findById(workerSessionId);
       if (!worker) throw new RelayDomainError('Worker runtime not found', 'RUNTIME_NOT_FOUND');
+      if (worker.providerType !== 'opencode' && worker.providerType !== 'vscode') throw new RelayDomainError('Worker session must be OpenCode or VS Code', 'INVALID_WORKER_PROVIDER');
       const existingPairs = await this.repos.pairs.findAll();
       const alreadyPaired = existingPairs.find(
         (p) => p.status !== 'archived' && (p.plannerSessionId === workerSessionId || p.workerSessionId === workerSessionId),
@@ -616,6 +730,7 @@ export class RelayEngine {
     if (updates.plannerSessionId) {
       const planner = await this.repos.runtimes.findById(updates.plannerSessionId);
       if (!planner) throw new RelayDomainError('New planner runtime not found', 'RUNTIME_NOT_FOUND');
+      if (planner.providerType !== 'chatgpt') throw new RelayDomainError('Planner session must be ChatGPT', 'INVALID_PLANNER_PROVIDER');
       // Rebinding selects a new session, so it is subject to the same
       // authoritative-evidence gate as initial pairing.
       await this.assertPrePairAuthoritativeAssociation('planner', planner, pair.projectId);
@@ -623,6 +738,7 @@ export class RelayEngine {
     if (updates.workerSessionId) {
       const worker = await this.repos.runtimes.findById(updates.workerSessionId);
       if (!worker) throw new RelayDomainError('New worker runtime not found', 'RUNTIME_NOT_FOUND');
+      if (worker.providerType !== 'opencode' && worker.providerType !== 'vscode') throw new RelayDomainError('Worker session must be OpenCode or VS Code', 'INVALID_WORKER_PROVIDER');
       await this.assertPrePairAuthoritativeAssociation('worker', worker, pair.projectId);
     }
 
@@ -980,6 +1096,34 @@ export class RelayEngine {
   }
 
   /* --- Assignment Lifecycle & Safe Delivery --- */
+
+  /**
+   * TERMINAL Assignment states — a terminal Assignment no longer owns an execution slot.
+   *
+   * `pending` is deliberately NOT terminal: a `pending` Assignment is a live, dispatchable
+   * unit of work, and two of them competing for one Pair's single execution slot is exactly
+   * the orphan condition this invariant exists to prevent. `waiting_for_handoff` is equally
+   * non-terminal: the work is finished but the Pair has not been released, so the slot is
+   * still held.
+   */
+  private static readonly TERMINAL_ASSIGNMENT_STATES: ReadonlySet<AssignmentStatus> = new Set<AssignmentStatus>([
+    'completed',
+    'failed',
+    'cancelled',
+  ]);
+
+  /**
+   * Create a new Assignment for a Pair.
+   *
+   * Creating a `pending` Assignment does not take the Pair's execution slot, so this is
+   * legal even while another Assignment is active — a Pair may legitimately have a backlog.
+   * What it must NOT do is *silently* become the active owner; that is `pair.assignWork`,
+   * reached only from `dispatchAssignment`, which enforces `assertExecutionSlotAvailable`.
+   *
+   * The rejection that belongs here is a `cancelled`/`failed`/completed Pair: a terminal
+   * Assignment is not a legitimate target for new work, and silently accepting one would
+   * produce an Assignment that can never be dispatched and can never resolve.
+   */
   public async createAssignment(
     pairId: PairId,
     title: string,
@@ -987,6 +1131,26 @@ export class RelayEngine {
   ): Promise<Assignment> {
     const pair = await this.repos.pairs.findById(pairId);
     if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'PAIR_NOT_FOUND');
+
+    const current = pair.activeAssignmentId
+      ? await this.repos.assignments.findById(pair.activeAssignmentId)
+      : null;
+    if (current && RelayEngine.TERMINAL_ASSIGNMENT_STATES.has(current.status)) {
+      // A terminal Assignment should not be holding the slot. Repair it here rather than
+      // refusing, because the refusal would be a dead end: the operator's intent (new work)
+      // is legitimate and the stale slot is the actual defect.
+      pair.clearWork();
+      await this.repos.pairs.save(pair);
+      await this.emitEvent('pair', pair.id, 'pair.assignment_slot_released', {
+        actor: 'engine',
+        previousState: current.status,
+        newState: 'idle',
+        details: {
+          reason: 'The active Assignment was already terminal; the execution slot was released.',
+          releasedAssignmentId: current.id,
+        },
+      });
+    }
 
     const assignment = Assignment.create(pairId, pair.projectId, title, instruction);
     await this.repos.assignments.save(assignment);
@@ -1001,11 +1165,232 @@ export class RelayEngine {
   }
 
   /**
-   * Dispatches and delivers an assignment to the assigned worker runtime.
-   * Enforces:
-   * - Invariant 1: No duplicate active or ambiguous delivery
-   * - Invariant 2: Observable evidence verified before confirmed state
-   * - Invariant 3: Ambiguous state on uncertain UI/response state, blocking automatic resend
+   * EXECUTION-SLOT INVARIANT — at most ONE unresolved Assignment owns a Pair's work.
+   *
+   * ## What the invariant is
+   *
+   * `Pair.activeAssignmentId` is the Pair's single execution slot. At most one Assignment
+   * with a non-terminal status may hold it. Two holders mean two Assignments each believe
+   * they own the Pair's work, and the newer one silently overwrote the older one at the
+   * moment of dispatch — which is how an Assignment ends up orphaned while still `active`.
+   *
+   * ## Why dispatch enforces it rather than trusting the caller
+   *
+   * `pair.assignWork()` is an unconditional setter, so nothing stopped dispatch B from
+   * overwriting `activeAssignmentId` while dispatch A's Assignment was still `active`. The
+   * orphan was then invisible: A still reported `active` with its own `currentAttemptId`, and
+   * the Pair pointed at B. This check is placed inside the Phase-1 transaction, before any
+   * durable intent is written, so a refusal leaves no partial record.
+   *
+   * Re-dispatching the SAME Assignment is always allowed: the slot is already its own, and
+   * retrying through the existing lifecycle is exactly the point.
+   */
+  private async assertExecutionSlotAvailable(pair: Pair, assignment: Assignment): Promise<void> {
+    if (!pair.activeAssignmentId || pair.activeAssignmentId === assignment.id) return;
+
+    const holder = await this.repos.assignments.findById(pair.activeAssignmentId);
+    if (!holder) {
+      // Dangling pointer to a Assignment that no longer exists. The Pair cannot keep
+      // claiming an owner that is gone, and refusing here would deadlock the Pair forever.
+      // Released with an event so the repair is visible, not silent.
+      pair.clearWork();
+      await this.repos.pairs.save(pair);
+      await this.emitEvent('pair', pair.id, 'pair.assignment_slot_released', {
+        actor: 'engine',
+        previousState: 'missing',
+        newState: 'idle',
+        details: {
+          reason: 'The active Assignment id pointed at a record that no longer exists.',
+          danglingAssignmentId: this.currentSlotId(pair),
+        },
+      });
+      return;
+    }
+
+    if (RelayEngine.TERMINAL_ASSIGNMENT_STATES.has(holder.status)) {
+      // Terminal holder: releasing the slot is a legal, explicit transition.
+      pair.clearWork();
+      await this.repos.pairs.save(pair);
+      await this.emitEvent('pair', pair.id, 'pair.assignment_slot_released', {
+        actor: 'engine',
+        previousState: holder.status,
+        newState: 'idle',
+        details: { releasedAssignmentId: holder.id, reason: 'The previous slot holder is terminal.' },
+      });
+      return;
+    }
+
+    throw new RelayDomainError(
+      `Pair ${pair.id} already has an unresolved active Assignment (${holder.id}, status=${holder.status}) ` +
+      `holding the execution slot. Dispatching ${assignment.id} would silently orphan ${holder.id}. ` +
+      `Retry the active Assignment, or explicitly transition it (complete / fail / cancel) or run ` +
+      `reconcilePairAssignmentAuthority(${pair.id}) before dispatching new work.`,
+      'PAIR_ACTIVE_ASSIGNMENT_EXISTS',
+    );
+  }
+
+  /** The Pair's current execution-slot holder, before any repair in this call clears it. */
+  private currentSlotId(pair: Pair): string | null {
+    return pair.activeAssignmentId ?? null;
+  }
+
+  /**
+   * Provider setting keys, namespaced per provider type.
+   *
+   * Namespacing is what keeps a setting for one provider from being silently applied to
+   * another: a model reference is only meaningful for the provider it names.
+   */
+  public static providerSettingKey(
+    providerType: ProviderType,
+    name: 'transportModel',
+  ): string {
+    return `${providerType}.${name}`;
+  }
+
+  /**
+   * The explicit, operator-set model override for a provider's transport, or `null`.
+   *
+   * ## Why there is no default here
+   *
+   * Returning a built-in model name would make RelayX a silent participant in model
+   * selection: deliveries would be served by something no operator chose, and the evidence
+   * would say only "space-bunny-free" with no record of who picked it. Instead an unset
+   * setting means the provider's own configuration decides, and the delivery evidence says
+   * exactly that (`modelSelectionSource: 'opencode_default_model'`).
+   *
+   * A malformed or empty value is treated as UNSET rather than passed through, because a
+   * half-specified `provider/` reference would fail at the provider and the resulting error
+   * would read as a provider fault rather than a configuration fault.
+   */
+  private async resolveProviderModelOverride(providerType: ProviderType): Promise<string | null> {
+    const setting = await this.repos.providerSettings.get(
+      RelayEngine.providerSettingKey(providerType, 'transportModel'),
+    );
+    if (!setting) return null;
+    const value = setting.value.trim();
+    if (value.length === 0) return null;
+    // Must be exactly `provider/model` or `provider/model#variant`. Refusing anything else
+    // here keeps the failure legible at configuration time instead of at send time.
+    if (!/^[^/\s]+\/[^/\s]+(#\S+)?$/.test(value)) return null;
+    return value;
+  }
+
+  /** Read one provider setting, or `null` when unset. */
+  public async getProviderSetting(key: string): Promise<ProviderSetting | null> {
+    return this.repos.providerSettings.get(key);
+  }
+
+  /** Read every provider setting, for operator visibility. */
+  public async listProviderSettings(): Promise<ProviderSetting[]> {
+    return this.repos.providerSettings.list();
+  }
+
+  /**
+   * Set an explicit provider setting, with an event.
+   *
+   * An empty value CLEARS the setting rather than storing a blank: there is no such thing as
+   * a set-but-empty model, and storing one would make `listProviderSettings` lie. Clearing
+   * returns `null` and records the change, so "we stopped overriding" is as auditable as
+   * "we started overriding".
+   */
+  public async setProviderSetting(
+    key: string,
+    value: string,
+    opts: { setBy?: string; note?: string } = {},
+  ): Promise<ProviderSetting | null> {
+    const trimmed = value.trim();
+    const previous = await this.repos.providerSettings.get(key);
+    // The event actor vocabulary is a closed set; an operator action IS a user action, and
+    // the operator's own identity is preserved in `setBy`/`details` rather than being forced
+    // into an actor enum that has no member for it.
+    const actor = (opts.setBy === 'recovery' || opts.setBy === 'engine' ? opts.setBy : 'user') as
+      | 'user'
+      | 'recovery'
+      | 'engine';
+    const setBy = opts.setBy ?? 'operator';
+
+    if (trimmed.length === 0) {
+      if (!previous) return null;
+      await this.repos.providerSettings.delete(key);
+      await this.emitEvent('pair', key as unknown as PairId, 'provider.setting_cleared', {
+        actor,
+        previousState: previous.value,
+        details: { key, note: opts.note ?? null, clearedBy: setBy },
+      });
+      return null;
+    }
+
+    const now = Date.now();
+    const setting: ProviderSetting = {
+      key,
+      value: trimmed,
+      note: opts.note ?? null,
+      setBy,
+      createdAt: previous?.createdAt ?? now,
+      updatedAt: now,
+    };
+    await this.repos.providerSettings.save(setting);
+    await this.emitEvent('pair', key as unknown as PairId, 'provider.setting_changed', {
+      actor,
+      previousState: previous?.value,
+      newState: setting.value,
+      details: { key, note: setting.note, setBy, previouslySetAt: previous?.createdAt ?? null },
+    });
+    return setting;
+  }
+
+  /**
+   * Dispatch precondition: the worker's exact session must be PROVEN PRESENT.
+   *
+   * ## Why this is NOT a readiness gate
+   *
+   * A previous revision of this method refused the dispatch unless
+   * `computePairReadiness(...).state === 'READY'`. That was wrong, and it is removed on
+   * frozen-design grounds, not on convenience grounds:
+   *
+   * - `DESIGN_FREEZE_SESSION_PAIR_OPERATIONS.md` §8.3 `[FROZEN]`: "Readiness describes
+   *   observational sufficiency. It is **not** execution permission. ... A `ready` Pair is
+   *   not thereby authorized to dispatch." Gating dispatch on readiness makes readiness the
+   *   execution authority, which is the exact inversion the freeze forbids.
+   * - §4.3 `[FROZEN]`: "Execution still requires its own separate authorization, per
+   *   `EXECUTION_AUTHORITY.md`. ACTIVE is not permission to dispatch." The real gate is the
+   *   I-2 `assertProviderContactPermitted()` above plus the frozen execution authority
+   *   (Attempt-bound identity), both of which are checked here.
+   * - §8.2 `[FROZEN]`: a persisted readiness value "may **never** gate, permit, or enable
+   *   an action." Readiness is a cache with a validity window, so it is structurally
+   *   incapable of being a correct gate input.
+   *
+   * It was also unachievable for this Pair: the planner side is a ChatGPT browser session
+   * with no message-reference capability, so `evaluateSideContinuity` returns `unknown` for
+   * it forever, Pair continuity can never leave `UNKNOWN`, and readiness can never reach
+   * `READY`. The gate therefore made dispatch permanently impossible for every Pair with a
+   * Level-0 planner — it did not enforce the freeze, it disabled the product.
+   *
+   * ## What is enforced instead
+   *
+   * The one evidence-backed negative that genuinely blocks a dispatch: a side whose exact
+   * session was observed `absent` in the provider's own store. That is a completed read
+   * with a negative result, so a send is a write into a session that provably does not
+   * exist. `unknown` does NOT block, because an unreadable or unmeasured dimension is honest
+   * degradation rather than a defect (I-6).
+   */
+  private async assertDispatchTargetPresent(pair: Pair, assignment: Assignment): Promise<void> {
+    if (!pair.workerSessionId) return;
+    const identity = await this.repos.sideIdentities.find(pair.id, 'worker');
+    if (identity && identity.existenceState === 'absent') {
+      const observedAt = identity.observation?.observedAt ?? null;
+      throw new RelayDomainError(
+        `Assignment ${assignment.id} cannot be dispatched: the worker's exact session ` +
+        `(${identity.externalSessionId ?? 'unbound'}) was observed ABSENT in the provider's own store` +
+        `${observedAt ? ` on ${new Date(observedAt).toISOString()}` : ' (observation time not recorded)'}. ` +
+        `A delivery into an absent session is a blind write. Re-verify the side before dispatching.`,
+        'DISPATCH_TARGET_ABSENT',
+      );
+    }
+  }
+
+  /**
+   * Dispatch precondition: the worker session must be bound to an identity that exists.
    */
   public async dispatchAssignment(assignmentId: AssignmentId): Promise<{
     assignment: Assignment;
@@ -1048,9 +1433,26 @@ export class RelayEngine {
       const worker = await this.repos.runtimes.findById(pair.workerSessionId);
       if (!worker) throw new RelayDomainError(`Worker runtime ${pair.workerSessionId} not found`, 'NOT_FOUND');
 
+      // ---- TARGET-VALIDITY PRECONDITIONS ----
+      //
+      // These answer "can this dispatch be attempted at all", and they run BEFORE the
+      // ownership checks below. The order is deliberate and is not cosmetic: a caller whose
+      // worker runtime is terminated, or whose own previous delivery is stranded, must be
+      // told THAT, because no amount of slot ownership would make their dispatch succeed.
+      // Reporting a slot conflict instead would send an operator to fix the wrong thing.
       if (worker.status === 'terminated') {
         throw new RuntimeNotAvailableError(worker.id, worker.status);
       }
+
+      // The target must be PROVEN PRESENT.
+      //
+      // Deliberately NOT a readiness gate. See the long note on `assertDispatchTargetPresent`
+      // below for why demanding a `READY` level here would be a freeze violation.
+      // What is required is one evidence-backed negative: if the worker's exact session has
+      // been observed ABSENT in the provider's own store, the delivery cannot land and a
+      // send would be a blind write into a session that does not exist. A merely `unknown`
+      // observation is NOT sufficient and does not block: honest degradation is not a defect.
+      await this.assertDispatchTargetPresent(pair, assignment);
 
       // Check existing deliveries for this assignment
       const existingDeliveries = await this.repos.deliveries.findByAssignmentId(assignment.id);
@@ -1072,6 +1474,22 @@ export class RelayEngine {
       // retried/duplicated dispatch can never mint a colliding attempt number.
       const attempts = await this.repos.attempts.findByAssignmentId(assignment.id);
       const attemptNumber = attempts.reduce((max, a) => Math.max(max, a.attemptNumber), 0) + 1;
+
+      // ---- EXECUTION-SLOT INVARIANT: one unresolved active Assignment owns this Pair ----
+      //
+      // `pair.activeAssignmentId` is the Pair's single execution slot. Two different
+      // unresolved Assignments must never hold it, and a dispatch must never STEAL it: the
+      // previous holder has to be transitioned explicitly, with an event, or the Pair ends
+      // up with an orphan that still believes it owns the work while a newer Assignment
+      // is the one actually being sent. `assertExecutionSlotAvailable` is the check;
+      // `reconcilePairAssignmentAuthority` is the operation that repairs such a state.
+      //
+      // It sits IMMEDIATELY before `pair.assignWork(...)` — the single statement it exists to
+      // guard — so it cannot drift away from the mutation it protects. The surrounding
+      // `runInTransaction` rolls back on throw, so a refusal here still leaves no record:
+      // no Attempt, no Delivery, no slot change.
+      await this.assertExecutionSlotAvailable(pair, assignment);
+
       // Execution authority is frozen here, at dispatch (EXECUTION_AUTHORITY.md §1-2).
       const attempt = Attempt.create(assignment.id, attemptNumber, {
         sessionPairId: pair.id,
@@ -1108,13 +1526,48 @@ export class RelayEngine {
       return { assignment, pair, worker, attempt, delivery, idempotencyKey };
     });
 
-    // ---- Phase 2: external provider call, deliberately OUTSIDE the DB transaction ----
+    // ---- Phase 1b: the durable pre-dispatch boundary, captured from the EXACT session ----
+    //
+    // This MUST happen after the intent is committed (so a crash leaves a reconcilable
+    // record) and MUST happen before the send (so the post-transport reconciliation can
+    // tell a turn this Attempt created from one that already existed). It is committed
+    // immediately as evidence, because a crash between "intent durable" and "send" has to
+    // be able to classify honestly: with no boundary, the only correct verdict is
+    // `ambiguous`, and that is exactly what the classifier returns for a null boundary.
     const provider = this.getProvider(worker.providerType);
+    const boundary = provider.captureTransportBoundary
+      ? await provider.captureTransportBoundary({
+          runtimeSessionId: worker.id,
+          externalSessionId: worker.externalSessionId ?? null,
+        })
+      : { watermark: null, failure: 'Provider exposes no transport-boundary capability.' };
+    if (boundary.watermark) {
+      await this.repos.runInTransaction(async () => {
+        delivery.evidence = {
+          id: `ev_pre_dispatch_boundary_${boundary.watermark!.capturedAt}`,
+          timestamp: boundary.watermark!.capturedAt,
+          source: 'reconciliation_probe',
+          runtimeSessionId: worker.id,
+          details: {
+            phase: 'pre_dispatch_boundary',
+            sessionId: boundary.watermark!.sessionId,
+            messageCount: boundary.watermark!.messageCount,
+            latestCreatedAt: boundary.watermark!.latestCreatedAt,
+            messageIds: boundary.watermark!.messageIds,
+          },
+        };
+        await this.repos.deliveries.save(delivery);
+      });
+    }
+
+    // ---- Phase 2: external provider call, deliberately OUTSIDE the DB transaction ----
     const result = await provider.deliverInstruction({
       runtimeSessionId: worker.id,
       externalSessionId: worker.externalSessionId ?? null,
       instructionText: assignment.instruction,
       idempotencyKey,
+      preDispatchWatermark: boundary.watermark,
+      modelOverride: await this.resolveProviderModelOverride(worker.providerType),
     });
 
     // ---- Phase 3: record the outcome ----
@@ -1125,9 +1578,97 @@ export class RelayEngine {
         await this.repos.deliveries.save(delivery);
 
         // confirmDispatch(): the worker is now physically executing.
+        //
+        // DELIVERY AND EXECUTION ARE SEPARATE CLAIMS WITH SEPARATE OWNERS.
+        //
+        // Reaching this branch means only that the instruction is durably in the exact
+        // session. The reconciliation may ALSO have observed what the worker did with it, and
+        // that verdict belongs on the Attempt (ATTEMPT_LIFECYCLE.md Dimension A), never on the
+        // Delivery. Collapsing them is the defect this code path is written to prevent: a
+        // delivery that succeeded followed by a worker that died on a provider quota error is
+        // a DELIVERED delivery and an INTERRUPTED attempt, and reporting it as a failed
+        // delivery would send recovery looking for a resend that must never happen.
         if (attempt.status === 'prepared') {
           attempt.startRunning();
           await this.repos.attempts.save(attempt);
+        }
+
+        const execution = result.reconciliation?.workerExecution ?? null;
+        if (execution === 'terminal_error') {
+          // A provider-reported terminal error on the assistant turn. The closest existing
+          // frozen Dimension-A state is `interrupted`: Case 5, "runtime/process lost mid-work;
+          // execution suspended; repository mutations survive and are NOT rolled back". No
+          // new lifecycle state is invented, and the Delivery stays `delivered`.
+          const evidence = result.reconciliation!.workerExecutionEvidence;
+          attempt.interrupt(
+            `Worker execution terminated with provider error ` +
+            `${evidence.errorType ?? 'unknown'}` +
+            `${evidence.errorStatus ? ` (HTTP ${evidence.errorStatus})` : ''}` +
+            `${evidence.providerId ? ` on ${evidence.providerId}/${evidence.modelId ?? 'unknown'}` : ''}: ` +
+            `${evidence.errorMessage ?? 'no error message reported'}. ` +
+            `The instruction WAS delivered (message ${result.reconciliation!.matchingUserTurn?.messageId ?? 'unknown'}); ` +
+            `this is an execution failure, not a delivery failure.`,
+            result.evidence,
+          );
+          await this.repos.attempts.save(attempt);
+
+          const attention = AttentionItem.create(
+            'critical',
+            'worker_execution_failed',
+            'Worker execution terminated after a confirmed delivery',
+            `Assignment ${assignment.id} was delivered to the worker session, but the worker's ` +
+            `response terminated with ${evidence.errorType ?? 'a provider error'}. ` +
+            `The instruction reached the session; the work did not complete.`,
+            {
+              pairId: pair.id,
+              assignmentId: assignment.id,
+              suggestedAction:
+                `Attempt ${attempt.id} was interrupted and Delivery ${delivery.id} is confirmed ` +
+                `delivered: the instruction IS in the worker session, as user turn ` +
+                `${result.reconciliation!.matchingUserTurn?.messageId ?? 'unknown'}. ` +
+                `Re-verify the worker session, then explicitly transition this Assignment ` +
+                `(retry / fail / complete). Do NOT resend blindly — the instruction is already there.`,
+              suggestedTier: 'tier_1_deterministic',
+            },
+          );
+          await this.repos.attention.save(attention);
+
+          await this.emitEvent('attempt', attempt.id, 'attempt.interrupted', {
+            actor: 'provider',
+            previousState: 'running',
+            newState: 'interrupted',
+            evidence: result.evidence,
+            details: {
+              deliveryId: delivery.id,
+              deliveryStatus: 'delivered',
+              workerExecution: execution,
+              errorType: evidence.errorType,
+              errorStatus: evidence.errorStatus,
+              errorMessage: evidence.errorMessage,
+              providerId: evidence.providerId,
+              modelId: evidence.modelId,
+              matchingUserTurnId: result.reconciliation!.matchingUserTurn?.messageId ?? null,
+            },
+            correlationId: idempotencyKey,
+          });
+
+          // The worker is NOT working: it stopped. Recording `working` here would tell the
+          // supervision tick to wait for a response that will never arrive.
+          worker.recordObservationSuccess('idle', result.evidence);
+          await this.repos.runtimes.save(worker);
+
+          await this.emitEvent('delivery', delivery.id, 'delivery.confirmed', {
+            actor: 'provider',
+            previousState: 'delivering',
+            newState: 'delivered',
+            evidence: result.evidence,
+            details: {
+              workerExecution: execution,
+              note: 'Delivery confirmed from the exact session; worker execution failed separately.',
+            },
+            correlationId: idempotencyKey,
+          });
+          return { assignment, attempt, delivery };
         }
 
         worker.recordObservationSuccess('working', result.evidence);
@@ -1138,15 +1679,39 @@ export class RelayEngine {
           previousState: 'delivering',
           newState: 'delivered',
           evidence: result.evidence,
+          details: { workerExecution: execution ?? 'not_observable' },
           correlationId: idempotencyKey,
         });
 
-        await this.emitEvent('runtime', worker.id, 'worker.started', {
-          actor: 'engine',
-          previousState: 'available',
-          newState: 'working',
-          evidence: result.evidence,
-        });
+        if (execution === 'completed') {
+          // The worker already produced a completed response during the transport call.
+          // Physical completion is proven by the provider, so it is recorded now rather than
+          // waiting for a supervision tick that would otherwise have to re-derive it.
+          if (attempt.status === 'running') {
+            attempt.completePhysical(result.evidence);
+            await this.repos.attempts.save(attempt);
+          }
+          worker.recordObservationSuccess('idle', result.evidence);
+          await this.repos.runtimes.save(worker);
+          await this.emitEvent('attempt', attempt.id, 'attempt.completed_physical', {
+            actor: 'provider',
+            previousState: 'running',
+            newState: 'completed_physical',
+            evidence: result.evidence,
+            details: {
+              deliveryId: delivery.id,
+              assistantMessageId: result.reconciliation?.workerExecutionEvidence.assistantMessageId ?? null,
+            },
+            correlationId: idempotencyKey,
+          });
+        } else {
+          await this.emitEvent('runtime', worker.id, 'worker.started', {
+            actor: 'engine',
+            previousState: 'available',
+            newState: 'working',
+            evidence: result.evidence,
+          });
+        }
       } else if (result.outcome === 'ambiguous') {
         // Mark ambiguous, raise critical attention item
         delivery.markAmbiguous(result.reason ?? 'Delivery outcome ambiguous', result.evidence);
@@ -1199,6 +1764,457 @@ export class RelayEngine {
 
       return { assignment, attempt, delivery };
     });
+  }
+
+  /**
+   * Reconcile ONE terminal-or-stranded Delivery against its EXACT provider session.
+   *
+   * ## Why this is an application operation and not an operator SQL script
+   *
+   * The previous Phase F procedure repaired state by hand:
+   *
+   * ```
+   * sqlite3 relay.sqlite "UPDATE deliveries SET status='failed' WHERE id='...'"
+   * sqlite3 relay.sqlite "INSERT INTO events ..."
+   * ```
+   *
+   * That is not a repair, it is an unreproducible assertion. It skips the domain transition
+   * rules, emits no event through the event repository, leaves no trace of who decided or
+   * why, and produces a state the application could never have produced itself — so the next
+   * reader cannot tell a decided outcome from a typo. This method makes the same decision
+   * through the domain, with the evidence attached and the decision recorded.
+   *
+   * ## What it decides
+   *
+   * It re-reads the exact session named by the Delivery's frozen `targetRuntimeId` +
+   * `Attempt.externalSessionId`, and asks the ONE question that matters: does the exact
+   * session hold a user turn whose normalised text is this Delivery's payload, beyond any
+   * boundary already recorded on the Delivery's evidence?
+   *
+   * - A matching post-boundary turn exists  -> the instruction WAS delivered. A `failed`
+   *   Delivery is corrected to `delivered`, and the Attempt advances to `running` (the
+   *   worker provably began) and then to `interrupted` if the assistant turn shows a
+   *   terminal provider error.
+   * - The session is readable and holds no such turn -> `not_delivered` is confirmed and
+   *   the `failed` Delivery is left alone.
+   * - The session cannot be read -> NOTHING is changed. The Delivery is left exactly as it
+   *   was and the method reports why, because an unreadable session is "could not check",
+   *   never "not there" (I-6, C-8).
+   *
+   * ## It never resends
+   *
+   * There is no send in this method. A matching post-boundary user turn is a hard STOP for
+   * any retry: the instruction is already in the session, and re-sending it would duplicate
+   * real work inside a conversation. The returned `resendPermitted` flag exists so the
+   * caller cannot bypass that conclusion.
+   */
+  public async reconcileDeliveryAgainstExactSession(deliveryId: DeliveryId): Promise<{
+    delivery: Delivery;
+    reconciliation: TransportReconciliation;
+    changes: string[];
+    resendPermitted: boolean;
+  }> {
+    const delivery = await this.repos.deliveries.findById(deliveryId);
+    if (!delivery) throw new RelayDomainError(`Delivery ${deliveryId} not found`, 'NOT_FOUND');
+
+    const attempt = await this.repos.attempts.findById(delivery.attemptId);
+    const assignment = await this.repos.assignments.findById(delivery.assignmentId);
+    if (!assignment) {
+      throw new RelayDomainError(
+        `Delivery ${deliveryId} references Assignment ${delivery.assignmentId}, which no longer exists.`,
+        'NOT_FOUND',
+      );
+    }
+
+    const worker = await this.repos.runtimes.findById(delivery.targetRuntimeId);
+    const externalSessionId =
+      attempt?.externalSessionId ?? worker?.externalSessionId ?? null;
+
+    const changes: string[] = [];
+    const targetRuntime = worker;
+    const provider = targetRuntime ? this.getProvider(targetRuntime.providerType) : null;
+
+    // ---- I-2 GATE — ARMED (S6) ----
+    //
+    // Reading the exact session is a REAL external contact, not a local inspection, so §11.5
+    // gates it like every other contact. It is tempting to exempt a recovery read — "recovery
+    // must work when things are broken" — but the frozen precedent says the opposite:
+    // `probeDispatchOutcome`, which reconciles an already-sent dispatch, is gated on the owning
+    // Pair and returns `insufficient` rather than contacting an IDLE Pair's provider.
+    //
+    // `insufficient` is the honest disposition: the read did not happen, so RelayX does not
+    // know, and it must NOT record `not_delivered` — that would assert an external fact it
+    // never established (I-6, I-13).
+    //
+    // Ownership comes from the Attempt's FROZEN authority (`sessionPairId`), never a mutable
+    // lookup, so the gate consults the same Pair the dispatch was authorised against.
+    if (attempt?.sessionPairId) {
+      const owningPair = await this.repos.pairs.findById(attempt.sessionPairId);
+      if (owningPair && !owningPair.isProviderContactPermitted()) {
+        const reason =
+          `Pair ${attempt.sessionPairId} is not ACTIVE, so the exact session behind ` +
+          `Delivery ${delivery.id} cannot be read. No provider contact was made and no ` +
+          `external state was inferred (DESIGN_FREEZE I-2, I-6, §11.5).`;
+        await this.emitEvent('delivery', delivery.id, 'delivery.reconciled', {
+          actor: 'recovery',
+          previousState: delivery.status,
+          details: {
+            disposition: 'insufficient',
+            changes: [],
+            transportClassification: 'ambiguous',
+            reason,
+            resendPermitted: false,
+          },
+        });
+        return {
+          delivery,
+          reconciliation: reconcileTransportOutcome({
+            expectedText: assignment.instruction,
+            watermark: extractRecordedWatermark(delivery.evidence),
+            messages: [],
+            transcriptReadable: false,
+            transcriptReadFailure: reason,
+          }),
+          changes,
+          resendPermitted: false,
+        };
+      }
+    }
+
+    let reconciliation: TransportReconciliation;
+    if (!provider || !targetRuntime || !externalSessionId) {
+      // Nothing to read. Report the honest `ambiguous` rather than inventing a verdict.
+      reconciliation = reconcileTransportOutcome({
+        expectedText: assignment.instruction,
+        watermark: null,
+        messages: [],
+        transcriptReadable: false,
+        transcriptReadFailure: !targetRuntime
+          ? 'The target runtime session no longer exists.'
+          : 'The Attempt and RuntimeSession carry no authoritative external session id.',
+      });
+    } else if (!provider.captureTransportBoundary || !provider.readExactSessionTurnsForReconciliation) {
+      reconciliation = reconcileTransportOutcome({
+        expectedText: assignment.instruction,
+        watermark: null,
+        messages: [],
+        transcriptReadable: false,
+        transcriptReadFailure:
+          `Provider ${targetRuntime.providerType} exposes no exact-session read capability, so ` +
+          `delivery state cannot be established from authoritative evidence.`,
+      });
+    } else {
+      // The boundary must be the PRE-dispatch state, not the current state. A boundary taken
+      // now would contain the very turn we are looking for, so nothing could ever be
+      // post-boundary and every delivery would look like it never happened.
+      //
+      // Preference order, and the reason for it:
+      //   1. the boundary already committed on this Delivery's evidence (exact, from the send);
+      //   2. otherwise, NO boundary — which yields `ambiguous` rather than a guess.
+      //
+      // Taking a fresh read as a substitute boundary was rejected: it would produce confident,
+      // structurally-wrong verdicts in the one direction that authorises a resend.
+      const transcript = await provider.readExactSessionTurnsForReconciliation(externalSessionId);
+      if (!transcript.readable) {
+        reconciliation = reconcileTransportOutcome({
+          expectedText: assignment.instruction,
+          watermark: null,
+          messages: [],
+          transcriptReadable: false,
+          transcriptReadFailure: transcript.failure,
+        });
+      } else {
+        // Boundary preference, and the reason for the order:
+        //
+        //   1. the id set captured from the exact session immediately before this Delivery's
+        //      send — authoritative, and the only kind a live dispatch produces;
+        //   2. otherwise, a boundary RECONSTRUCTED from the Delivery's own durable
+        //      `created_at`. Sound in one direction only (a turn cannot predate the intent
+        //      that created it), and recorded as `reconstructed_from_intent_time` so it is
+        //      never mistaken for a captured read.
+        //
+        // A boundary is REQUIRED rather than assumed: without one, a fresh read would
+        // contain the very turn being looked for, so nothing could ever be post-boundary and
+        // every delivery would reconcile to "never happened" — a confident, structurally-wrong
+        // verdict in exactly the direction that authorises a resend.
+        const captured = extractRecordedWatermark(delivery.evidence);
+        const boundary =
+          captured ??
+          reconstructWatermarkFromIntentTime(externalSessionId, transcript.messages, delivery.createdAt);
+
+        reconciliation = reconcileTransportOutcome({
+          expectedText: assignment.instruction,
+          watermark: boundary,
+          messages: transcript.messages,
+          transcriptReadable: true,
+          transportExitCode: null,
+          transportError: 'Reconciled after the fact; this operation ran no transport process.',
+        });
+      }
+    }
+
+    const before = { delivery: delivery.status, attempt: attempt?.status ?? null };
+
+    if (reconciliation.classification === 'delivered') {
+      await this.repos.runInTransaction(async () => {
+        if (delivery.status !== 'delivered') {
+          delivery.confirmDelivered(reconciliationEvidence(reconciliation, delivery, assignment));
+          await this.repos.deliveries.save(delivery);
+          changes.push(`Delivery ${delivery.id}: ${before.delivery} -> delivered`);
+        }
+
+        if (attempt) {
+          if (attempt.status === 'prepared') {
+            attempt.startRunning();
+            changes.push(`Attempt ${attempt.id}: prepared -> running`);
+          }
+          if (reconciliation.workerExecution === 'terminal_error' && attempt.status === 'running') {
+            const e = reconciliation.workerExecutionEvidence;
+            attempt.interrupt(
+              `Worker execution terminated with provider error ${e.errorType ?? 'unknown'}` +
+              `${e.errorStatus ? ` (HTTP ${e.errorStatus})` : ''}` +
+              `${e.providerId ? ` on ${e.providerId}/${e.modelId ?? 'unknown'}` : ''}: ` +
+              `${e.errorMessage ?? 'no error message reported'}. The instruction WAS delivered ` +
+              `(message ${reconciliation.matchingUserTurn?.messageId ?? 'unknown'}).`,
+              reconciliationEvidence(reconciliation, delivery, assignment),
+            );
+            changes.push(`Attempt ${attempt.id}: running -> interrupted`);
+          } else if (reconciliation.workerExecution === 'completed' && attempt.status === 'running') {
+            attempt.completePhysical(reconciliationEvidence(reconciliation, delivery, assignment));
+            changes.push(`Attempt ${attempt.id}: running -> completed_physical`);
+          }
+          await this.repos.attempts.save(attempt);
+        }
+      });
+
+      await this.emitEvent('delivery', delivery.id, 'delivery.reconciled', {
+        actor: 'recovery',
+        previousState: before.delivery,
+        newState: delivery.status,
+        evidence: reconciliationEvidence(reconciliation, delivery, assignment),
+        details: {
+          changes,
+          transportClassification: reconciliation.classification,
+          workerExecution: reconciliation.workerExecution,
+          matchingUserTurnId: reconciliation.matchingUserTurn?.messageId ?? null,
+          expectedFingerprint: reconciliation.expectedFingerprint,
+          matchedFingerprint: reconciliation.matchedFingerprint,
+          matchKind: reconciliation.matchKind,
+          resendPermitted: false,
+          reason: 'A matching post-boundary user turn exists in the exact session; the instruction was delivered.',
+        },
+      });
+    } else {
+      await this.emitEvent('delivery', delivery.id, 'delivery.reconciled', {
+        actor: 'recovery',
+        previousState: before.delivery,
+        newState: before.delivery,
+        details: {
+          changes,
+          transportClassification: reconciliation.classification,
+          reason: reconciliation.reason,
+          boundaryProvenance: reconciliation.boundaryProvenance,
+          // This is the only case in which a retry is defensible: the session was READ
+          // successfully AND shown not to hold the instruction. A boundary reconstructed
+          // from the intent time cannot license a resend on its own, because it is only
+          // sound in the excluding direction — it can wrongly exclude a turn, never wrongly
+          // include an earlier attempt's, so absence under it is not proof of absence.
+          resendPermitted:
+            reconciliation.classification === 'not_delivered' &&
+            reconciliation.boundaryProvenance === 'captured_pre_dispatch',
+        },
+      });
+    }
+
+    const fresh = await this.repos.deliveries.findById(deliveryId);
+    return {
+      delivery: fresh ?? delivery,
+      reconciliation,
+      changes,
+      resendPermitted:
+        reconciliation.classification === 'not_delivered' &&
+        reconciliation.boundaryProvenance === 'captured_pre_dispatch',
+    };
+  }
+
+  /** Read an exact session's turns through whichever provider capability exposes them. */
+  /**
+   * Repair a Pair's execution-slot authority from its own Assignment records.
+   *
+   * ## The orphan state this replaces
+   *
+   * A Pair reached a state where `activeAssignmentId` named one Assignment while several
+   * other Assignments were simultaneously `active` — the result of unguarded
+   * `pair.assignWork()` overwrites across repeated dispatches. Phase F previously "fixed" this
+   * with a hand-written `UPDATE pairs SET active_assignment_id=...`, which made the symptom
+   * disappear while leaving every orphaned Assignment still `active` and still believing it
+   * owned the work. This method resolves the whole set deterministically.
+   *
+   * ## The rule
+   *
+   * 1. Classify every Assignment of the Pair as terminal or unresolved.
+   * 2. If the current holder is unresolved and real, it KEEPS the slot. The most recent
+   *    unresolved Assignment is not promoted over it just for being newer — a `pending`
+   *    backlog item has never been dispatched and has no claim to the slot.
+   * 3. Every OTHER unresolved Assignment is transitioned explicitly, with an event each.
+   *    `pending` with no Attempt is `cancelled` (superseded, never dispatched);
+   *    `active`/`waiting_for_handoff` with dispatch evidence is `failed` only when its
+   *    Delivery is terminal and its Attempt is not running, and otherwise `cancelled` with
+   *    the ambiguity named in the event. Nothing is silently mutated.
+   * 4. If the holder is dangling or terminal, the slot is released and, if exactly one
+   *    unresolved Assignment remains, that one is adopted. If SEVERAL remain, none is adopted:
+   *    the choice is an operator's, and the method reports the candidates instead of guessing.
+   *
+   * This is idempotent: running it twice changes nothing the second time.
+   */
+  public async reconcilePairAssignmentAuthority(pairId: PairId): Promise<{
+    pair: Pair;
+    adoptedAssignmentId: string | null;
+    releasedAssignmentId: string | null;
+    transitions: Array<{ assignmentId: string; from: string; to: string; reason: string }>;
+    unresolvedCandidates: string[];
+  }> {
+    const pair = await this.repos.pairs.findById(pairId);
+    if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'PAIR_NOT_FOUND');
+
+    const assignments = await this.repos.assignments.findByPairId(pairId);
+    const unresolved = assignments.filter(
+      (a) => !RelayEngine.TERMINAL_ASSIGNMENT_STATES.has(a.status),
+    );
+    const transitions: Array<{
+      assignmentId: string;
+      from: string;
+      to: string;
+      reason: string;
+    }> = [];
+
+    const isTerminal = (a: Assignment) => RelayEngine.TERMINAL_ASSIGNMENT_STATES.has(a.status);
+    let holder = pair.activeAssignmentId
+      ? assignments.find((a) => a.id === pair.activeAssignmentId) ?? null
+      : null;
+    const holderIsUsable = Boolean(holder && !isTerminal(holder));
+
+    if (holderIsUsable) {
+      // Rule 2 + 3: the current holder keeps the slot; every other unresolved Assignment is
+      // transitioned out of the way, explicitly.
+      for (const candidate of unresolved) {
+        if (candidate.id === holder!.id) continue;
+        const reason = await this.describeOrphanReason(candidate);
+        const transition = await this.repos.runInTransaction(async () => {
+          const fresh = await this.repos.assignments.findById(candidate.id);
+          if (!fresh) {
+            return { assignmentId: candidate.id, from: 'missing', to: 'missing', reason: 'The Assignment record no longer exists.' };
+          }
+          if (isTerminal(fresh)) {
+            return { assignmentId: fresh.id, from: candidate.status, to: fresh.status, reason: 'Already terminal.' };
+          }
+          const from = fresh.status;
+          // `Assignment.cancel()` takes no reason: the entity has no reason field, and
+          // adding one would be a schema change for a value the event stream already owns.
+          // The reason is therefore carried by the event emitted below and returned in the
+          // transition record, so it is never lost — just stored where it belongs.
+          fresh.cancel();
+          await this.repos.assignments.save(fresh);
+          return { assignmentId: fresh.id, from, to: fresh.status, reason };
+        });
+        transitions.push(transition);
+        await this.emitEvent('assignment', transition.assignmentId, 'assignment.cancelled', {
+          actor: 'recovery',
+          previousState: transition.from,
+          newState: transition.to,
+          details: { pairId, reason: transition.reason, supersededBy: holder!.id },
+        });
+      }
+    } else {
+      // Rule 4: release the unusable slot first.
+      if (pair.activeAssignmentId) {
+        const releasedId = pair.activeAssignmentId;
+        pair.clearWork();
+        await this.repos.pairs.save(pair);
+        await this.emitEvent('pair', pair.id, 'pair.assignment_slot_released', {
+          actor: 'recovery',
+          previousState: holder?.status ?? 'missing',
+          newState: 'idle',
+          details: {
+            releasedAssignmentId: releasedId,
+            reason: holder
+              ? 'The execution slot was held by an Assignment that is already terminal.'
+              : 'The execution slot pointed at an Assignment that no longer exists.',
+          },
+        });
+      }
+
+      const remaining = assignments.filter(
+        (a) => !isTerminal(a) && !transitions.some((t) => t.assignmentId === a.id),
+      );
+      if (remaining.length === 1) {
+        holder = remaining[0];
+        await this.repos.runInTransaction(async () => {
+          const fresh = await this.repos.assignments.findById(remaining[0].id);
+          if (!fresh) return;
+          pair.assignWork(fresh.id);
+          await this.repos.pairs.save(pair);
+        });
+        await this.emitEvent('pair', pair.id, 'pair.assignment_slot_adopted', {
+          actor: 'recovery',
+          previousState: 'idle',
+          newState: 'active',
+          details: {
+            adoptedAssignmentId: remaining[0].id,
+            reason: 'Exactly one unresolved Assignment remained, so it was adopted unambiguously.',
+          },
+        });
+      } else if (remaining.length > 1) {
+        // Deliberately not guessing. Adopting the newest would re-create the very orphan
+        // state this method exists to remove.
+        await this.emitEvent('pair', pair.id, 'pair.assignment_slot_unresolved', {
+          actor: 'recovery',
+          previousState: pair.activeAssignmentId ?? 'idle',
+          newState: pair.status,
+          details: {
+            candidateAssignmentIds: remaining.map((a) => a.id),
+            reason:
+              'Several unresolved Assignments remain and none provably owned the execution slot. ' +
+              'No Assignment was adopted, because promoting the newest would be exactly the ' +
+              'silent overwrite this reconciliation forbids. An operator must choose.',
+          },
+        });
+      }
+    }
+
+    return {
+      pair: (await this.repos.pairs.findById(pairId)) ?? pair,
+      adoptedAssignmentId: holderIsUsable ? holder!.id : (holder?.id ?? null),
+      releasedAssignmentId: null,
+      transitions,
+      unresolvedCandidates: unresolved.map((a) => a.id),
+    };
+  }
+
+  /**
+   * Explain, from records alone, why an unresolved Assignment is not the execution-slot owner.
+   *
+   * This is a DISCRIMINATOR, not a verdict: it reports which lifecycle state the Assignment is
+   * actually in, and the event carries that text verbatim, so a reader can disagree with the
+   * classification and act on the evidence rather than on a summary.
+   */
+  private async describeOrphanReason(assignment: Assignment): Promise<string> {
+    if (assignment.status === 'pending' && !assignment.currentAttemptId) {
+      return (
+        'Superseded: this Assignment was never dispatched (no Attempt was ever created for it) ' +
+        'and it was holding the Pair execution slot alongside a different Assignment. ' +
+        'No instruction was ever sent for it, so nothing external is affected.'
+      );
+    }
+    const attempts = await this.repos.attempts.findByAssignmentId(assignment.id);
+    const deliveries = await this.repos.deliveries.findByAssignmentId(assignment.id);
+    const parts = [
+      `Superseded: this Assignment was unresolved (status=${assignment.status}) while a different ` +
+      'Assignment held the Pair execution slot.',
+      `Attempts: ${attempts.length === 0 ? 'none' : attempts.map((a) => `${a.id}=${a.status}`).join(', ')}.`,
+      `Deliveries: ${deliveries.length === 0 ? 'none' : deliveries.map((d) => `${d.id}=${d.status}`).join(', ')}.`,
+    ];
+    return parts.join(' ');
   }
 
   /* --- Supervisor Tick (Observe -> Reconcile -> Decide -> Act -> Verify) --- */
@@ -1281,14 +2297,59 @@ export class RelayEngine {
             );
             await this.repos.runtimes.save(worker);
 
-            // Check if worker completed work
-            if (inspection.isComplete && assignment.status === 'active') {
-              // Worker completed! Create Handoff for planner review
+            // Check if worker completed work via inspection AND independently verify
+            // through the authoritative exact-session transcript (live Phase-G defect
+            // fix: CLI session list lacks embedded messages in v2.0.10, so inspection
+            // alone misses the real completed assistant turn for this session).
+            let isWorkerComplete = inspection.isComplete;
+            let lastResponseSnippet = inspection.lastResponseSnippet ?? null;
+            let transcriptEvidence: ObservableEvidence | null = null;
+            if (!isWorkerComplete && worker.externalSessionId && assignment.currentAttemptId) {
+              try {
+                if (typeof (provider as any).readExactSessionTurnsForReconciliation === 'function') {
+                  const transcriptRead = await (provider as any).readExactSessionTurnsForReconciliation(worker.externalSessionId);
+                  if (transcriptRead && transcriptRead.readable && Array.isArray(transcriptRead.messages)) {
+                    const assistantTurns = transcriptRead.messages.filter(
+                      (m: any) => m.role === 'assistant' || m.messageRole === 'assistant' || m.agent === 'build',
+                    );
+                    if (assistantTurns.length > 0) {
+                      const latestTurn = assistantTurns[0];
+                      const turnText = (latestTurn.text || '').trim();
+                      const hasFinish = latestTurn.finish === 'stop' || latestTurn.finish === 'tool-calls';
+                      if (turnText.length > 0 && hasFinish) {
+                        isWorkerComplete = true;
+                        lastResponseSnippet = turnText.length > 500 ? turnText.substring(0, 500) + ' [truncated]' : turnText;
+                        transcriptEvidence = {
+                          id: `ev_transcript_completion_${Date.now()}`,
+                          timestamp: Date.now(),
+                          source: 'reconciliation_probe',
+                          runtimeSessionId: worker.id,
+                          bundleIdentifier: (provider as any).defaultBundleId ?? 'opencode',
+                          details: {
+                            reason: 'Worker completed assistant turn verified independently via exact-session transcript (shared-service read) after CLI session list returned no embedded messages.',
+                            assistantMessageId: latestTurn.messageId || latestTurn.id || null,
+                            assistantFinish: latestTurn.finish || null,
+                            assistantTurnCount: assistantTurns.length,
+                            transcriptRead: true,
+                            sessionId: worker.externalSessionId,
+                          },
+                        };
+                      }
+                    }
+                  }
+                }
+              } catch (transcriptErr: any) {
+                // Tolerant: transcript failure does not suppress an existing positive observation.
+              }
+            }
+
+            if ((inspection.isComplete || isWorkerComplete) && assignment.status === 'active') {
               const handoff = Handoff.create(assignment.id, assignment.currentAttemptId);
+              const responseForHandoff = lastResponseSnippet ?? inspection.lastResponseSnippet ?? 'Worker completed task response.';
               handoff.markReady(
-                inspection.lastResponseSnippet ?? 'Worker completed task response.',
-                { fullResponse: inspection.lastResponseSnippet },
-                inspection.evidence,
+                responseForHandoff,
+                { fullResponse: responseForHandoff, transcriptEvidence: transcriptEvidence ? transcriptEvidence.details : null },
+                transcriptEvidence ? { ...transcriptEvidence, details: { ...transcriptEvidence.details, sourceUsed: 'exact_session_transcript' } } : inspection.evidence,
               );
               await this.repos.handoffs.save(handoff);
 
@@ -2574,6 +3635,18 @@ export class RelayEngine {
    *
    * Derived readiness evaluation for a Pair.
    * Zero provider contact (pure evaluation of local persistence and continuity).
+   *
+   * ## This is a READ-ONLY DERIVED FACT, and it is not execution authority
+   *
+   * This method exists to answer "what does the current persisted evidence say", and it is
+   * legitimate for that. It is NOT a gate, and no dispatch path may consult it. §8.3 `[FROZEN]`:
+   * "Readiness describes observational sufficiency. It is **not** execution permission ... A
+   * `ready` Pair is not thereby authorized to dispatch." §8.2 `[FROZEN]`: a persisted value
+   * "may **never** gate, permit, or enable an action." The architectural fence in
+   * `tests/pair_replacement_fence.test.ts` enforces the same rule against the app layer, and
+   * an earlier revision of `dispatchAssignment` violated all three: it refused every dispatch
+   * whose derived level was not `READY`, which both inverted the freeze and made dispatch
+   * permanently impossible for any Pair with a Level-0 planner side.
    */
   public async computePairReadiness(pairId: PairId): Promise<PairReadinessAssessment> {
     const pair = await this.repos.pairs.findById(pairId);

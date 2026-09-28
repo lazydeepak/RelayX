@@ -203,13 +203,38 @@ export interface OpenCodeActiveSession {
   state: OpenCodeActiveState;
 }
 
+export interface OpenCodeMessageError {
+  type?: string | null;
+  message?: string | null;
+  status?: number | null;
+}
+
 export interface OpenCodeMessageSummary {
   messageId: string;
   type?: string;
   role: 'user' | 'assistant' | 'system' | 'other';
   createdAt?: number;
-  /** Bounded text extract (text parts only). */
+  completedAt?: number;
+  /** Bounded text extract. */
   text?: string;
+  /**
+   * Provider-reported terminator for an assistant turn (`stop`, `error`, `length`, ...).
+   * Additive read-only field. Absent on a turn that has not finished; it is NEVER inferred.
+   */
+  finish?: string | null;
+  /**
+   * Provider-reported terminal error on an assistant turn (e.g. `provider.quota`, HTTP 402).
+   * Additive read-only field, and the ONLY basis on which a worker execution failure is ever
+   * claimed. An absent `error` is never read as success.
+   */
+  error?: OpenCodeMessageError | null;
+  /** The model the provider ACTUALLY used for this turn. Additive read-only field. */
+  model?: { providerID?: string | null; modelId?: string | null; variant?: string | null } | null;
+  /**
+   * Provider run-outcome marker. OpenCode emits `idle` rows carrying
+   * `{ outcome: 'failed' | 'success' }` after a run; recorded as corroboration only.
+   */
+  outcome?: string | null;
 }
 
 /** Common read-result envelope: carries service version + mismatch truthfully. */
@@ -522,6 +547,27 @@ export class OpenCodeSessionClient {
     };
   }
 
+  /**
+   * Map one provider message row to the bounded summary shape.
+   *
+   * ## Why BOTH `row.text` and `row.content[].text` are read
+   *
+   * The provider returns two different shapes for one endpoint:
+   *
+   * - a USER turn carries its instruction in a TOP-LEVEL `text` field, and that value is a
+   *   JSON-ENCODED string (`"\"Inspect RelayX ...\""`), not the raw instruction;
+   * - an ASSISTANT turn carries its reply in `content[]` as `{ type: 'text', text }` parts.
+   *
+   * Reading only `content[].text` — which is what this mapper did before — silently produced
+   * `text: undefined` for EVERY user turn, and therefore every transcript message reported
+   * "(none)". That made exact-session instruction fingerprint matching structurally impossible
+   * and is the mechanical reason a durably-delivered instruction was once classified as
+   * "nothing was delivered".
+   *
+   * Both are read and merged here. The JSON-encoded form is preserved verbatim: decoding it is
+   * a COMPARISON concern and belongs to `normalizeInstructionText`, so that the stored evidence
+   * always shows exactly what the provider wrote.
+   */
   private mapMessage(raw: unknown): OpenCodeMessageSummary | undefined {
     const row = asRecord(raw);
     const id = asString(row?.id);
@@ -529,20 +575,40 @@ export class OpenCodeSessionClient {
     const type = asString(row.type);
     const time = asRecord(row.time);
     const content = Array.isArray(row.content) ? row.content : [];
-    const text = content
+    const contentText = content
       .map((part) => {
         const p = asRecord(part);
         return p && p.type === 'text' ? asString(p.text) ?? '' : '';
       })
       .filter((t) => t.length > 0)
-      .join('\n')
-      .slice(0, MAX_TEXT_CHARS);
+      .join('\n');
+    const topLevelText = asString(row.text);
+    const text = (topLevelText ?? contentText).slice(0, MAX_TEXT_CHARS);
+    const modelRef = asRecord(row.model);
+    const errorRecord = asRecord(row.error);
     return {
       messageId: id,
       type,
       role: roleFromType(type),
       createdAt: asNumber(time?.created),
+      completedAt: asNumber(time?.completed),
       text: text || undefined,
+      finish: asString(row.finish) ?? null,
+      error: errorRecord
+        ? {
+            type: asString(errorRecord.type) ?? null,
+            message: asString(errorRecord.message) ?? null,
+            status: asNumber(errorRecord.status) ?? null,
+          }
+        : null,
+      model: modelRef
+        ? {
+            providerID: asString(modelRef.providerID) ?? null,
+            modelId: asString(modelRef.id) ?? null,
+            variant: asString(modelRef.variant) ?? null,
+          }
+        : null,
+      outcome: asString(row.outcome) ?? null,
     };
   }
 

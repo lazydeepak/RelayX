@@ -335,13 +335,20 @@ export default function App() {
     const pair = pairs.find((p) => p.id === pairId);
     if (!pair) return;
     try {
-      const asgn = await relayBridge.createAssignment(
-        pair.id,
-        'Next Planner Iteration',
-        'Execute planned subtask and verify observable test results',
-      );
-      await relayBridge.dispatchAssignment(asgn.id);
-      notify('New assignment dispatched to worker runtime');
+      // If the pair already has an active assignment, retry/continue through its
+      // legal lifecycle rather than silently creating a new one.
+      if (pair.activeAssignmentId) {
+        await relayBridge.dispatchAssignment(pair.activeAssignmentId);
+        notify('Existing assignment dispatched/retried');
+      } else {
+        const asgn = await relayBridge.createAssignment(
+          pair.id,
+          'Next Planner Iteration',
+          'Execute planned subtask and verify observable test results',
+        );
+        await relayBridge.dispatchAssignment(asgn.id);
+        notify('New assignment dispatched to worker runtime');
+      }
       await loadData();
     } catch (err: any) {
       notify(`Dispatch error: ${err.message}`);

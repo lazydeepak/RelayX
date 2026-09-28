@@ -18,6 +18,7 @@ import {
   SqliteContractRevisionRepository,
   SqliteVerificationResultRepository,
 } from './SqliteRepositories.ts';
+import { SqliteProviderSettingsRepository } from './SqliteProviderSettingsRepository.ts';
 
 function tableExists(db: DatabaseSync, tableName: string): boolean {
   const rows = db
@@ -61,6 +62,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
   public readonly workUnits: SqliteWorkUnitRepository;
   public readonly contractRevisions: SqliteContractRevisionRepository;
   public readonly verificationResults: SqliteVerificationResultRepository;
+  public readonly providerSettings: SqliteProviderSettingsRepository;
 
   constructor(filePath = ':memory:') {
     this.db = new DatabaseSync(filePath);
@@ -82,6 +84,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     this.workUnits = new SqliteWorkUnitRepository(this.db);
     this.contractRevisions = new SqliteContractRevisionRepository(this.db);
     this.verificationResults = new SqliteVerificationResultRepository(this.db);
+    this.providerSettings = new SqliteProviderSettingsRepository(this.db);
   }
 
   private initSchema(): void {
@@ -442,6 +445,39 @@ CREATE TABLE IF NOT EXISTS handoffs (
     this.migrateSideIdentitySchema();
     this.migrateSideObservationSchema();
     this.migrateSideCheckpointSchema();
+    this.migrateProviderSettingsSchema();
+  }
+
+  /**
+   * Explicit operator/provider settings, version 8.
+   *
+   * ## Why a table and not a config file or an environment variable
+   *
+   * A model used to serve a delivery is part of the delivery's EVIDENCE, and evidence has to
+   * be readable later by someone who was not present when it was written. An env var cannot
+   * be audited after the process exits, and a global OpenCode config file would be a
+   * machine-wide change made on RelayX's behalf — a silent provider change, which is exactly
+   * what must never happen. A RelayX-owned, operator-set, per-provider row is the only form
+   * that is simultaneously explicit, scoped, and durable.
+   *
+   * Keys are namespaced by provider type (`opencode.transportModel`) so a setting for one
+   * provider can never be read as a setting for another.
+   *
+   * Additive only: one new table, no existing table altered, no rows synthesized. A setting
+   * that does not exist reads back as `null` and is reported as "unset", never defaulted to
+   * a guessed value.
+   */
+  private migrateProviderSettingsSchema(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS provider_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        note TEXT,
+        set_by TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
   }
 
   /**

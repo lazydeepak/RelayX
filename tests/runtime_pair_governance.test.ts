@@ -642,6 +642,8 @@ describe('S6 closure group I — the provider-contact surface cannot grow silent
     // what makes the surface hard to extend by accident.
     const ENFORCED: Record<string, string> = {
       'RelayEngine.ts:deliverInstruction': 'pair.assertProviderContactPermitted() in dispatchAssignment',
+      'RelayEngine.ts:captureTransportBoundary': 'pair.assertProviderContactPermitted() in dispatchAssignment; the Phase-1b boundary read runs after the I-2 gate and immediately before the send',
+      'RelayEngine.ts:readExactSessionTurnsForReconciliation': 'the I-2 gate in reconcileDeliveryAgainstExactSession, resolved through the Attempt FROZEN authority (attempt.sessionPairId) exactly as probeDispatchOutcome does; a non-ACTIVE Pair yields disposition=insufficient with no contact and no inferred external state',
       'RelayEngine.ts:inspectRuntime': 'runSupervisionTick / recoverOnStartup continue-guard, and reconcileAndRecoverRuntime shared guard',
       'RelayEngine.ts:reconcileDispatch': 'probeDispatchOutcome via attempt.sessionPairId',
       'RelayEngine.ts:detectWorkingState': 'reconcileInFlightPlanFirstUnit via run.sessionPairId',

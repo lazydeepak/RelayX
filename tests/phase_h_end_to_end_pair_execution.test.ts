@@ -179,8 +179,33 @@ describe('Phase H — End-to-End Exact-Session Pair Execution Proof', () => {
       }
     );
 
-    // 2. Ambiguous delivery blocks automated resend
+    // 2. Ambiguous delivery blocks automated resend.
+    //
+    // The execution slot must be released EXPLICITLY before a second Assignment can be
+    // dispatched: `dispatchAssignment` refuses to let a new Assignment steal a Pair's slot
+    // while another unresolved Assignment still holds it. That refusal is the invariant this
+    // step now also asserts directly, because the previous version of this test depended on
+    // the very orphan state the invariant forbids — two Assignments simultaneously `active`
+    // on one Pair, each believing it owned the work.
     const assignment2 = await engine.createAssignment(pair.id, 'Task Ambiguity Resend Guard', 'Test ambiguous resend guard');
+
+    // While assignment1 is still unresolved, assignment2 is refused as a slot conflict.
+    await assert.rejects(
+      async () => {
+        await engine.dispatchAssignment(assignment2.id);
+      },
+      (err: any) => {
+        return err.code === 'PAIR_ACTIVE_ASSIGNMENT_EXISTS' &&
+          err.message.includes(assignment1.id);
+      },
+      'a second Assignment must not silently take the execution slot from an unresolved one',
+    );
+
+    // Release the slot through the domain lifecycle, not through a direct field write.
+    const stranded = await db.assignments.findById(assignment1.id);
+    stranded!.fail();
+    await db.assignments.save(stranded!);
+
     workerProvider.deliveryOutcome = 'ambiguous';
     await engine.dispatchAssignment(assignment2.id);
 
