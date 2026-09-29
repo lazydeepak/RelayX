@@ -15,36 +15,8 @@ class RelayDiagnosticsEngine {
   private maxBufferSize: number = 500;
 
   constructor() {
-    this.seedDefaultTelemetry();
-  }
-
-  private seedDefaultTelemetry() {
-    const now = Date.now();
-    const ops = [
-      { op: 'startup.cold', duration: 320, success: true },
-      { op: 'project.load', duration: 45, success: true },
-      { op: 'planner.discovery', duration: 410, success: true, metadata: { provider: 'ChatGPT', source: 'browser' } },
-      { op: 'worker.discovery', duration: 380, success: true, metadata: { provider: 'OpenCode', source: 'CLI' } },
-      { op: 'reconciliation', duration: 25, success: true },
-      { op: 'sqlite.query', duration: 8, success: true },
-      { op: 'ProjectDetails.load', duration: 1820, success: true, children: [
-        { id: 'c1', operation: 'DB', durationMs: 14, timestamp: now, success: true },
-        { id: 'c2', operation: 'planner.discovery', durationMs: 920, timestamp: now, success: true, metadata: { provider: 'ChatGPT', source: 'browser' } },
-        { id: 'c3', operation: 'worker.discovery', durationMs: 610, timestamp: now, success: true, metadata: { provider: 'OpenCode', source: 'CLI' } },
-        { id: 'c4', operation: 'reconciliation', durationMs: 31, timestamp: now, success: true }
-      ]}
-    ];
-
-    for (const item of ops) {
-      this.record({
-        operation: item.op,
-        durationMs: item.duration,
-        timestamp: now - Math.floor(Math.random() * 60000),
-        success: item.success,
-        metadata: item.metadata,
-        children: item.children
-      });
-    }
+    // Production Diagnostics starts with an empty telemetry buffer.
+    // Real telemetry is populated strictly from actual observed runtime operations.
   }
 
   public record(measurement: Omit<DiagnosticMeasurement, 'id'>): DiagnosticMeasurement {

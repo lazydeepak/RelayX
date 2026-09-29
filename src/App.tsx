@@ -159,11 +159,26 @@ export default function App() {
 
   useEffect(() => {
     loadData();
-    // Background pulse every 5 seconds to keep observable state fresh
-    const timer = setInterval(() => {
-      loadData();
-    }, 5000);
-    return () => clearInterval(timer);
+    // Adaptive background pulse: 5s when visible, 30s when backgrounded, immediate refresh on visibility change
+    let timer: any = null;
+    const schedulePoll = () => {
+      const delay = document.hidden ? 30000 : 5000;
+      timer = setTimeout(() => {
+        loadData().finally(() => schedulePoll());
+      }, delay);
+    };
+    schedulePoll();
+
+    const handleVisibility = () => {
+      if (!document.hidden) {
+        loadData();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      if (timer) clearTimeout(timer);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
   }, [loadData]);
 
   // Project Management Actions
