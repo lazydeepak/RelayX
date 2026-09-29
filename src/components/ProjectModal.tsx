@@ -78,7 +78,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                 {mode === 'edit' && 'Edit Project Details'}
               </h3>
               <p className="text-xs text-slate-400">
-                {mode === 'create' && 'Organize planner-worker pairs and assignments'}
+                {mode === 'create' && 'Organize session pairs and assignments'}
                 {mode === 'edit' && `Update metadata for "${project?.name}"`}
               </p>
             </div>

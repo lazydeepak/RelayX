@@ -222,6 +222,15 @@ export interface ProjectChildSession {
   verification: BindingVerification;
 }
 
+export interface DiscoveredSessionItem {
+  id: string;
+  name: string;
+  status: string;
+  provider: string;
+  paired: boolean;
+  sessionId?: string;
+}
+
 export interface ProjectDetailViewModel {
   id: string;
   name: string;
@@ -231,12 +240,21 @@ export interface ProjectDetailViewModel {
     canonicalPath: DetailField;
     gitRoot: DetailField;
   };
+  destinations: {
+    planner: DetailField;
+    worker: DetailField;
+  };
   /** Project-level saved bindings persisted at setup time (planner URL / worker workspace). */
   savedBindings: {
     planner?: SavedBinding;
     worker?: SavedBinding;
   };
   bindings: ProjectPairBinding[];
+  archivedBindings: ProjectPairBinding[];
+  discoveredSessions: {
+    planners: DiscoveredSessionItem[];
+    workers: DiscoveredSessionItem[];
+  };
   /** Active planner/worker sessions bound to this project (deduplicated). */
   sessions: ProjectChildSession[];
   work: {
@@ -279,8 +297,35 @@ export function buildProjectDetail(
   const projectAssignments = input.assignments.filter((a) => a.projectId === project.id);
   const projectAssignmentIds = new Set(projectAssignments.map((a) => a.id));
 
-  const bindings = projectPairs.map((pair) => buildPairBinding(pair, input.sessions, project));
+  const allBindings = projectPairs.map((pair) => buildPairBinding(pair, input.sessions, project));
+  const bindings = allBindings.filter((b) => !b.archived);
+  const archivedBindings = allBindings.filter((b) => b.archived);
   const sessions = buildChildSessions(project, projectPairs, input.sessions);
+
+  const pairedPlannerIds = new Set(projectPairs.map((p) => p.plannerSessionId).filter(Boolean));
+  const pairedWorkerIds = new Set(projectPairs.map((p) => p.workerSessionId).filter(Boolean));
+
+  const discoveredPlanners = input.sessions
+    .filter((s) => s.providerType === 'chatgpt')
+    .map((s) => ({
+      id: s.id,
+      name: s.name,
+      status: s.status,
+      provider: s.providerType,
+      paired: pairedPlannerIds.has(s.id),
+      sessionId: s.externalSessionId ?? undefined,
+    }));
+
+  const discoveredWorkers = input.sessions
+    .filter((s) => s.providerType === 'opencode' || s.providerType === 'vscode')
+    .map((s) => ({
+      id: s.id,
+      name: s.name,
+      status: s.status,
+      provider: s.providerType,
+      paired: pairedWorkerIds.has(s.id),
+      sessionId: s.externalSessionId ?? undefined,
+    }));
 
   const activeWork = sortByRecency(
     projectAssignments.filter(
@@ -324,8 +369,25 @@ export function buildProjectDetail(
       }),
       gitRoot: detailField('Git Root', project.gitRoot, { mono: true, copyable: true }),
     },
+    destinations: {
+      planner: detailField('Planner Destination (ChatGPT Project)', project.plannerProjectUrl, {
+        mono: true,
+        copyable: true,
+        emptyText: 'No project destination configured',
+      }),
+      worker: detailField('Worker Destination (Workspace)', project.workerWorkspacePath, {
+        mono: true,
+        copyable: true,
+        emptyText: 'No worker workspace destination configured',
+      }),
+    },
     savedBindings: buildProjectSavedBindings(project),
     bindings,
+    archivedBindings,
+    discoveredSessions: {
+      planners: discoveredPlanners,
+      workers: discoveredWorkers,
+    },
     sessions,
     work: {
       active: activeWork,

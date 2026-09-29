@@ -88,6 +88,7 @@ import {
   RecoveryTier,
   ProviderType,
   ObservableEvidence,
+  PairCheckpointId,
   createId,
 } from './types.ts';
 import {
@@ -193,6 +194,8 @@ export interface PairProps {
    * Immutable once set; defaults to `id`.
    */
   stableId?: PairId;
+  predecessorPairId?: PairId | null;
+  sourceCheckpointId?: PairCheckpointId | null;
   lastSupervisedAt?: number;
   createdAt: number;
   updatedAt: number;
@@ -209,20 +212,9 @@ export class Pair {
   public lastSupervisedAt?: number;
   public readonly createdAt: number;
   public updatedAt: number;
-
-  /**
-   * Immutable identity anchor for everything that must outlive a session
-   * rebinding (observations, checkpoints, provenance).
-   *
-   * SESSION_PAIR_REPLACEMENT.md requires that a replacement produce a NEW Pair
-   * with the old one preserved. The current `updatePair()` path still mutates the
-   * same row, and that in-place path is asserted by protected regression gates
-   * (see S1_PAIR_SEMANTICS_IMPLEMENTATION.md §2). `stableId` is therefore the
-   * safe prerequisite: it gives history a non-rewritable anchor TODAY, so the
-   * in-place mutation can no longer silently move the ownership of a recorded
-   * fact. It does not by itself implement replacement; see the S1 note.
-   */
   public readonly stableId: PairId;
+  public readonly predecessorPairId: PairId | null;
+  public readonly sourceCheckpointId: PairCheckpointId | null;
 
   private operational: PairOperationalState;
 
@@ -235,12 +227,12 @@ export class Pair {
     this.activeAssignmentId = props.activeAssignmentId;
     this.status = props.status;
     this.stableId = props.stableId ?? props.id;
+    this.predecessorPairId = props.predecessorPairId ?? null;
+    this.sourceCheckpointId = props.sourceCheckpointId ?? null;
     this.operational = DEFAULT_PAIR_OPERATIONAL_STATE;
     this.lastSupervisedAt = props.lastSupervisedAt;
     this.createdAt = props.createdAt;
     this.updatedAt = props.updatedAt;
-    // Assigned last so the validating setter is the only way in, for a
-    // constructor-supplied value as well as for any later assignment.
     this.operationalState = props.operationalState ?? DEFAULT_PAIR_OPERATIONAL_STATE;
   }
 
@@ -1279,6 +1271,72 @@ export class RuntimeProjectAssociation {
       provenance,
       createdAt: Date.now(),
       updatedAt: Date.now(),
+    });
+  }
+}
+
+/* --- PairCheckpoint Entity --- */
+export interface PairCheckpointProps {
+  id: PairCheckpointId;
+  pairId: PairId;
+  createdAt: number;
+  reason: string;
+  objective?: string | null;
+  currentMilestone?: string | null;
+  summary?: string | null;
+  pendingWork?: string | null;
+  nextAction?: string | null;
+  latestAssignmentId?: AssignmentId | null;
+  latestAttemptId?: AttemptId | null;
+  latestDeliveryId?: DeliveryId | null;
+  plannerContext?: Record<string, unknown> | string | null;
+  workerContext?: Record<string, unknown> | string | null;
+  repoHead?: string | null;
+  metadata?: Record<string, unknown> | string | null;
+}
+
+export class PairCheckpoint {
+  public readonly id: PairCheckpointId;
+  public readonly pairId: PairId;
+  public readonly createdAt: number;
+  public readonly reason: string;
+  public readonly objective: string | null;
+  public readonly currentMilestone: string | null;
+  public readonly summary: string | null;
+  public readonly pendingWork: string | null;
+  public readonly nextAction: string | null;
+  public readonly latestAssignmentId: AssignmentId | null;
+  public readonly latestAttemptId: AttemptId | null;
+  public readonly latestDeliveryId: DeliveryId | null;
+  public readonly plannerContext: Record<string, unknown> | string | null;
+  public readonly workerContext: Record<string, unknown> | string | null;
+  public readonly repoHead: string | null;
+  public readonly metadata: Record<string, unknown> | string | null;
+
+  constructor(props: PairCheckpointProps) {
+    this.id = props.id;
+    this.pairId = props.pairId;
+    this.createdAt = props.createdAt;
+    this.reason = props.reason;
+    this.objective = props.objective ?? null;
+    this.currentMilestone = props.currentMilestone ?? null;
+    this.summary = props.summary ?? null;
+    this.pendingWork = props.pendingWork ?? null;
+    this.nextAction = props.nextAction ?? null;
+    this.latestAssignmentId = props.latestAssignmentId ?? null;
+    this.latestAttemptId = props.latestAttemptId ?? null;
+    this.latestDeliveryId = props.latestDeliveryId ?? null;
+    this.plannerContext = props.plannerContext ?? null;
+    this.workerContext = props.workerContext ?? null;
+    this.repoHead = props.repoHead ?? null;
+    this.metadata = props.metadata ?? null;
+  }
+
+  public static create(props: Omit<PairCheckpointProps, 'id' | 'createdAt'>): PairCheckpoint {
+    return new PairCheckpoint({
+      id: createId<PairCheckpointId>('chk'),
+      createdAt: Date.now(),
+      ...props,
     });
   }
 }

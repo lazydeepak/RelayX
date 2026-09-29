@@ -25,6 +25,7 @@ import {
   SqlitePairRepository,
   SqlitePairSideIdentityRepository,
   SqlitePairSideCheckpointRepository,
+  SqlitePairCheckpointRepository,
   SqliteRuntimeSessionRepository,
   SqliteAssignmentRepository,
   SqliteAttemptRepository,
@@ -69,6 +70,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
   public readonly pairs: SqlitePairRepository;
   public readonly sideIdentities: SqlitePairSideIdentityRepository;
   public readonly sideCheckpoints: SqlitePairSideCheckpointRepository;
+  public readonly checkpoints: SqlitePairCheckpointRepository;
   public readonly runtimes: SqliteRuntimeSessionRepository;
   public readonly assignments: SqliteAssignmentRepository;
   public readonly attempts: SqliteAttemptRepository;
@@ -92,6 +94,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     this.pairs = new SqlitePairRepository(this.db);
     this.sideIdentities = new SqlitePairSideIdentityRepository(this.db);
     this.sideCheckpoints = new SqlitePairSideCheckpointRepository(this.db);
+    this.checkpoints = new SqlitePairCheckpointRepository(this.db);
     this.assignments = new SqliteAssignmentRepository(this.db);
     this.attempts = new SqliteAttemptRepository(this.db);
     this.deliveries = new SqliteDeliveryRepository(this.db);
@@ -152,11 +155,35 @@ export class SqliteRelayDatabase implements IRelayRepositories {
         worker_session_id TEXT REFERENCES runtime_sessions(id),
         active_assignment_id TEXT,
         status TEXT NOT NULL,
+        predecessor_pair_id TEXT,
+        source_checkpoint_id TEXT,
         last_supervised_at INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS pair_checkpoints (
+        id TEXT PRIMARY KEY,
+        pair_id TEXT NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,
+        created_at INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        objective TEXT,
+        current_milestone TEXT,
+        summary TEXT,
+        pending_work TEXT,
+        next_action TEXT,
+        latest_assignment_id TEXT,
+        latest_attempt_id TEXT,
+        latest_delivery_id TEXT,
+        planner_context TEXT,
+        worker_context TEXT,
+        repo_head TEXT,
+        metadata TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_pair_checkpoints_pair_id ON pair_checkpoints(pair_id);
     `);
+    addColumnIfNeeded(this.db, 'pairs', 'predecessor_pair_id', 'TEXT');
+    addColumnIfNeeded(this.db, 'pairs', 'source_checkpoint_id', 'TEXT');
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS assignments (

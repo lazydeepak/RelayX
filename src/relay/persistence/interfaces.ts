@@ -17,6 +17,7 @@ import {
   PairSideRole,
   PairSideIdentity,
   PairSideCheckpoint,
+  PairCheckpointId,
 } from '../domain/types.ts';
 import {
   Project,
@@ -32,6 +33,7 @@ import {
   ContractRevision,
   WorkUnit,
   PlanFirstRun,
+  PairCheckpoint,
 } from '../domain/entities.ts';
 import type { VerificationResult as VerificationResultRecord } from '../domain/repoBoundary.ts';
 
@@ -104,6 +106,17 @@ export interface IPairSideCheckpointRepository {
   findAll(pairId: PairId, sideRole?: PairSideRole): Promise<PairSideCheckpoint[]>;
   save(checkpoint: PairSideCheckpoint): Promise<void>;
   deleteForPair(pairId: PairId): Promise<void>;
+}
+
+export interface IPairCheckpointRepository {
+  create(checkpoint: PairCheckpoint): Promise<void>;
+  createPairCheckpoint(checkpoint: PairCheckpoint): Promise<void>;
+  findById(id: PairCheckpointId): Promise<PairCheckpoint | null>;
+  getPairCheckpoint(id: PairCheckpointId): Promise<PairCheckpoint | null>;
+  findLatest(pairId: PairId): Promise<PairCheckpoint | null>;
+  getLatestPairCheckpoint(pairId: PairId): Promise<PairCheckpoint | null>;
+  findAll(pairId: PairId): Promise<PairCheckpoint[]>;
+  listPairCheckpoints(pairId: PairId): Promise<PairCheckpoint[]>;
 }
 
 export interface IRuntimeSessionRepository {
@@ -300,6 +313,7 @@ export interface IRelayRepositories {
   pairs: IPairRepository;
   sideIdentities: IPairSideIdentityRepository;
   sideCheckpoints: IPairSideCheckpointRepository;
+  checkpoints: IPairCheckpointRepository;
   runtimes: IRuntimeSessionRepository;
   assignments: IAssignmentRepository;
   attempts: IAttemptRepository;

@@ -19,6 +19,7 @@ export type AttentionItemId = Brand<string, 'AttentionItemId'>;
 export type AssociationId = Brand<string, 'AssociationId'>;
 export type RecoveryActionId = Brand<string, 'RecoveryActionId'>;
 export type PairSideCheckpointId = Brand<string, 'PairSideCheckpointId'>;
+export type PairCheckpointId = Brand<string, 'PairCheckpointId'>;
 
 /* --- Plan-First identifiers (PLAN_FIRST_DOMAIN_FREEZE.md §A) --- */
 export type ContractRevisionId = Brand<string, 'ContractRevisionId'>;

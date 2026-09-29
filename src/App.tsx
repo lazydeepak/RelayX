@@ -602,6 +602,10 @@ export default function App() {
         onEdit={handleEditProjectFromDetail}
         onViewEvidence={(ev) => setSelectedEvidence(ev)}
         onOpenSessionDetail={handleOpenSessionDetailFromProject}
+        onOpenCreatePair={(id) => {
+          setProjectDetail({ isOpen: false, projectId: null });
+          setPairModal({ isOpen: true, mode: 'create', initialProjectId: id });
+        }}
       />
 
       <SessionDetailModal

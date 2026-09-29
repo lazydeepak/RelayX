@@ -44,6 +44,7 @@ interface ProjectDetailModalProps {
   onEdit?: (project: UIProject) => void;
   onViewEvidence: (evidence: ObservableEvidence) => void;
   onOpenSessionDetail?: (sessionId: string) => void;
+  onOpenCreatePair?: (projectId: string) => void;
 }
 
 const VERIFICATION_META: Record<
@@ -237,6 +238,7 @@ export const ProjectDetailModal: React.FC<ProjectDetailModalProps> = ({
   onEdit,
   onViewEvidence,
   onOpenSessionDetail,
+  onOpenCreatePair,
 }) => {
   const viewModel = useMemo(() => {
     if (!isOpen || !projectId) return null;
@@ -294,7 +296,7 @@ export const ProjectDetailModal: React.FC<ProjectDetailModalProps> = ({
                 className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium border border-slate-700 transition-colors"
               >
                 <Edit3 className="w-3.5 h-3.5" />
-                <span>Edit</span>
+                <span>Edit Project</span>
               </button>
             )}
             <button
@@ -309,119 +311,160 @@ export const ProjectDetailModal: React.FC<ProjectDetailModalProps> = ({
 
         {/* Body */}
         <div className="p-5 space-y-5 overflow-y-auto flex-1 text-xs">
-          {/* Repository */}
-          <section className="rounded-lg bg-slate-950 border border-slate-800 p-4">
-            <h4 className="flex items-center gap-1.5 text-xs font-semibold uppercase text-slate-300 mb-2">
+          {/* Top Half: Durable Project Configuration */}
+          <section className="rounded-lg bg-slate-950 border border-slate-800 p-4 space-y-3">
+            <h4 className="flex items-center gap-1.5 text-xs font-semibold uppercase text-slate-300">
               <GitBranch className="w-3.5 h-3.5 text-blue-400" />
-              Repository
+              Durable Project Configuration & Destinations
             </h4>
-            <FieldRow field={viewModel.repository.canonicalPath} />
-            <FieldRow field={viewModel.repository.gitRoot} />
+            <div className="space-y-2">
+              <FieldRow field={viewModel.repository.canonicalPath} />
+              <FieldRow field={viewModel.repository.gitRoot} />
+              <FieldRow field={viewModel.destinations.planner} />
+              <FieldRow field={viewModel.destinations.worker} />
+            </div>
           </section>
 
-          {/* Bindings */}
-          <section className="rounded-lg bg-slate-950 border border-slate-800 p-4">
-            <h4 className="flex items-center gap-1.5 text-xs font-semibold uppercase text-slate-300 mb-3">
-              <GitMerge className="w-3.5 h-3.5 text-emerald-400" />
-              Bindings / Pairs ({viewModel.bindings.length})
-            </h4>
-            {viewModel.bindings.length === 0 ? (
-              <p className="text-slate-500 italic">No pairs bound to this project.</p>
+          {/* Session Pairs Section */}
+          <section className="rounded-lg bg-slate-950 border border-slate-800 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h4 className="flex items-center gap-1.5 text-xs font-semibold uppercase text-slate-300">
+                <GitMerge className="w-3.5 h-3.5 text-emerald-400" />
+                Session Pairs ({viewModel.bindings.length + viewModel.archivedBindings.length})
+              </h4>
+              <button
+                type="button"
+                onClick={() => onOpenCreatePair?.(viewModel.id)}
+                className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs shadow transition-colors"
+              >
+                <span>+ New Pair</span>
+              </button>
+            </div>
+
+            {viewModel.bindings.length === 0 && viewModel.archivedBindings.length === 0 ? (
+              <p className="text-slate-500 italic">No session pairs created for this project yet.</p>
             ) : (
               <div className="space-y-3">
-                {viewModel.bindings.map((binding) => (
-                  <div
-                    key={binding.pairId}
-                    className="rounded-lg bg-slate-900 border border-slate-800 p-3"
-                  >
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-sm font-semibold text-slate-200">
-                        {binding.pairName}
-                      </span>
-                      <span
-                        className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${
-                          binding.archived
-                            ? 'bg-amber-950 text-amber-300'
-                            : 'bg-slate-800 text-slate-400'
-                        }`}
+                {viewModel.bindings.length > 0 && (
+                  <div className="space-y-2">
+                    <span className="text-[10px] font-semibold uppercase text-emerald-400">Active Session Pairs</span>
+                    {viewModel.bindings.map((binding) => (
+                      <div
+                        key={binding.pairId}
+                        className="rounded-lg bg-slate-900 border border-slate-800 p-3"
                       >
-                        {binding.status}
-                      </span>
-                    </div>
-                    <BindingSideRow
-                      side={binding.planner}
-                      onOpenSessionDetail={onOpenSessionDetail}
-                    />
-                    <BindingSideRow
-                      side={binding.worker}
-                      onOpenSessionDetail={onOpenSessionDetail}
-                    />
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Project-level saved bindings (persisted at setup) */}
-            {(viewModel.savedBindings.planner || viewModel.savedBindings.worker) && (
-              <div className="mt-3 rounded bg-slate-900 border border-slate-800 p-3 space-y-1">
-                <span className="block text-[10px] font-semibold uppercase text-slate-400">
-                  Saved project bindings
-                </span>
-                {viewModel.savedBindings.planner && (
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] uppercase text-purple-400 w-16 shrink-0">
-                      Planner
-                    </span>
-                    <span
-                      className="font-mono text-[11px] text-slate-300 truncate select-text"
-                      title={viewModel.savedBindings.planner.value}
-                    >
-                      {viewModel.savedBindings.planner.value}
-                    </span>
-                    <CopyButton value={viewModel.savedBindings.planner.value} />
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-semibold text-slate-200">
+                            {binding.pairName}
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-950 text-emerald-300 border border-emerald-800 uppercase">
+                            {binding.status}
+                          </span>
+                        </div>
+                        <BindingSideRow
+                          side={binding.planner}
+                          onOpenSessionDetail={onOpenSessionDetail}
+                        />
+                        <BindingSideRow
+                          side={binding.worker}
+                          onOpenSessionDetail={onOpenSessionDetail}
+                        />
+                      </div>
+                    ))}
                   </div>
                 )}
-                {viewModel.savedBindings.worker && (
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] uppercase text-emerald-400 w-16 shrink-0">
-                      Worker
-                    </span>
-                    <span
-                      className="font-mono text-[11px] text-slate-300 truncate select-text"
-                      title={viewModel.savedBindings.worker.value}
-                    >
-                      {viewModel.savedBindings.worker.value}
-                    </span>
-                    <CopyButton value={viewModel.savedBindings.worker.value} />
+
+                {viewModel.archivedBindings.length > 0 && (
+                  <div className="space-y-2 pt-2">
+                    <span className="text-[10px] font-semibold uppercase text-amber-400">Historical / Archived Session Pairs</span>
+                    {viewModel.archivedBindings.map((binding) => (
+                      <div
+                        key={binding.pairId}
+                        className="rounded-lg bg-slate-900/60 border border-slate-800/80 p-3 opacity-80"
+                      >
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-medium text-slate-300">
+                            {binding.pairName}
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-950 text-amber-300 border border-amber-800 uppercase">
+                            {binding.status}
+                          </span>
+                        </div>
+                        <BindingSideRow
+                          side={binding.planner}
+                          onOpenSessionDetail={onOpenSessionDetail}
+                        />
+                        <BindingSideRow
+                          side={binding.worker}
+                          onOpenSessionDetail={onOpenSessionDetail}
+                        />
+                      </div>
+                    ))}
                   </div>
                 )}
-              </div>
-            )}
-
-            {/* Active bound sessions as child records */}
-            {viewModel.sessions.length > 0 && (
-              <div className="mt-3">
-                <span className="block text-[10px] font-semibold uppercase text-slate-400 mb-1.5">
-                  Bound sessions ({viewModel.sessions.length})
-                </span>
-                <ul className="space-y-1">
-                  {viewModel.sessions.map((sessionRecord) => (
-                    <SessionChildRow
-                      key={sessionRecord.sessionId}
-                      session={sessionRecord}
-                      onOpenSessionDetail={onOpenSessionDetail}
-                    />
-                  ))}
-                </ul>
               </div>
             )}
           </section>
 
-          {/* Work */}
-          <section className="rounded-lg bg-slate-950 border border-slate-800 p-4">
-            <h4 className="flex items-center gap-1.5 text-xs font-semibold uppercase text-slate-300 mb-3">
+          {/* Discovered Sessions Section */}
+          <section className="rounded-lg bg-slate-950 border border-slate-800 p-4 space-y-3">
+            <h4 className="flex items-center gap-1.5 text-xs font-semibold uppercase text-slate-300">
+              <Cpu className="w-3.5 h-3.5 text-purple-400" />
+              Discovered Sessions
+            </h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <span className="text-[10px] font-semibold uppercase text-slate-400">Planner Sessions</span>
+                {viewModel.discoveredSessions.planners.length === 0 ? (
+                  <p className="text-slate-500 italic text-[11px]">No discovered planner sessions</p>
+                ) : (
+                  <ul className="space-y-1">
+                    {viewModel.discoveredSessions.planners.map((s) => (
+                      <li key={s.id} className="flex items-center justify-between gap-2 p-2 rounded bg-slate-900 border border-slate-800">
+                        <div className="min-w-0">
+                          <span className="text-xs text-slate-200 truncate block">{s.name}</span>
+                          <span className="font-mono text-[10px] text-slate-400">{s.provider}</span>
+                        </div>
+                        <span className={`px-1.5 py-0.5 rounded text-[9px] uppercase font-semibold shrink-0 ${
+                          s.paired ? 'bg-blue-950 text-blue-300 border border-blue-800' : 'bg-slate-800 text-slate-300'
+                        }`}>
+                          {s.paired ? 'Paired' : 'Available'}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+              <div className="space-y-1.5">
+                <span className="text-[10px] font-semibold uppercase text-slate-400">Worker Sessions</span>
+                {viewModel.discoveredSessions.workers.length === 0 ? (
+                  <p className="text-slate-500 italic text-[11px]">No discovered worker sessions</p>
+                ) : (
+                  <ul className="space-y-1">
+                    {viewModel.discoveredSessions.workers.map((s) => (
+                      <li key={s.id} className="flex items-center justify-between gap-2 p-2 rounded bg-slate-900 border border-slate-800">
+                        <div className="min-w-0">
+                          <span className="text-xs text-slate-200 truncate block">{s.name}</span>
+                          <span className="font-mono text-[10px] text-slate-400">{s.provider}</span>
+                        </div>
+                        <span className={`px-1.5 py-0.5 rounded text-[9px] uppercase font-semibold shrink-0 ${
+                          s.paired ? 'bg-blue-950 text-blue-300 border border-blue-800' : 'bg-slate-800 text-slate-300'
+                        }`}>
+                          {s.paired ? 'Paired' : 'Available'}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          </section>
+
+          {/* Project Activity / Execution */}
+          <section className="rounded-lg bg-slate-950 border border-slate-800 p-4 space-y-3">
+            <h4 className="flex items-center gap-1.5 text-xs font-semibold uppercase text-slate-300">
               <FileText className="w-3.5 h-3.5 text-blue-400" />
-              Work
+              Project Activity & Execution
             </h4>
 
             <div className="space-y-3">
@@ -491,55 +534,48 @@ export const ProjectDetailModal: React.FC<ProjectDetailModalProps> = ({
                 </div>
               )}
             </div>
-          </section>
 
-          {/* Activity */}
-          <section className="rounded-lg bg-slate-950 border border-slate-800 p-4">
-            <h4 className="flex items-center gap-1.5 text-xs font-semibold uppercase text-slate-300 mb-2">
-              <Activity className="w-3.5 h-3.5 text-purple-400" />
-              Activity
-            </h4>
-            <FieldRow
-              field={{
-                label: 'Last activity',
-                value: formatDateTime(viewModel.activity.lastActivityAt),
-                state: viewModel.activity.lastActivityAt ? 'value' : 'empty',
-              }}
-            />
-            {viewModel.activity.recentEvents.length === 0 ? (
-              <p className="text-slate-500 italic mt-1">No recent project events.</p>
-            ) : (
-              <ul className="mt-2 space-y-1">
-                {viewModel.activity.recentEvents.map((event) => (
-                  <li
-                    key={event.id}
-                    className="flex items-start justify-between gap-2 rounded bg-slate-900 border border-slate-800 px-2.5 py-1.5"
-                  >
-                    <div className="min-w-0">
-                      <span className="text-slate-200 font-mono text-[11px]">{event.eventType}</span>
-                      <span className="block text-[10px] text-slate-500">
-                        {event.resourceType} · {event.actor}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      {event.evidence && (
-                        <button
-                          type="button"
-                          onClick={() => onViewEvidence(event.evidence!)}
-                          className="text-blue-400 hover:text-blue-300 flex items-center gap-0.5 text-[10px]"
-                        >
-                          <Eye className="w-3 h-3" />
-                          <span>Evidence</span>
-                        </button>
-                      )}
-                      <span className="text-[10px] text-slate-500">
-                        {new Date(event.timestamp).toLocaleTimeString()}
-                      </span>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
+            {/* Activity Events */}
+            <div className="pt-2 border-t border-slate-800/80">
+              <span className="text-slate-400 block mb-1 flex items-center gap-1">
+                <Activity className="w-3 h-3 text-purple-400" />
+                Recent Events (Last activity: {formatDateTime(viewModel.activity.lastActivityAt)})
+              </span>
+              {viewModel.activity.recentEvents.length === 0 ? (
+                <p className="text-slate-500 italic mt-1">No recent project events.</p>
+              ) : (
+                <ul className="mt-2 space-y-1">
+                  {viewModel.activity.recentEvents.map((event) => (
+                    <li
+                      key={event.id}
+                      className="flex items-start justify-between gap-2 rounded bg-slate-900 border border-slate-800 px-2.5 py-1.5"
+                    >
+                      <div className="min-w-0">
+                        <span className="text-slate-200 font-mono text-[11px]">{event.eventType}</span>
+                        <span className="block text-[10px] text-slate-500">
+                          {event.resourceType} · {event.actor}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {event.evidence && (
+                          <button
+                            type="button"
+                            onClick={() => onViewEvidence(event.evidence!)}
+                            className="text-blue-400 hover:text-blue-300 flex items-center gap-0.5 text-[10px]"
+                          >
+                            <Eye className="w-3 h-3" />
+                            <span>Evidence</span>
+                          </button>
+                        )}
+                        <span className="text-[10px] text-slate-500">
+                          {new Date(event.timestamp).toLocaleTimeString()}
+                        </span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           </section>
 
           {/* Metadata */}

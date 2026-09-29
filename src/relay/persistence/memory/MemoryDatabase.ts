@@ -16,6 +16,7 @@ import {
   PairSideRole,
   PairSideIdentity,
   PairSideCheckpoint,
+  PairCheckpointId,
 } from '../../domain/types.ts';
 import {
   Project,
@@ -31,6 +32,7 @@ import {
   ContractRevision,
   WorkUnit,
   PlanFirstRun,
+  PairCheckpoint,
 } from '../../domain/entities.ts';
 import type { VerificationResult } from '../../domain/repoBoundary.ts';
 import {
@@ -39,6 +41,7 @@ import {
   IPairRepository,
   IPairSideIdentityRepository,
   IPairSideCheckpointRepository,
+  IPairCheckpointRepository,
   IRuntimeSessionRepository,
   IAssignmentRepository,
   IAttemptRepository,
@@ -883,11 +886,60 @@ export class MemoryVerificationResultRepository implements IVerificationResultRe
   }
 }
 
+export class MemoryPairCheckpointRepository implements IPairCheckpointRepository, ISnapshotableMemoryRepo {
+  private readonly items = new Map<string, PairCheckpoint>();
+
+  snapshotState(): MemoryRepoSnapshot<PairCheckpoint> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<PairCheckpoint>): void {
+    restoreMapItems(this.items, snapshot);
+  }
+
+  async create(checkpoint: PairCheckpoint): Promise<void> {
+    this.items.set(checkpoint.id, checkpoint);
+  }
+
+  async createPairCheckpoint(checkpoint: PairCheckpoint): Promise<void> {
+    return this.create(checkpoint);
+  }
+
+  async findById(id: PairCheckpointId): Promise<PairCheckpoint | null> {
+    return this.items.get(id) ?? null;
+  }
+
+  async getPairCheckpoint(id: PairCheckpointId): Promise<PairCheckpoint | null> {
+    return this.findById(id);
+  }
+
+  async findLatest(pairId: PairId): Promise<PairCheckpoint | null> {
+    const list = await this.findAll(pairId);
+    if (list.length === 0) return null;
+    return list.reduce((latest, curr) => (curr.createdAt > latest.createdAt ? curr : latest));
+  }
+
+  async getLatestPairCheckpoint(pairId: PairId): Promise<PairCheckpoint | null> {
+    return this.findLatest(pairId);
+  }
+
+  async findAll(pairId: PairId): Promise<PairCheckpoint[]> {
+    return Array.from(this.items.values())
+      .filter((c) => c.pairId === pairId)
+      .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  async listPairCheckpoints(pairId: PairId): Promise<PairCheckpoint[]> {
+    return this.findAll(pairId);
+  }
+}
+
 export class MemoryRelayDatabase implements IRelayRepositories {
   public readonly projects: MemoryProjectRepository;
   public readonly pairs: MemoryPairRepository;
   public readonly sideIdentities: MemoryPairSideIdentityRepository;
   public readonly sideCheckpoints: MemoryPairSideCheckpointRepository;
+  public readonly checkpoints: MemoryPairCheckpointRepository;
   public readonly runtimes: MemoryRuntimeSessionRepository;
   public readonly assignments: MemoryAssignmentRepository;
   public readonly attempts: MemoryAttemptRepository;
@@ -907,6 +959,7 @@ export class MemoryRelayDatabase implements IRelayRepositories {
     this.pairs = new MemoryPairRepository();
     this.sideIdentities = new MemoryPairSideIdentityRepository();
     this.sideCheckpoints = new MemoryPairSideCheckpointRepository();
+    this.checkpoints = new MemoryPairCheckpointRepository();
     this.runtimes = new MemoryRuntimeSessionRepository();
     this.assignments = new MemoryAssignmentRepository();
     this.attempts = new MemoryAttemptRepository();
@@ -922,20 +975,13 @@ export class MemoryRelayDatabase implements IRelayRepositories {
     this.providerSettings = new MemoryProviderSettingsRepository();
   }
 
-  /**
-   * Memory transactions emulate rollback: before running the work, every
-   * repository's map contents are snapshotted; if the work throws, all
-   * repository state is restored to the snapshot (mutated entity objects are
-   * reverted in place, added entries are removed, deleted/replaced entries are
-   * re-inserted) and the ORIGINAL error is rethrown. On success no restore is
-   * performed — the work is the committed state.
-   */
   async runInTransaction<T>(work: () => Promise<T>): Promise<T> {
     const repos: Array<ISnapshotableMemoryRepo> = [
       this.projects,
       this.pairs,
       this.sideIdentities,
       this.sideCheckpoints,
+      this.checkpoints,
       this.runtimes,
       this.assignments,
       this.attempts,

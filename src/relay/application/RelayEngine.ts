@@ -29,6 +29,7 @@ import {
   PROVISIONAL_OBSERVATION_VALIDITY_MS,
   PairSideCheckpoint,
   PairSideCheckpointId,
+  PairCheckpointId,
   PairContinuityResult,
   CHECKPOINT_BASELINE_ALREADY_EXISTS,
   CHECKPOINT_BASELINE_REQUIRED,
@@ -52,6 +53,8 @@ import {
   Handoff,
   RelayEvent,
   AttentionItem,
+  PairCheckpoint,
+  PairCheckpointProps,
 } from '../domain/entities.ts';
 import { WorkUnit, PlanFirstRun } from '../domain/planFirst.ts';
 import {
@@ -802,6 +805,9 @@ export class RelayEngine {
     if (pair.activeAssignmentId) {
       throw new RelayDomainError('Cannot archive pair with active assignment in flight. Pause or complete work first.', 'ACTIVE_WORK_GUARD');
     }
+    // Transactional enough: establish final checkpoint before archive
+    await this.createPairCheckpoint(id, 'pair_archive', { summary: 'Final checkpoint prior to pair archive' });
+
     const previousState = pair.status;
     pair.archive();
     await this.repos.pairs.save(pair);
@@ -812,6 +818,319 @@ export class RelayEngine {
       newState: 'archived',
     });
     return pair;
+  }
+
+  public async createPairCheckpoint(
+    pairId: PairId,
+    reason: string,
+    props?: Partial<PairCheckpointProps>,
+  ): Promise<PairCheckpoint> {
+    const pair = await this.repos.pairs.findById(pairId);
+    if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'NOT_FOUND');
+
+    const assignments = await this.repos.assignments.findByPairId(pairId);
+    const latestAssignment = assignments.length > 0 ? assignments[assignments.length - 1] : undefined;
+    let latestAttempt: Attempt | undefined;
+    let latestDelivery: Delivery | undefined;
+    if (latestAssignment) {
+      const attempts = await this.repos.attempts.findByAssignmentId(latestAssignment.id);
+      latestAttempt = attempts.length > 0 ? attempts[attempts.length - 1] : undefined;
+      const deliveries = await this.repos.deliveries.findByAssignmentId(latestAssignment.id);
+      latestDelivery = deliveries.length > 0 ? deliveries[deliveries.length - 1] : undefined;
+    }
+
+    const checkpoint = PairCheckpoint.create({
+      pairId,
+      reason,
+      objective: props?.objective ?? latestAssignment?.title ?? null,
+      currentMilestone: props?.currentMilestone ?? latestAssignment?.instruction ?? null,
+      summary: props?.summary ?? null,
+      pendingWork: props?.pendingWork ?? null,
+      nextAction: props?.nextAction ?? null,
+      latestAssignmentId: props?.latestAssignmentId ?? latestAssignment?.id ?? null,
+      latestAttemptId: props?.latestAttemptId ?? latestAttempt?.id ?? null,
+      latestDeliveryId: props?.latestDeliveryId ?? latestDelivery?.id ?? null,
+      plannerContext: props?.plannerContext ?? null,
+      workerContext: props?.workerContext ?? null,
+      repoHead: props?.repoHead ?? null,
+      metadata: props?.metadata ?? null,
+    });
+
+    await this.repos.checkpoints.create(checkpoint);
+    await this.emitEvent('pair', pairId, 'pair.checkpoint_created', {
+      actor: 'engine',
+      details: { checkpointId: checkpoint.id, reason },
+    });
+    return checkpoint;
+  }
+
+  public async getPairCheckpoint(id: PairCheckpointId): Promise<PairCheckpoint | null> {
+    return this.repos.checkpoints.findById(id);
+  }
+
+  public async getLatestPairCheckpoint(pairId: PairId): Promise<PairCheckpoint | null> {
+    return this.repos.checkpoints.findLatest(pairId);
+  }
+
+  public async listPairCheckpoints(pairId: PairId): Promise<PairCheckpoint[]> {
+    return this.repos.checkpoints.findAll(pairId);
+  }
+
+  public async deliverCheckpointContinuation(
+    pairId: PairId,
+    checkpointId: PairCheckpointId,
+    targetRuntimeSessionId?: RuntimeSessionId,
+  ): Promise<{ assignment: Assignment; attempt: Attempt; delivery: Delivery }> {
+    const pair = await this.repos.pairs.findById(pairId);
+    if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'NOT_FOUND');
+
+    const checkpoint = await this.repos.checkpoints.findById(checkpointId);
+    if (!checkpoint) throw new RelayDomainError(`Checkpoint ${checkpointId} not found`, 'NOT_FOUND');
+    if (checkpoint.pairId !== pairId) throw new RelayDomainError('Checkpoint does not belong to pair', 'INVALID_CHECKPOINT_OWNER');
+
+    const runtimeId = targetRuntimeSessionId ?? pair.workerSessionId ?? pair.plannerSessionId;
+    if (!runtimeId) throw new RelayDomainError('No runtime session available for continuation delivery', 'NO_RUNTIME_BOUND');
+
+    const runtime = await this.repos.runtimes.findById(runtimeId);
+    if (!runtime) throw new RelayDomainError(`Runtime session ${runtimeId} not found`, 'RUNTIME_NOT_FOUND');
+    if (runtime.status === 'terminated') throw new RuntimeNotAvailableError(runtime.id, runtime.status);
+
+    const instructionText = [
+      `[RelayX Pair Continuation from Checkpoint ${checkpoint.id}]`,
+      `Reason: ${checkpoint.reason}`,
+      checkpoint.objective ? `Objective: ${checkpoint.objective}` : null,
+      checkpoint.currentMilestone ? `Current Milestone: ${checkpoint.currentMilestone}` : null,
+      checkpoint.summary ? `Summary: ${checkpoint.summary}` : null,
+      checkpoint.pendingWork ? `Pending Work: ${checkpoint.pendingWork}` : null,
+      checkpoint.nextAction ? `Next Action: ${checkpoint.nextAction}` : null,
+      checkpoint.repoHead ? `Repo Head: ${checkpoint.repoHead}` : null,
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const assignment = Assignment.create(pairId, pair.projectId, `Continuation from Checkpoint ${checkpoint.id}`, instructionText);
+    await this.repos.assignments.save(assignment);
+
+    const attemptNumber = 1;
+    const attempt = Attempt.create(assignment.id, attemptNumber, {
+      sessionPairId: pair.id,
+      workerSessionId: runtime.id,
+      externalSessionId: runtime.externalSessionId ?? null,
+    });
+    await this.repos.attempts.save(attempt);
+
+    assignment.startAttempt(attempt);
+    pair.assignWork(assignment.id);
+    await this.repos.pairs.save(pair);
+
+    const idempotencyKey = `idemp_cont_${assignment.id}_${Date.now()}`;
+    const delivery = Delivery.create(
+      assignment.id,
+      attempt.id,
+      runtime.id,
+      instructionText.substring(0, 100),
+      idempotencyKey,
+    );
+    delivery.startDelivering();
+    assignment.attachDelivery(delivery);
+    await this.repos.deliveries.save(delivery);
+    await this.repos.assignments.save(assignment);
+
+    await this.emitEvent('delivery', delivery.id, 'delivery.started', {
+      actor: 'engine',
+      previousState: 'pending',
+      newState: 'delivering',
+      correlationId: idempotencyKey,
+    });
+
+    const provider = this.getProvider(runtime.providerType);
+    const boundary = provider.captureTransportBoundary
+      ? await provider.captureTransportBoundary({
+          runtimeSessionId: runtime.id,
+          externalSessionId: runtime.externalSessionId ?? null,
+        })
+      : { watermark: null, failure: 'Provider exposes no transport-boundary capability.' };
+
+    if (boundary.watermark) {
+      delivery.evidence = {
+        id: `ev_pre_dispatch_boundary_${boundary.watermark.capturedAt}`,
+        timestamp: boundary.watermark.capturedAt,
+        source: 'reconciliation_probe',
+        runtimeSessionId: runtime.id,
+        details: {
+          phase: 'pre_dispatch_boundary',
+          sessionId: boundary.watermark.sessionId,
+          messageCount: boundary.watermark.messageCount,
+          latestCreatedAt: boundary.watermark.latestCreatedAt,
+          messageIds: boundary.watermark.messageIds,
+        },
+      };
+      await this.repos.deliveries.save(delivery);
+    }
+
+    const result = await provider.deliverInstruction({
+      runtimeSessionId: runtime.id,
+      externalSessionId: runtime.externalSessionId ?? null,
+      instructionText,
+      idempotencyKey,
+      preDispatchWatermark: boundary.watermark,
+      modelOverride: await this.resolveProviderModelOverride(runtime.providerType),
+    });
+
+    if (result.outcome === 'delivered') {
+      delivery.confirmDelivered(result.evidence);
+      await this.repos.deliveries.save(delivery);
+      if (attempt.status === 'prepared') {
+        attempt.startRunning();
+        await this.repos.attempts.save(attempt);
+      }
+      await this.emitEvent('pair', pairId, 'pair.continuation_delivered', {
+        actor: 'engine',
+        details: {
+          checkpointId: checkpoint.id,
+          targetRuntimeSessionId: runtime.id,
+          deliveryId: delivery.id,
+          outcome: result.outcome,
+        },
+      });
+    } else if (result.outcome === 'ambiguous') {
+      delivery.markAmbiguous(result.failureReason || 'Ambiguous delivery outcome during continuation', result.evidence);
+      await this.repos.deliveries.save(delivery);
+
+      const attention = AttentionItem.create(
+        'warning',
+        'continuation_delivery_ambiguous',
+        'Continuation delivery outcome is ambiguous',
+        `Checkpoint continuation delivery to runtime ${runtime.id} returned an ambiguous outcome.`,
+        {
+          pairId,
+          assignmentId: assignment.id,
+          suggestedAction: 'Verify runtime session state and inspect message logs before resending continuation.',
+          suggestedTier: 'tier_1_deterministic',
+        },
+      );
+      await this.repos.attention.save(attention);
+
+      await this.emitEvent('pair', pairId, 'pair.continuation_ambiguous', {
+        actor: 'engine',
+        details: {
+          checkpointId: checkpoint.id,
+          targetRuntimeSessionId: runtime.id,
+          deliveryId: delivery.id,
+          outcome: result.outcome,
+          failureReason: result.failureReason,
+        },
+      });
+    } else {
+      delivery.markFailed(result.failureReason || 'Failed continuation delivery', result.evidence);
+      await this.repos.deliveries.save(delivery);
+
+      const attention = AttentionItem.create(
+        'critical',
+        'continuation_delivery_failed',
+        'Continuation delivery failed',
+        `Checkpoint continuation delivery to runtime ${runtime.id} failed: ${result.failureReason || 'unknown reason'}.`,
+        {
+          pairId,
+          assignmentId: assignment.id,
+          suggestedAction: 'Inspect runtime health and retry continuation delivery or rebind.',
+          suggestedTier: 'tier_1_deterministic',
+        },
+      );
+      await this.repos.attention.save(attention);
+
+      await this.emitEvent('pair', pairId, 'pair.continuation_failed', {
+        actor: 'engine',
+        details: {
+          checkpointId: checkpoint.id,
+          targetRuntimeSessionId: runtime.id,
+          deliveryId: delivery.id,
+          outcome: result.outcome,
+          failureReason: result.failureReason,
+        },
+      });
+    }
+
+    return { assignment, attempt, delivery };
+  }
+
+  public async replaceRuntime(
+    pairId: PairId,
+    sideRole: PairSideRole,
+    newRuntimeSessionId: RuntimeSessionId,
+    reason = 'runtime_replacement',
+  ): Promise<Pair> {
+    const pair = await this.repos.pairs.findById(pairId);
+    if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'NOT_FOUND');
+
+    const newRuntime = await this.repos.runtimes.findById(newRuntimeSessionId);
+    if (!newRuntime) throw new RelayDomainError('Replacement runtime session not found', 'RUNTIME_NOT_FOUND');
+
+    await this.assertPrePairAuthoritativeAssociation(sideRole, newRuntime, pair.projectId);
+
+    const checkpoint = await this.createPairCheckpoint(pairId, reason, {
+      summary: `Checkpoint captured prior to replacing ${sideRole} runtime session`,
+    });
+
+    const oldSessionId = sideRole === 'planner' ? pair.plannerSessionId : pair.workerSessionId;
+
+    if (sideRole === 'planner') {
+      pair.plannerSessionId = newRuntimeSessionId;
+    } else {
+      pair.workerSessionId = newRuntimeSessionId;
+    }
+    pair.updatedAt = Date.now();
+    await this.repos.pairs.save(pair);
+
+    await this.emitEvent('pair', pairId, 'pair.runtime_replaced', {
+      actor: 'user',
+      details: { sideRole, oldSessionId, newRuntimeSessionId, reason },
+    });
+
+    // Automatically deliver checkpoint continuation to the replacement runtime session
+    try {
+      await this.deliverCheckpointContinuation(pairId, checkpoint.id, newRuntimeSessionId);
+    } catch (e) {
+      // Continuation delivery attempt recorded but non-blocking for rebind if runtime is offline
+    }
+
+    return pair;
+  }
+
+  public async rotatePair(
+    pairId: PairId,
+    sourceCheckpointId: PairCheckpointId,
+    newName: string,
+    plannerSessionId?: RuntimeSessionId,
+    workerSessionId?: RuntimeSessionId,
+  ): Promise<Pair> {
+    const predecessorPair = await this.repos.pairs.findById(pairId);
+    if (!predecessorPair) throw new RelayDomainError(`Predecessor Pair ${pairId} not found`, 'NOT_FOUND');
+
+    const checkpoint = await this.repos.checkpoints.findById(sourceCheckpointId);
+    if (!checkpoint) throw new RelayDomainError(`Source Checkpoint ${sourceCheckpointId} not found`, 'NOT_FOUND');
+    if (checkpoint.pairId !== pairId) throw new RelayDomainError('Checkpoint does not belong to predecessor pair', 'INVALID_CHECKPOINT_OWNER');
+
+    const now = Date.now();
+    const successorPair = new Pair({
+      id: createId<PairId>('pair'),
+      projectId: predecessorPair.projectId,
+      name: newName,
+      plannerSessionId: plannerSessionId ?? predecessorPair.plannerSessionId,
+      workerSessionId: workerSessionId ?? predecessorPair.workerSessionId,
+      status: 'active',
+      predecessorPairId: predecessorPair.id,
+      sourceCheckpointId: checkpoint.id,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await this.repos.pairs.save(successorPair);
+    await this.emitEvent('pair', successorPair.id, 'pair.rotated', {
+      actor: 'user',
+      details: { predecessorPairId: pairId, sourceCheckpointId },
+    });
+    return successorPair;
   }
 
   public async unarchivePair(id: PairId): Promise<Pair> {

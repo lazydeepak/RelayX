@@ -29,6 +29,7 @@ import {
   NO_OBSERVATION_CAPABILITY,
   PairSideCheckpoint,
   PairSideCheckpointId,
+  PairCheckpointId,
   CheckpointAuthority,
   ContractRevisionId,
   PlanFirstRunId,
@@ -51,6 +52,7 @@ import {
   ContractRevision,
   WorkUnit,
   PlanFirstRun,
+  PairCheckpoint,
 } from '../../domain/entities.ts';
 import type { VerificationResult } from '../../domain/repoBoundary.ts';
 import {
@@ -58,6 +60,7 @@ import {
   IPairRepository,
   IPairSideIdentityRepository,
   IPairSideCheckpointRepository,
+  IPairCheckpointRepository,
   IRuntimeSessionRepository,
   IAssignmentRepository,
   IAttemptRepository,
@@ -288,10 +291,6 @@ export class SqlitePairRepository implements IPairRepository {
   constructor(private readonly db: DatabaseSync) {}
 
   private mapRow(row: Record<string, unknown>): Pair {
-    // operational_state is NOT NULL DEFAULT 'IDLE' after the v4 migration. The
-    // `isPairOperationalState` guard is deliberately re-applied here rather than
-    // cast: a corrupted or hand-edited value must be coerced to the one safe
-    // default instead of widening the persisted set to a third value.
     const rawOperational = row.operational_state;
     const operationalState = isPairOperationalState(rawOperational) ? rawOperational : DEFAULT_PAIR_OPERATIONAL_STATE;
     const rawStable = row.stable_pair_id;
@@ -304,9 +303,9 @@ export class SqlitePairRepository implements IPairRepository {
       activeAssignmentId: (row.active_assignment_id as AssignmentId) || undefined,
       status: row.status as PairStatus,
       operationalState,
-      // A row with no stable identity (written before v4 and never backfilled)
-      // falls back to its own primary key, which is exactly the backfill value.
       stableId: ((rawStable as string) || (row.id as string)) as PairId,
+      predecessorPairId: (row.predecessor_pair_id as PairId | null) ?? null,
+      sourceCheckpointId: (row.source_checkpoint_id as PairCheckpointId | null) ?? null,
       lastSupervisedAt: row.last_supervised_at ? Number(row.last_supervised_at) : undefined,
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
@@ -329,18 +328,6 @@ export class SqlitePairRepository implements IPairRepository {
     return rows.map((r) => this.mapRow(r));
   }
 
-  /**
-   * S6 CLOSURE — authoritative reverse binding lookup.
-   *
-   * The query is a single indexed-looking `OR` over the two durable binding
-   * columns, compared by RUNTIME SESSION ID. No title, name, path, window, or
-   * lifecycle `status` participates in the predicate (I-11): a shared human-readable
-   * string is evidence, never identity.
-   *
-   * All matches are returned rather than the first one, so the caller can fail
-   * closed when the schema has been bypassed. `OR` is a UNION of rows, never a
-   * merge, so a single row can appear at most once here.
-   */
   async findByRuntimeSessionId(runtimeSessionId: RuntimeSessionId): Promise<Pair[]> {
     const rows = this.db
       .prepare('SELECT * FROM pairs WHERE planner_session_id = ? OR worker_session_id = ?')
@@ -353,8 +340,9 @@ export class SqlitePairRepository implements IPairRepository {
       INSERT INTO pairs (
         id, project_id, name, planner_session_id, worker_session_id,
         active_assignment_id, status, operational_state, stable_pair_id,
+        predecessor_pair_id, source_checkpoint_id,
         last_supervised_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         planner_session_id = excluded.planner_session_id,
@@ -365,9 +353,6 @@ export class SqlitePairRepository implements IPairRepository {
         last_supervised_at = excluded.last_supervised_at,
         updated_at = excluded.updated_at
     `);
-    // `stable_pair_id` is written on INSERT and deliberately ABSENT from the
-    // DO UPDATE set: it is immutable once set (freeze §10.2), so no later save
-    // of a mutated Pair row can move the identity that history is anchored to.
     stmt.run(
       pair.id,
       pair.projectId,
@@ -378,6 +363,8 @@ export class SqlitePairRepository implements IPairRepository {
       pair.status,
       pair.operationalState,
       pair.stableId,
+      pair.predecessorPairId ?? null,
+      pair.sourceCheckpointId ?? null,
       pair.lastSupervisedAt ?? null,
       pair.createdAt,
       pair.updatedAt,
@@ -386,6 +373,94 @@ export class SqlitePairRepository implements IPairRepository {
 
   async delete(id: PairId): Promise<void> {
     this.db.prepare('DELETE FROM pairs WHERE id = ?').run(id);
+  }
+}
+
+/* --- Pair Checkpoint Repository --- */
+export class SqlitePairCheckpointRepository implements IPairCheckpointRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  private mapRow(row: Record<string, unknown>): PairCheckpoint {
+    return new PairCheckpoint({
+      id: row.id as PairCheckpointId,
+      pairId: row.pair_id as PairId,
+      createdAt: Number(row.created_at),
+      reason: row.reason as string,
+      objective: (row.objective as string | null) ?? null,
+      currentMilestone: (row.current_milestone as string | null) ?? null,
+      summary: (row.summary as string | null) ?? null,
+      pendingWork: (row.pending_work as string | null) ?? null,
+      nextAction: (row.next_action as string | null) ?? null,
+      latestAssignmentId: (row.latest_assignment_id as AssignmentId | null) ?? null,
+      latestAttemptId: (row.latest_attempt_id as AttemptId | null) ?? null,
+      latestDeliveryId: (row.latest_delivery_id as DeliveryId | null) ?? null,
+      plannerContext: safeJsonParse<any>(row.planner_context) ?? row.planner_context ?? null,
+      workerContext: safeJsonParse<any>(row.worker_context) ?? row.worker_context ?? null,
+      repoHead: (row.repo_head as string | null) ?? null,
+      metadata: safeJsonParse<any>(row.metadata) ?? row.metadata ?? null,
+    });
+  }
+
+  async create(checkpoint: PairCheckpoint): Promise<void> {
+    const stmt = this.db.prepare(`
+      INSERT INTO pair_checkpoints (
+        id, pair_id, created_at, reason, objective, current_milestone,
+        summary, pending_work, next_action, latest_assignment_id,
+        latest_attempt_id, latest_delivery_id, planner_context,
+        worker_context, repo_head, metadata
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      checkpoint.id,
+      checkpoint.pairId,
+      checkpoint.createdAt,
+      checkpoint.reason,
+      checkpoint.objective,
+      checkpoint.currentMilestone,
+      checkpoint.summary,
+      checkpoint.pendingWork,
+      checkpoint.nextAction,
+      checkpoint.latestAssignmentId,
+      checkpoint.latestAttemptId,
+      checkpoint.latestDeliveryId,
+      typeof checkpoint.plannerContext === 'object' ? safeJsonStringify(checkpoint.plannerContext) : checkpoint.plannerContext,
+      typeof checkpoint.workerContext === 'object' ? safeJsonStringify(checkpoint.workerContext) : checkpoint.workerContext,
+      checkpoint.repoHead,
+      typeof checkpoint.metadata === 'object' ? safeJsonStringify(checkpoint.metadata) : checkpoint.metadata,
+    );
+  }
+
+  async createPairCheckpoint(checkpoint: PairCheckpoint): Promise<void> {
+    return this.create(checkpoint);
+  }
+
+  async findById(id: PairCheckpointId): Promise<PairCheckpoint | null> {
+    const row = this.db.prepare('SELECT * FROM pair_checkpoints WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.mapRow(row);
+  }
+
+  async getPairCheckpoint(id: PairCheckpointId): Promise<PairCheckpoint | null> {
+    return this.findById(id);
+  }
+
+  async findLatest(pairId: PairId): Promise<PairCheckpoint | null> {
+    const row = this.db.prepare('SELECT * FROM pair_checkpoints WHERE pair_id = ? ORDER BY created_at DESC LIMIT 1').get(pairId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.mapRow(row);
+  }
+
+  async getLatestPairCheckpoint(pairId: PairId): Promise<PairCheckpoint | null> {
+    return this.findLatest(pairId);
+  }
+
+  async findAll(pairId: PairId): Promise<PairCheckpoint[]> {
+    const rows = this.db.prepare('SELECT * FROM pair_checkpoints WHERE pair_id = ? ORDER BY created_at ASC').all(pairId) as Array<Record<string, unknown>>;
+    return rows.map((r) => this.mapRow(r));
+  }
+
+  async listPairCheckpoints(pairId: PairId): Promise<PairCheckpoint[]> {
+    return this.findAll(pairId);
   }
 }
 

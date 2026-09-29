@@ -88,10 +88,10 @@ export const PairView: React.FC<PairViewProps> = ({
         <div>
           <h1 className="text-xl font-bold text-slate-100 flex items-center gap-2">
             <GitMerge className="w-5 h-5 text-blue-400" />
-            <span>Projects & Planner-Worker Pairs</span>
+            <span>Projects & Session Pairs</span>
           </h1>
           <p className="text-xs text-slate-400 mt-1">
-            Manage projects, bind runtime sessions, coordinate assignments, and enforce lifecycle invariants
+            Manage durable Projects, bind Planner & Worker Sessions into Session Pairs, coordinate assignments, and enforce lifecycle invariants
           </p>
         </div>
 
