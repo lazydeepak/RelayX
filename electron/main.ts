@@ -133,6 +133,7 @@ function initializeEngine(): RelayApiService {
 }
 
 function createWindow(): void {
+  console.log('[Lifecycle] createWindow entered');
   const isMac = process.platform === 'darwin';
 
   mainWindow = new BrowserWindow({
@@ -152,9 +153,27 @@ function createWindow(): void {
       sandbox: true,
     },
   });
+  console.log('[Lifecycle] BrowserWindow created');
 
   mainWindow.once('ready-to-show', () => {
+    console.log('[Lifecycle] ready-to-show');
     mainWindow?.show();
+  });
+
+  mainWindow.webContents.on('did-start-loading', () => {
+    console.log('[Lifecycle] did-start-loading');
+  });
+
+  mainWindow.webContents.on('did-finish-load', () => {
+    console.log('[Lifecycle] did-finish-load');
+  });
+
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
+    console.log('[Lifecycle] did-fail-load:', errorCode, errorDescription);
+  });
+
+  mainWindow.on('close', () => {
+    console.log('[Lifecycle] window close');
   });
 
   // Handle external links safely in system browser
@@ -204,6 +223,7 @@ function createWindow(): void {
   }
 
   mainWindow.on('closed', () => {
+    console.log('[Lifecycle] window closed');
     mainWindow = null;
   });
 }
@@ -247,12 +267,18 @@ if (!gotSingleInstanceLock) {
   });
 
   app.on('window-all-closed', () => {
+    console.log('[Lifecycle] window-all-closed');
     if (process.platform !== 'darwin') {
       app.quit();
     }
   });
 
+  app.on('before-quit', () => {
+    console.log('[Lifecycle] before-quit');
+  });
+
   app.on('will-quit', () => {
+    console.log('[Lifecycle] will-quit');
     if (relayEngine) {
       relayEngine.stopSupervisionLoop();
     }
@@ -270,5 +296,17 @@ if (!gotSingleInstanceLock) {
         console.error('[RelayX Engine] Error closing SQLite database:', err);
       }
     }
+  });
+
+  app.on('quit', (event, exitCode) => {
+    console.log('[Lifecycle] quit, exitCode:', exitCode);
+  });
+
+  process.on('uncaughtException', (err) => {
+    console.error('[Lifecycle] Uncaught Exception:', err);
+  });
+
+  process.on('unhandledRejection', (reason) => {
+    console.error('[Lifecycle] Unhandled Rejection:', reason);
   });
 }
