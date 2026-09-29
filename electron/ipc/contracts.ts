@@ -59,6 +59,8 @@ export const RELAY_IPC_CHANNELS = {
   CREATE_CHATGPT_PLANNER_SESSION: 'relay:create-chatgpt-planner-session',
   PROVISION_PAIR_WITH_NEW_SESSIONS: 'relay:provision-pair-with-new-sessions',
   FINALIZE_PROJECT_SETUP: 'relay:finalize-project-setup',
+  GET_DIAGNOSTICS_REPORT: 'relay:get-diagnostics-report',
+  COPY_DIAGNOSTIC_REPORT: 'relay:copy-diagnostic-report',
 } as const;
 
 export type RelayIpcChannel = (typeof RELAY_IPC_CHANNELS)[keyof typeof RELAY_IPC_CHANNELS];

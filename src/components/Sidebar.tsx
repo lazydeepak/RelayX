@@ -6,6 +6,7 @@ import {
   ListTodo,
   Activity,
   AlertTriangle,
+  Stethoscope,
   Settings,
   ShieldCheck,
 } from 'lucide-react';
@@ -29,6 +30,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'assignments', label: 'Assignments', icon: ListTodo },
     { id: 'timeline', label: 'Activity Timeline', icon: Activity },
     { id: 'attention', label: 'Attention & Recovery', icon: AlertTriangle, badge: openAttentionCount },
+    { id: 'diagnostics', label: 'Diagnostics', icon: Stethoscope },
     { id: 'settings', label: 'Engine Settings', icon: Settings },
   ];
 

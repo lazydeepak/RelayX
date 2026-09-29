@@ -35,6 +35,7 @@ import { parseChatGPTConversationUrl } from '../providers/adapters.ts';
 import { RuntimeSession, Project, RuntimeProjectAssociation } from '../domain/entities.ts';
 import { IRelayRepositories } from '../persistence/interfaces.ts';
 import { RelayEngine } from './RelayEngine.ts';
+import { relayDiagnostics } from './RelayDiagnostics.ts';
 import {
   IRelayApi,
   DashboardState,
@@ -47,6 +48,7 @@ import {
   ProvisionPairWithNewSessionsResult,
   WorkerChoice,
   WorkerChoiceList,
+  DiagnosticsReport,
 } from '../../types/relayApi.ts';
 import {
   UIPair,
@@ -2077,5 +2079,24 @@ export class RelayApiService implements IRelayApi {
     } catch (err: any) {
       return { success: false, error: err.message };
     }
+  }
+
+  public async getDiagnosticsReport(): Promise<DiagnosticsReport> {
+    const pairs = await this.db.pairs.findAll();
+    const runtimes = await this.db.runtimes.findAll();
+    const attention = this.db.attention ? await this.db.attention.findAll() : [];
+    const openAttention = attention.filter((a: any) => a.status === 'open');
+
+    return relayDiagnostics.evaluateHealth(
+      { ok: true, type: this.databaseType },
+      pairs.length,
+      runtimes.length,
+      openAttention.length
+    );
+  }
+
+  public async copyDiagnosticReport(): Promise<string> {
+    const report = await this.getDiagnosticsReport();
+    return report.formattedReportText;
   }
 }

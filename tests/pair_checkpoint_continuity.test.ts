@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { unlinkSync, existsSync } from 'node:fs';
 import { SqliteRelayDatabase } from '../src/relay/persistence/sqlite/SqliteDatabase.ts';
 import { RelayEngine } from '../src/relay/application/RelayEngine.ts';
-import { Project, Pair, RuntimeRuntimeSession as RuntimeSession, RuntimeProjectAssociation } from '../src/relay/domain/entities.ts';
+import { Project, Pair, RuntimeSession, RuntimeProjectAssociation } from '../src/relay/domain/entities.ts';
 import { MockProvider } from './MockProvider.ts';
 
 describe('RelayX Pair Continuity & PairCheckpoint Suite', () => {

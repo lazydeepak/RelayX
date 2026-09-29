@@ -149,4 +149,10 @@ export function registerRelayIpcHandlers(service: RelayApiService): void {
   ipcMain.handle(RELAY_IPC_CHANNELS.FINALIZE_PROJECT_SETUP, (_event, setup) =>
     service.finalizeProjectSetup(setup),
   );
+  ipcMain.handle(RELAY_IPC_CHANNELS.GET_DIAGNOSTICS_REPORT, () =>
+    service.getDiagnosticsReport(),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.COPY_DIAGNOSTIC_REPORT, () =>
+    service.copyDiagnosticReport(),
+  );
 }

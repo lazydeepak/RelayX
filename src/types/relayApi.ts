@@ -266,6 +266,56 @@ export interface IRelayApi {
     plannerUrl?: string;
     workerSessionId?: string;
   }): Promise<{ success: boolean; projectId?: string; error?: string }>;
+
+  // Diagnostics & Telemetry
+  getDiagnosticsReport(): Promise<DiagnosticsReport>;
+  copyDiagnosticReport(): Promise<string>;
+}
+
+export type HealthLevel = 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY' | 'UNKNOWN';
+
+export interface DiagnosticMeasurement {
+  id: string;
+  operation: string;
+  durationMs: number;
+  timestamp: number;
+  success: boolean;
+  error?: string;
+  metadata?: {
+    projectId?: string;
+    pairId?: string;
+    provider?: string;
+    source?: string;
+    details?: Record<string, unknown>;
+  };
+  children?: DiagnosticMeasurement[];
+}
+
+export interface OperationMetricSummary {
+  operation: string;
+  calls: number;
+  latestDurationMs: number;
+  avgDurationMs: number;
+  p95DurationMs: number;
+  maxDurationMs: number;
+  errorCount: number;
+}
+
+export interface ComponentHealthStatus {
+  component: string;
+  status: HealthLevel;
+  summary: string;
+  lastObservedAt?: number;
+  evidence: string[];
+}
+
+export interface DiagnosticsReport {
+  overall: HealthLevel;
+  problems: string[];
+  performance: OperationMetricSummary[];
+  components: Record<string, ComponentHealthStatus>;
+  timestamp: number;
+  formattedReportText: string;
 }
 
 declare global {

@@ -122,6 +122,10 @@ const relayApi: IRelayApi = {
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.PROVISION_PAIR_WITH_NEW_SESSIONS, projectId, pairName, options),
   finalizeProjectSetup: (setup: any) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.FINALIZE_PROJECT_SETUP, setup),
+  getDiagnosticsReport: () =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_DIAGNOSTICS_REPORT),
+  copyDiagnosticReport: () =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.COPY_DIAGNOSTIC_REPORT),
 };
 
 contextBridge.exposeInMainWorld('relayApi', relayApi);

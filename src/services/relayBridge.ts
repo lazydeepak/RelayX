@@ -479,4 +479,18 @@ export const relayBridge: IRelayApi = {
     }
     return getLocalFallbackService().finalizeProjectSetup(setup);
   },
+
+  getDiagnosticsReport: async () => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.getDiagnosticsReport();
+    }
+    return getLocalFallbackService().getDiagnosticsReport();
+  },
+
+  copyDiagnosticReport: async () => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.copyDiagnosticReport();
+    }
+    return getLocalFallbackService().copyDiagnosticReport();
+  },
 };

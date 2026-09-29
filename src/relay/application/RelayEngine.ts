@@ -994,7 +994,7 @@ export class RelayEngine {
         },
       });
     } else if (result.outcome === 'ambiguous') {
-      delivery.markAmbiguous(result.failureReason || 'Ambiguous delivery outcome during continuation', result.evidence);
+      delivery.markAmbiguous(result.reason || 'Ambiguous delivery outcome during continuation', result.evidence);
       await this.repos.deliveries.save(delivery);
 
       const attention = AttentionItem.create(
@@ -1018,18 +1018,18 @@ export class RelayEngine {
           targetRuntimeSessionId: runtime.id,
           deliveryId: delivery.id,
           outcome: result.outcome,
-          failureReason: result.failureReason,
+          failureReason: result.reason,
         },
       });
     } else {
-      delivery.markFailed(result.failureReason || 'Failed continuation delivery', result.evidence);
+      delivery.markFailed(result.reason || 'Failed continuation delivery', result.evidence);
       await this.repos.deliveries.save(delivery);
 
       const attention = AttentionItem.create(
         'critical',
         'continuation_delivery_failed',
         'Continuation delivery failed',
-        `Checkpoint continuation delivery to runtime ${runtime.id} failed: ${result.failureReason || 'unknown reason'}.`,
+        `Checkpoint continuation delivery to runtime ${runtime.id} failed: ${result.reason || 'unknown reason'}.`,
         {
           pairId,
           assignmentId: assignment.id,
@@ -1046,7 +1046,7 @@ export class RelayEngine {
           targetRuntimeSessionId: runtime.id,
           deliveryId: delivery.id,
           outcome: result.outcome,
-          failureReason: result.failureReason,
+          failureReason: result.reason,
         },
       });
     }
