@@ -61,6 +61,18 @@ export const RELAY_IPC_CHANNELS = {
   FINALIZE_PROJECT_SETUP: 'relay:finalize-project-setup',
   GET_DIAGNOSTICS_REPORT: 'relay:get-diagnostics-report',
   COPY_DIAGNOSTIC_REPORT: 'relay:copy-diagnostic-report',
+
+  // Provider Integration & Capability Model
+  LIST_INTEGRATIONS: 'relay:list-integrations',
+  VERIFY_INTEGRATION: 'relay:verify-integration',
+  RECHECK_ALL_INTEGRATIONS: 'relay:recheck-all-integrations',
+
+  // Worker AI Model Configuration & Application
+  GET_SUPPORTED_MODELS: 'relay:get-supported-models',
+  GET_EFFECTIVE_MODEL_CONFIG: 'relay:get-effective-model-config',
+  SET_GLOBAL_MODEL_DEFAULT: 'relay:set-global-model-default',
+  SET_PROJECT_MODEL_OVERRIDE: 'relay:set-project-model-override',
+  CLEAR_PROJECT_MODEL_OVERRIDE: 'relay:clear-project-model-override',
 } as const;
 
 export type RelayIpcChannel = (typeof RELAY_IPC_CHANNELS)[keyof typeof RELAY_IPC_CHANNELS];

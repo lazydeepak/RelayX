@@ -10,8 +10,8 @@ const relayApi: IRelayApi = {
   getProject: (id: string) => ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_PROJECT, id),
   createProject: (name: string, description?: string) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.CREATE_PROJECT, name, description),
-  updateProject: (id: string, name: string, description?: string) =>
-    ipcRenderer.invoke(RELAY_IPC_CHANNELS.UPDATE_PROJECT, id, name, description),
+  updateProject: (id: string, nameOrProps: any, description?: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.UPDATE_PROJECT, id, nameOrProps, description),
   archiveProject: (id: string) => ipcRenderer.invoke(RELAY_IPC_CHANNELS.ARCHIVE_PROJECT, id),
   unarchiveProject: (id: string) => ipcRenderer.invoke(RELAY_IPC_CHANNELS.UNARCHIVE_PROJECT, id),
   canDeleteProject: (id: string) => ipcRenderer.invoke(RELAY_IPC_CHANNELS.CAN_DELETE_PROJECT, id),
@@ -55,13 +55,15 @@ const relayApi: IRelayApi = {
   registerRuntimeSession: (
     providerType: ProviderType,
     name: string,
-    bundleIdentifier?: string,
+    identityOrBundleId?: string,
+    projectId?: string,
   ) =>
     ipcRenderer.invoke(
       RELAY_IPC_CHANNELS.REGISTER_RUNTIME_SESSION,
       providerType,
       name,
-      bundleIdentifier,
+      identityOrBundleId,
+      projectId,
     ),
   discoverRuntime: (providerType: ProviderType) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.DISCOVER_RUNTIME, providerType),
@@ -126,6 +128,22 @@ const relayApi: IRelayApi = {
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_DIAGNOSTICS_REPORT),
   copyDiagnosticReport: () =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.COPY_DIAGNOSTIC_REPORT),
+  listIntegrations: () =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.LIST_INTEGRATIONS),
+  verifyIntegration: (providerType: ProviderType) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.VERIFY_INTEGRATION, providerType),
+  recheckAllIntegrations: () =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.RECHECK_ALL_INTEGRATIONS),
+  getSupportedModels: (providerType: ProviderType) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_SUPPORTED_MODELS, providerType),
+  getEffectiveModelConfig: (providerType: ProviderType, projectId?: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_EFFECTIVE_MODEL_CONFIG, providerType, projectId),
+  setGlobalModelDefault: (providerType: ProviderType, model: string, note?: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.SET_GLOBAL_MODEL_DEFAULT, providerType, model, note),
+  setProjectModelOverride: (projectId: string, providerType: ProviderType, model: string, justification: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.SET_PROJECT_MODEL_OVERRIDE, projectId, providerType, model, justification),
+  clearProjectModelOverride: (projectId: string, providerType: ProviderType) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.CLEAR_PROJECT_MODEL_OVERRIDE, projectId, providerType),
 };
 
 contextBridge.exposeInMainWorld('relayApi', relayApi);

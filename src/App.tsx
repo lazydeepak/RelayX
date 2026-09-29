@@ -695,11 +695,13 @@ export default function App() {
         isOpen={runtimeModal.isOpen}
         mode={runtimeModal.mode}
         session={runtimeModal.session}
+        projects={projects}
         onClose={() => setRuntimeModal((prev) => ({ ...prev, isOpen: false }))}
         onSuccess={(msg) => {
           notify(msg);
           loadData();
         }}
+        onRefresh={loadData}
       />
 
       <RuntimeHistoryModal

@@ -78,6 +78,13 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({ onNotify }) =>
             Unhealthy
           </span>
         );
+      case 'INACTIVE':
+        return (
+          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 bg-slate-800/40 px-2.5 py-1 rounded-md border border-slate-700/50">
+            <span className="w-2 h-2 rounded-full bg-slate-500" />
+            Inactive
+          </span>
+        );
       case 'UNKNOWN':
       default:
         return (

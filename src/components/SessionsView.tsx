@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Cpu,
   Eye,
@@ -12,6 +12,13 @@ import {
   CheckCircle2,
   AlertTriangle,
   Info,
+  Filter,
+  ExternalLink,
+  Copy,
+  Check,
+  Terminal,
+  ShieldCheck,
+  FolderGit2,
 } from 'lucide-react';
 import { UIRuntimeSession, UIPair, ObservableEvidence, ProviderType } from '../types/ui.ts';
 
@@ -44,45 +51,133 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
   onViewHistory,
   onOpenSessionDetail,
 }) => {
-  const [showArchived, setShowArchived] = React.useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [providerFilter, setProviderFilter] = useState<'all' | ProviderType>('all');
+  const [bindingFilter, setBindingFilter] = useState<'all' | 'attached' | 'unbound'>('all');
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  const visibleSessions = sessions.filter((s) => (showArchived ? true : s.status !== 'archived'));
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedId(text);
+    setTimeout(() => setCopiedId(null), 2000);
+  };
 
-  const getIntegrationBadge = (status?: string) => {
+  // Derive attached pairs map
+  const attachedPairsMap = useMemo(() => {
+    const map = new Map<string, UIPair[]>();
+    for (const p of pairs) {
+      if (p.plannerSessionId) {
+        const list = map.get(p.plannerSessionId) || [];
+        list.push(p);
+        map.set(p.plannerSessionId, list);
+      }
+      if (p.workerSessionId && p.workerSessionId !== p.plannerSessionId) {
+        const list = map.get(p.workerSessionId) || [];
+        list.push(p);
+        map.set(p.workerSessionId, list);
+      }
+    }
+    return map;
+  }, [pairs]);
+
+  // Filtered session inventory
+  const filteredSessions = useMemo(() => {
+    return sessions.filter((s) => {
+      // Archive filter
+      if (!showArchived && s.status === 'archived') return false;
+      if (showArchived && s.status !== 'archived') return false;
+
+      // Provider filter
+      if (providerFilter !== 'all' && s.providerType !== providerFilter) return false;
+
+      // Binding filter
+      const attached = (attachedPairsMap.get(s.id) || []).length > 0;
+      if (bindingFilter === 'attached' && !attached) return false;
+      if (bindingFilter === 'unbound' && attached) return false;
+
+      // Search query
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        const matchesName = s.name.toLowerCase().includes(q);
+        const matchesExtId = s.externalSessionId?.toLowerCase().includes(q);
+        const matchesProject = s.externalProjectRef?.toLowerCase().includes(q);
+        const matchesWindow = s.windowTitle?.toLowerCase().includes(q);
+        const matchesProvider = s.providerType.toLowerCase().includes(q);
+        if (!matchesName && !matchesExtId && !matchesProject && !matchesWindow && !matchesProvider) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+  }, [sessions, showArchived, providerFilter, bindingFilter, searchQuery, attachedPairsMap]);
+
+  // Inventory metric summary
+  const metrics = useMemo(() => {
+    const nonArchived = sessions.filter((s) => s.status !== 'archived');
+    const attachedCount = nonArchived.filter((s) => (attachedPairsMap.get(s.id) || []).length > 0).length;
+    const workingCount = nonArchived.filter((s) => s.status === 'working').length;
+    const availableCount = nonArchived.filter((s) => s.status === 'available' || s.status === 'idle').length;
+    const archivedCount = sessions.filter((s) => s.status === 'archived').length;
+
+    return {
+      total: nonArchived.length,
+      attached: attachedCount,
+      unbound: nonArchived.length - attachedCount,
+      working: workingCount,
+      available: availableCount,
+      archived: archivedCount,
+    };
+  }, [sessions, attachedPairsMap]);
+
+  const getStatusBadge = (status: string) => {
     switch (status) {
-      case 'real':
+      case 'available':
+      case 'idle':
         return (
-          <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-medium">
-            Real Provider
+          <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+            ● Available
           </span>
         );
-      case 'partial':
+      case 'working':
         return (
-          <span className="text-[10px] px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20 font-medium">
-            macOS Window Probe
+          <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20 animate-pulse">
+            ● Working
           </span>
         );
-      case 'unsupported':
+      case 'suspended':
+        return (
+          <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20">
+            ● Suspended
+          </span>
+        );
+      case 'archived':
+        return (
+          <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold bg-slate-800 text-slate-400 border border-slate-700">
+            Archived
+          </span>
+        );
       default:
         return (
-          <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700 font-medium">
-            Integration Not Connected
+          <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold bg-red-500/10 text-red-400 border border-red-500/20">
+            ● Unavailable
           </span>
         );
     }
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl font-bold text-slate-100 flex items-center gap-2">
             <Cpu className="w-5 h-5 text-emerald-400" />
-            <span>Runtime Sessions</span>
+            <span>Runtime Sessions Inventory</span>
           </h1>
           <p className="text-xs text-slate-400 mt-1">
-            macOS external AI application instances, accessibility bindings, and observable process states
+            Authoritative external AI sessions, observable evidence, and pair attachment governance
           </p>
         </div>
 
@@ -96,7 +191,7 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
             }`}
           >
             <Archive className="w-3.5 h-3.5" />
-            <span>{showArchived ? 'Showing Archived' : 'Show Archived'}</span>
+            <span>{showArchived ? 'Showing Archived' : `Archived (${metrics.archived})`}</span>
           </button>
 
           <button
@@ -104,7 +199,7 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md transition-colors"
           >
             <Search className="w-3.5 h-3.5" />
-            <span>Discover & Attach</span>
+            <span>Integrations &amp; Discovery</span>
           </button>
 
           <button
@@ -117,38 +212,120 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
         </div>
       </div>
 
+      {/* Inventory Metric Cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+        <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+          <div>
+            <span className="text-slate-400 block text-[11px]">Total Active Sessions</span>
+            <span className="text-lg font-bold text-slate-100">{metrics.total}</span>
+          </div>
+          <Cpu className="w-4 h-4 text-emerald-400 opacity-60" />
+        </div>
+        <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+          <div>
+            <span className="text-slate-400 block text-[11px]">Attached to Pairs</span>
+            <span className="text-lg font-bold text-blue-400">{metrics.attached}</span>
+          </div>
+          <Layers className="w-4 h-4 text-blue-400 opacity-60" />
+        </div>
+        <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+          <div>
+            <span className="text-slate-400 block text-[11px]">Unbound / Available</span>
+            <span className="text-lg font-bold text-slate-300">{metrics.unbound}</span>
+          </div>
+          <Unlink className="w-4 h-4 text-slate-400 opacity-60" />
+        </div>
+        <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+          <div>
+            <span className="text-slate-400 block text-[11px]">Active Working</span>
+            <span className="text-lg font-bold text-amber-400">{metrics.working}</span>
+          </div>
+          <RefreshCw className="w-4 h-4 text-amber-400 opacity-60" />
+        </div>
+      </div>
+
+      {/* Filter and Search Bar */}
+      <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
+        <div className="relative flex-1 w-full sm:w-auto">
+          <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search by title, session ID (ses_*), path, or provider…"
+            className="w-full pl-9 pr-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 text-xs"
+          />
+        </div>
+
+        <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+          <div className="flex items-center gap-1.5">
+            <span className="text-slate-500 text-[11px]">Provider:</span>
+            <select
+              value={providerFilter}
+              onChange={(e) => setProviderFilter(e.target.value as any)}
+              className="px-2 py-1 rounded bg-slate-950 border border-slate-800 text-slate-300 text-xs"
+            >
+              <option value="all">All Providers</option>
+              <option value="chatgpt">ChatGPT</option>
+              <option value="opencode">OpenCode</option>
+              <option value="vscode">VS Code</option>
+            </select>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <span className="text-slate-500 text-[11px]">Binding:</span>
+            <select
+              value={bindingFilter}
+              onChange={(e) => setBindingFilter(e.target.value as any)}
+              className="px-2 py-1 rounded bg-slate-950 border border-slate-800 text-slate-300 text-xs"
+            >
+              <option value="all">All States</option>
+              <option value="attached">Attached Only</option>
+              <option value="unbound">Unbound Only</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
       {/* Sessions Grid */}
-      {visibleSessions.length === 0 ? (
-        <div className="p-8 rounded-xl bg-slate-900 border border-slate-800 text-center space-y-3">
+      {filteredSessions.length === 0 ? (
+        <div className="p-10 rounded-xl bg-slate-900 border border-slate-800 text-center space-y-3">
           <Cpu className="w-8 h-8 text-slate-600 mx-auto" />
           <h3 className="text-sm font-semibold text-slate-300">
-            {showArchived ? 'No Archived Sessions Found' : 'No Active Runtime Sessions Registered'}
+            {showArchived
+              ? 'No Archived Runtime Sessions'
+              : sessions.length === 0
+              ? 'No Runtime Sessions Registered'
+              : 'No Sessions Matching Current Filters'}
           </h3>
           <p className="text-xs text-slate-500 max-w-sm mx-auto">
-            Discover running macOS AI apps or manually register a session to begin orchestrating work.
+            {sessions.length === 0
+              ? 'Probe provider integrations to adopt discovered external sessions or register concrete session identities.'
+              : 'Try clearing your search query or reset the provider and binding filters.'}
           </p>
-          <div className="flex items-center justify-center gap-3 pt-2">
-            <button
-              onClick={onOpenDiscover}
-              className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium"
-            >
-              Probe & Discover
-            </button>
-            <button
-              onClick={onOpenRegister}
-              className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium"
-            >
-              Register Manually
-            </button>
-          </div>
+          {sessions.length === 0 && (
+            <div className="flex items-center justify-center gap-3 pt-2">
+              <button
+                onClick={onOpenDiscover}
+                className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium"
+              >
+                Integrations &amp; Discovery
+              </button>
+              <button
+                onClick={onOpenRegister}
+                className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium"
+              >
+                Register Session
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {visibleSessions.map((session) => {
-            // Find attached pairs
-            const attachedPairs = pairs.filter(
-              (p) => p.plannerSessionId === session.id || p.workerSessionId === session.id,
-            );
+          {filteredSessions.map((session) => {
+            const attachedPairs = attachedPairsMap.get(session.id) || [];
+            const isAttached = attachedPairs.length > 0;
+            const hasAuthoritativeIdentity = Boolean(session.externalSessionId);
 
             return (
               <div
@@ -157,57 +334,85 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
                   session.status === 'archived' ? 'border-slate-800/60 opacity-80' : 'border-slate-800'
                 }`}
               >
-                <div>
-                  <div className="flex items-center justify-between mb-2">
+                <div className="space-y-3">
+                  {/* Top Badges */}
+                  <div className="flex items-center justify-between">
                     <div className="flex items-center gap-1.5">
-                      <span className="text-[11px] font-mono uppercase px-2 py-0.5 rounded bg-slate-800 text-slate-300">
+                      <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-semibold">
                         {session.providerType}
                       </span>
-                      {getIntegrationBadge(session.integrationStatus)}
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      {session.status === 'archived' && (
-                        <span className="px-2 py-0.5 text-[10px] font-semibold rounded bg-amber-950 text-amber-300 border border-amber-800 uppercase">
-                          Archived
-                        </span>
-                      )}
                       <span
-                        className={`text-xs px-2.5 py-0.5 rounded-full font-semibold capitalize ${
-                          session.status === 'available' || session.status === 'idle'
-                            ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                            : session.status === 'working'
-                            ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20 animate-pulse'
-                            : session.status === 'suspended'
-                            ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                            : session.status === 'archived'
-                            ? 'bg-slate-800 text-slate-400 border border-slate-700'
-                            : 'bg-red-500/10 text-red-400 border border-red-500/20'
+                        className={`text-[10px] px-2 py-0.5 rounded border font-medium ${
+                          hasAuthoritativeIdentity
+                            ? 'bg-blue-500/10 text-blue-400 border-blue-500/20'
+                            : 'bg-slate-800 text-slate-400 border-slate-700'
                         }`}
                       >
-                        {session.status}
+                        {hasAuthoritativeIdentity ? 'Registered Identity' : 'Observed Probe'}
                       </span>
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      {getStatusBadge(session.status)}
                     </div>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => onOpenSessionDetail(session.id)}
-                    className="text-sm font-bold text-slate-100 hover:text-blue-300 text-left transition-colors"
-                    title="Open session details"
-                  >
-                    {session.name}
-                  </button>
-                  {session.status === 'archived' && session.archiveReason && (
-                    <div className="mt-1 p-2 rounded bg-amber-500/5 border border-amber-500/10 text-[10px] text-amber-200/80 italic">
-                      Reason: {session.archiveReason}
+                  {/* Title & Detail Trigger */}
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => onOpenSessionDetail(session.id)}
+                      className="text-sm font-bold text-slate-100 hover:text-blue-300 text-left transition-colors truncate block max-w-full"
+                      title="Open session details"
+                    >
+                      {session.name}
+                    </button>
+                    {session.status === 'archived' && session.archiveReason && (
+                      <div className="mt-1 p-2 rounded bg-amber-500/5 border border-amber-500/10 text-[10px] text-amber-200/80 italic">
+                        Reason: {session.archiveReason}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Concrete Identity Display */}
+                  <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-850 space-y-1 text-xs">
+                    <div className="flex items-center justify-between text-slate-400 text-[10px]">
+                      <span className="font-semibold uppercase tracking-wider">Concrete Session ID</span>
+                      {session.externalSessionId && (
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard(session.externalSessionId!)}
+                          className="hover:text-slate-200 flex items-center gap-0.5"
+                          title="Copy session ID"
+                        >
+                          {copiedId === session.externalSessionId ? (
+                            <Check className="w-2.5 h-2.5 text-emerald-400" />
+                          ) : (
+                            <Copy className="w-2.5 h-2.5" />
+                          )}
+                          <span>{copiedId === session.externalSessionId ? 'Copied' : 'Copy'}</span>
+                        </button>
+                      )}
                     </div>
-                  )}
-                  <p className="text-xs text-slate-400 font-mono mt-1 truncate">
-                    {session.windowTitle ||
-                      (session.integrationStatus === 'unsupported'
-                        ? 'Integration not connected'
-                        : 'No active window identified')}
-                  </p>
+                    {session.externalSessionId ? (
+                      <div className="font-mono text-emerald-400 text-[11px] truncate select-all" title={session.externalSessionId}>
+                        {session.externalSessionId}
+                      </div>
+                    ) : (
+                      <div className="text-slate-500 text-[11px] italic">
+                        Unbound external ID (Pending concrete adoption)
+                      </div>
+                    )}
+
+                    {session.externalProjectRef && (
+                      <div className="pt-1 border-t border-slate-900 text-[10px] text-slate-400 truncate flex items-center gap-1">
+                        <FolderGit2 className="w-3 h-3 text-slate-500 shrink-0" />
+                        <span className="font-mono truncate" title={session.externalProjectRef}>
+                          {session.externalProjectRef}
+                        </span>
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 {/* Attached Pairs Info */}
@@ -215,13 +420,13 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
                   <div className="flex items-center justify-between text-xs text-slate-400">
                     <span className="flex items-center gap-1 text-[11px] font-medium text-slate-300">
                       <Layers className="w-3 h-3 text-blue-400" />
-                      Attached Pairs ({attachedPairs.length}):
+                      Pair Bindings ({attachedPairs.length}):
                     </span>
                     <div className="flex items-center gap-2">
                       {session.status !== 'archived' && (
                         <button
                           onClick={() => onAttachToPair(session.id)}
-                          className="text-[10px] text-blue-400 hover:text-blue-300 flex items-center gap-0.5"
+                          className="text-[10px] text-blue-400 hover:text-blue-300 flex items-center gap-0.5 font-medium"
                           title="Bind this runtime to a new or existing pair"
                         >
                           <PlusCircle className="w-2.5 h-2.5" />
@@ -235,13 +440,16 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
                           title="Safely detach this runtime from its bound pairs"
                         >
                           <Unlink className="w-2.5 h-2.5" />
-                          <span>Detach Pairs</span>
+                          <span>Detach</span>
                         </button>
                       )}
                     </div>
                   </div>
                   {attachedPairs.length === 0 ? (
-                    <div className="text-[11px] text-slate-500 italic">Unbound / Standalone</div>
+                    <div className="text-[11px] text-slate-500 italic flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-slate-600"></span>
+                      <span>Unbound / Available for Assignment</span>
+                    </div>
                   ) : (
                     <div className="flex flex-wrap gap-1">
                       {attachedPairs.map((p) => {
@@ -253,7 +461,7 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
                             className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-[10px] text-slate-300 flex items-center gap-1"
                           >
                             <span>{p.name}</span>
-                            <span className="text-[9px] text-slate-500 font-mono">
+                            <span className="text-[9px] text-blue-400 font-mono">
                               ({isPlanner ? 'Plan' : ''}
                               {isPlanner && isWorker ? '/' : ''}
                               {isWorker ? 'Work' : ''})
@@ -265,23 +473,11 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
                   )}
                 </div>
 
-                {/* Telemetry and Process Info */}
-                <div className="space-y-2 text-xs border-t border-slate-800 pt-3 text-slate-400">
+                {/* Process and Observation Telemetry */}
+                <div className="space-y-1.5 text-[11px] border-t border-slate-800 pt-2.5 text-slate-400">
                   <div className="flex justify-between">
-                    <span>Application PID:</span>
-                    <span className="font-mono text-slate-200">{session.applicationPid ?? 'N/A'}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Observation Failures:</span>
-                    <span
-                      className={`font-mono ${
-                        session.consecutiveObservationFailures > 0
-                          ? 'text-amber-400 font-bold'
-                          : 'text-slate-200'
-                      }`}
-                    >
-                      {session.consecutiveObservationFailures} / 3 max
-                    </span>
+                    <span>Host PID:</span>
+                    <span className="font-mono text-slate-200">{session.applicationPid ?? 'Running'}</span>
                   </div>
                   <div className="flex justify-between">
                     <span>Last Observed:</span>
@@ -291,51 +487,47 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
                         : 'Never'}
                     </span>
                   </div>
-                  {session.archivedAt && (
-                    <div className="flex justify-between text-amber-300/80">
-                      <span>Archived At:</span>
-                      <span>{new Date(session.archivedAt).toLocaleDateString()}</span>
-                    </div>
-                  )}
                 </div>
 
-                {/* Bottom Controls */}
-                <div className="flex items-center justify-between pt-2 border-t border-slate-800/80">
-                  <div className="flex items-center gap-2">
+                {/* Bottom Action Controls */}
+                <div className="flex items-center justify-between pt-2.5 border-t border-slate-800">
+                  <div className="flex items-center gap-1.5">
                     <button
                       onClick={() => onOpenSessionDetail(session.id)}
-                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs transition-colors"
+                      className="flex items-center gap-1 px-2 py-1 rounded bg-slate-850 hover:bg-slate-750 text-slate-200 text-[11px] transition-colors"
                       title="Open full session details"
                     >
-                      <Info className="w-3.5 h-3.5" />
+                      <Info className="w-3 h-3 text-slate-400" />
                       <span>Details</span>
                     </button>
 
                     <button
                       onClick={() => onInspectSession(session.id)}
                       disabled={session.status === 'archived'}
-                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 text-xs transition-colors"
+                      className="flex items-center gap-1 px-2 py-1 rounded bg-slate-850 hover:bg-slate-750 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 text-[11px] transition-colors"
                       title="Probe Accessibility & Window State"
                     >
-                      <RefreshCw className="w-3.5 h-3.5" />
-                      <span>Probe State</span>
+                      <RefreshCw className="w-3 h-3 text-emerald-400" />
+                      <span>Probe</span>
                     </button>
 
                     {session.lastEvidence && (
                       <button
                         onClick={() => onViewEvidence(session.lastEvidence!)}
-                        className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300"
+                        className="flex items-center gap-1 px-2 py-1 rounded bg-slate-850 hover:bg-slate-750 text-blue-300 text-[11px] transition-colors"
+                        title="View raw observation evidence"
                       >
-                        <Eye className="w-3.5 h-3.5" />
+                        <Eye className="w-3 h-3 text-blue-400" />
                         <span>Evidence</span>
                       </button>
                     )}
 
                     <button
                       onClick={() => onViewHistory(session.id, session.name)}
-                      className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-200"
+                      className="flex items-center gap-1 px-2 py-1 rounded bg-slate-850 hover:bg-slate-750 text-slate-300 text-[11px] transition-colors"
+                      title="View session observation history"
                     >
-                      <RotateCcw className="w-3.5 h-3.5" />
+                      <RotateCcw className="w-3 h-3 text-slate-400" />
                       <span>History</span>
                     </button>
                   </div>
@@ -344,7 +536,7 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
                   {session.status === 'archived' ? (
                     <button
                       onClick={() => onUnarchiveSession(session.id)}
-                      className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-emerald-400 transition-colors"
+                      className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-emerald-400 transition-colors"
                       title="Restore Session"
                     >
                       <RotateCcw className="w-3.5 h-3.5" />
@@ -352,7 +544,7 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
                   ) : (
                     <button
                       onClick={() => onArchiveSession(session.id)}
-                      className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-amber-400 transition-colors"
+                      className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-amber-400 transition-colors"
                       title="Archive Session"
                     >
                       <Archive className="w-3.5 h-3.5" />
@@ -364,17 +556,6 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
           })}
         </div>
       )}
-      <div className="mt-6 p-4 rounded-xl bg-slate-950/60 border border-slate-800">
-        <button onClick={() => {}} className="text-xs font-medium text-slate-300 hover:text-blue-400">Unpaired Sessions (folded)</button>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mt-2">
-          {visibleSessions.filter((s) => !pairs.some((p) => p.plannerSessionId === s.id || p.workerSessionId === s.id)).map((s) => (
-            <div key={s.id} className="p-3 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-400">
-              <div className="font-medium text-slate-200">{s.name}</div>
-              <div>{s.providerType.toUpperCase()} • {s.status} • {s.externalSessionId ? 'id:' + s.externalSessionId.slice(0,8) : 'unpaired'}</div>
-            </div>
-          ))}
-        </div>
-      </div>
     </div>
   );
 };

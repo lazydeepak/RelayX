@@ -22,6 +22,10 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
 }) => {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [canonicalPath, setCanonicalPath] = useState('');
+  const [gitRoot, setGitRoot] = useState('');
+  const [plannerProjectUrl, setPlannerProjectUrl] = useState('');
+  const [workerWorkspacePath, setWorkerWorkspacePath] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -31,9 +35,17 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
       if (mode === 'edit' && project) {
         setName(project.name);
         setDescription(project.description || '');
+        setCanonicalPath(project.canonicalPath || '');
+        setGitRoot(project.gitRoot || '');
+        setPlannerProjectUrl(project.plannerProjectUrl || '');
+        setWorkerWorkspacePath(project.workerWorkspacePath || '');
       } else if (mode === 'create') {
         setName('');
         setDescription('');
+        setCanonicalPath('');
+        setGitRoot('');
+        setPlannerProjectUrl('');
+        setWorkerWorkspacePath('');
       }
     }
   }, [isOpen, mode, project]);
@@ -53,8 +65,15 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
         await relayBridge.createProject(name.trim(), description.trim());
         onSuccess(`Project "${name}" created successfully`);
       } else if (mode === 'edit' && project) {
-        await relayBridge.updateProject(project.id, name.trim(), description.trim());
-        onSuccess(`Project "${name}" updated successfully`);
+        await relayBridge.updateProject(project.id, {
+          name: name.trim(),
+          description: description.trim(),
+          canonicalPath: canonicalPath.trim() || undefined,
+          gitRoot: gitRoot.trim() || undefined,
+          plannerProjectUrl: plannerProjectUrl.trim() || undefined,
+          workerWorkspacePath: workerWorkspacePath.trim() || undefined,
+        });
+        onSuccess(`Project "${name}" configuration updated`);
       }
       onClose();
     } catch (err: any) {
@@ -116,10 +135,74 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
               <textarea
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                rows={3}
+                rows={2}
                 placeholder="Describe project purpose and architectural goals..."
                 className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-blue-500 resize-none"
               />
+            </div>
+
+            {/* Architectural & Destination Configuration */}
+            <div className="pt-2 border-t border-slate-800 space-y-3">
+              <span className="text-[11px] font-semibold uppercase text-slate-400 block">
+                Repository &amp; Destination Configuration
+              </span>
+
+              <div>
+                <label className="block text-slate-300 font-medium mb-1">
+                  Canonical Workspace Path
+                </label>
+                <input
+                  type="text"
+                  value={canonicalPath}
+                  onChange={(e) => setCanonicalPath(e.target.value)}
+                  placeholder="/Users/username/src/my-project"
+                  className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 font-mono text-xs focus:outline-none focus:border-blue-500"
+                />
+                <span className="text-[10px] text-slate-500 block mt-0.5">
+                  Changing path will invalidate stale session associations.
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-slate-300 font-medium mb-1">
+                    Git Root (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={gitRoot}
+                    onChange={(e) => setGitRoot(e.target.value)}
+                    placeholder="/Users/username/src/my-project"
+                    className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 font-mono text-xs focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-medium mb-1">
+                    Worker Workspace Path
+                  </label>
+                  <input
+                    type="text"
+                    value={workerWorkspacePath}
+                    onChange={(e) => setWorkerWorkspacePath(e.target.value)}
+                    placeholder="Defaults to Canonical Path if empty"
+                    className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 font-mono text-xs focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-medium mb-1">
+                  Planner Destination URL (ChatGPT Project / GPT)
+                </label>
+                <input
+                  type="text"
+                  value={plannerProjectUrl}
+                  onChange={(e) => setPlannerProjectUrl(e.target.value)}
+                  placeholder="https://chatgpt.com/g/g-p-67... or https://chatgpt.com"
+                  className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 font-mono text-xs focus:outline-none focus:border-blue-500"
+                />
+              </div>
             </div>
 
             <div className="flex items-center justify-end gap-3 pt-2">

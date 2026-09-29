@@ -49,6 +49,13 @@ import {
   WorkerChoice,
   WorkerChoiceList,
   DiagnosticsReport,
+  ProviderIntegration,
+  IntegrationStatus,
+  ProviderCapabilityMatrix,
+  ProviderIdentityInfo,
+  ProviderRequirementsInfo,
+  EffectiveModelConfig,
+  ProviderSetting,
 } from '../../types/relayApi.ts';
 import {
   UIPair,
@@ -271,20 +278,44 @@ export class RelayApiService implements IRelayApi {
 
   public async updateProject(
     id: string,
-    nameOrProps: string | { name?: string; description?: string },
+    nameOrProps: string | {
+      name?: string;
+      description?: string;
+      canonicalPath?: string;
+      gitRoot?: string;
+      plannerProjectUrl?: string;
+      workerWorkspacePath?: string;
+    },
     maybeDescription?: string,
   ): Promise<UIProject> {
     let name: string | undefined;
     let description: string | undefined;
+    let canonicalPath: string | undefined;
+    let gitRoot: string | undefined;
+    let plannerProjectUrl: string | undefined;
+    let workerWorkspacePath: string | undefined;
+
     if (typeof nameOrProps === 'object') {
       name = nameOrProps.name;
       description = nameOrProps.description;
+      canonicalPath = nameOrProps.canonicalPath;
+      gitRoot = nameOrProps.gitRoot;
+      plannerProjectUrl = nameOrProps.plannerProjectUrl;
+      workerWorkspacePath = nameOrProps.workerWorkspacePath;
     } else {
       name = nameOrProps;
       description = maybeDescription;
     }
 
-    const p = await this.engine.updateProject(id as ProjectId, name, description);
+    const p = await this.engine.updateProject(
+      id as ProjectId,
+      name,
+      description,
+      canonicalPath,
+      gitRoot,
+      plannerProjectUrl,
+      workerWorkspacePath,
+    );
     return this.mapProject(p);
   }
 
@@ -772,9 +803,54 @@ export class RelayApiService implements IRelayApi {
   public async registerRuntimeSession(
     providerType: ProviderType,
     name: string,
-    bundleIdentifier?: string,
+    identityOrBundleId?: string,
+    projectId?: string,
   ): Promise<UIRuntimeSession> {
-    const runtime = await this.engine.registerRuntimeSession(providerType, name, bundleIdentifier);
+    let bundleId: string | undefined;
+    let externalSessionId: string | undefined;
+
+    if (identityOrBundleId) {
+      if (
+        identityOrBundleId.includes('.') &&
+        !identityOrBundleId.startsWith('ses_') &&
+        !identityOrBundleId.startsWith('http') &&
+        !identityOrBundleId.startsWith('conv_')
+      ) {
+        bundleId = identityOrBundleId;
+      } else {
+        externalSessionId = identityOrBundleId;
+      }
+    }
+
+    let projectRef: string | undefined;
+    if (projectId) {
+      const proj = await this.db.projects.findById(projectId as ProjectId);
+      if (proj) {
+        projectRef = providerType === 'chatgpt' ? proj.plannerProjectUrl : (proj.canonicalPath || proj.workerWorkspacePath);
+      }
+    }
+
+    const runtime = await this.engine.registerRuntimeSession(
+      providerType,
+      name,
+      bundleId,
+      externalSessionId,
+      projectRef,
+    );
+
+    if (projectId) {
+      await this.db.associations.save(
+        RuntimeProjectAssociation.create(
+          runtime.id,
+          projectId as ProjectId,
+          externalSessionId || null,
+          'unverified',
+          'manual_registration',
+          providerType,
+        ),
+      );
+    }
+
     let integrationStatus: any = 'unsupported';
     try {
       const provider = this.engine.getProvider(providerType);
@@ -1306,6 +1382,8 @@ export class RelayApiService implements IRelayApi {
         DELETE FROM runtime_sessions;
         DELETE FROM projects;
       `);
+    } else if (typeof (this.db as any).clear === 'function') {
+      (this.db as any).clear();
     }
     return { success: true };
   }
@@ -2118,16 +2196,401 @@ export class RelayApiService implements IRelayApi {
     const attention = this.db.attention ? await this.db.attention.findAll() : [];
     const openAttention = attention.filter((a: any) => a.status === 'open');
 
-    return relayDiagnostics.evaluateHealth(
-      { ok: true, type: this.databaseType },
-      pairs.length,
-      runtimes.length,
-      openAttention.length
-    );
+    let checkpointsCount = 0;
+    if (this.db.checkpoints) {
+      for (const p of pairs) {
+        try {
+          const list = await this.db.checkpoints.findAll(p.id as PairId);
+          checkpointsCount += list.length;
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    const assignments = await this.db.assignments.findAll();
+    let deliveriesCount = 0;
+    if (this.db.deliveries) {
+      for (const a of assignments) {
+        try {
+          const list = await this.db.deliveries.findByAssignmentId(a.id as AssignmentId);
+          deliveriesCount += list.length;
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    const integrations = await this.listIntegrations();
+
+    return relayDiagnostics.evaluateHealth({
+      dbStatus: { ok: true, type: this.databaseType },
+      pairs,
+      runtimes,
+      pairsCount: pairs.length,
+      runtimesCount: runtimes.length,
+      openAttentionCount: openAttention.length,
+      checkpointsCount,
+      deliveriesCount,
+      integrations,
+    });
   }
 
   public async copyDiagnosticReport(): Promise<string> {
     const report = await this.getDiagnosticsReport();
     return report.formattedReportText;
+  }
+
+  /* --- Provider / App Integration & Capability Model --- */
+
+  private integrationsCache: Map<ProviderType, ProviderIntegration> = new Map();
+
+  private getInitialIntegration(providerType: ProviderType): ProviderIntegration {
+    if (providerType === 'chatgpt') {
+      return {
+        providerType: 'chatgpt',
+        name: 'ChatGPT Desktop & Web',
+        role: 'planner',
+        status: 'unconfigured',
+        identity: {
+          kind: 'app_bundle',
+          bundleId: 'com.openai.chat',
+          processName: 'ChatGPT',
+          windowTitlePattern: 'ChatGPT*',
+        },
+        requirements: {
+          accessibilityRequired: true,
+          accessibilityGranted: false,
+          systemEventsRequired: true,
+          systemEventsAvailable: false,
+          notes: 'Requires macOS Accessibility permission and active ChatGPT window or Chrome project tab',
+        },
+        capabilities: {
+          discoverProjects: true,
+          discoverSessions: true,
+          createSession: true,
+          dispatchInstruction: true,
+          captureTransportBoundary: false,
+          reconcileExactSession: false,
+          observeCompletion: true,
+          extractResponse: true,
+        },
+      };
+    } else if (providerType === 'opencode') {
+      return {
+        providerType: 'opencode',
+        name: 'OpenCode CLI & Shared Service',
+        role: 'worker',
+        status: 'unconfigured',
+        identity: {
+          kind: 'cli_service',
+          executable: 'opencode',
+          serviceUrl: 'http://127.0.0.1:4096',
+          processName: 'opencode',
+        },
+        requirements: {
+          accessibilityRequired: false,
+          accessibilityGranted: true,
+          systemEventsRequired: false,
+          systemEventsAvailable: true,
+          serviceRunning: false,
+          cliInstalled: false,
+          notes: 'Requires OpenCode CLI in PATH or local HTTP service socket (~/.local/state/opencode/service.json)',
+        },
+        capabilities: {
+          discoverProjects: true,
+          discoverSessions: true,
+          createSession: true,
+          dispatchInstruction: true,
+          captureTransportBoundary: true,
+          reconcileExactSession: true,
+          observeCompletion: true,
+          extractResponse: true,
+        },
+      };
+    } else {
+      return {
+        providerType: 'vscode',
+        name: 'Visual Studio Code',
+        role: 'worker',
+        status: 'unconfigured',
+        identity: {
+          kind: 'editor',
+          bundleId: 'com.microsoft.VSCode',
+          executable: 'code',
+          processName: 'Code',
+          windowTitlePattern: '*Visual Studio Code',
+        },
+        requirements: {
+          accessibilityRequired: true,
+          accessibilityGranted: false,
+          systemEventsRequired: true,
+          systemEventsAvailable: false,
+          cliInstalled: false,
+          notes: 'Provides window title workspace observation and active editor context',
+        },
+        capabilities: {
+          discoverProjects: true,
+          discoverSessions: false,
+          createSession: false,
+          dispatchInstruction: false,
+          captureTransportBoundary: false,
+          reconcileExactSession: false,
+          observeCompletion: false,
+          extractResponse: false,
+        },
+      };
+    }
+  }
+
+  public async listIntegrations(): Promise<ProviderIntegration[]> {
+    const types: ProviderType[] = ['chatgpt', 'opencode', 'vscode'];
+    const results: ProviderIntegration[] = [];
+    for (const t of types) {
+      if (this.integrationsCache.has(t)) {
+        results.push(this.integrationsCache.get(t)!);
+      } else {
+        const verified = await this.verifyIntegration(t);
+        results.push(verified);
+      }
+    }
+    return results;
+  }
+
+  public async verifyIntegration(providerType: ProviderType): Promise<ProviderIntegration> {
+    const integration = this.getInitialIntegration(providerType);
+    const appStatus = await this.getAppStatus();
+    const isNode = typeof process !== 'undefined';
+    const isDarwin = isNode && process.platform === 'darwin';
+
+    integration.requirements.accessibilityGranted = !!appStatus.permissions?.accessibilityGranted;
+    integration.requirements.systemEventsAvailable = !!appStatus.permissions?.systemEventsAvailable;
+
+    if (!isNode) {
+      // Browser preview simulated verification
+      integration.status = 'verified';
+      integration.lastVerifiedAt = Date.now();
+      integration.lastVerificationResult = {
+        ok: true,
+        message: 'Simulated web preview provider integration active',
+      };
+      if (providerType === 'opencode') {
+        integration.requirements.cliInstalled = true;
+        integration.requirements.serviceRunning = true;
+      }
+      this.integrationsCache.set(providerType, integration);
+      return integration;
+    }
+
+    // Node / Electron environment
+    try {
+      const { execSync } = require('child_process');
+      const fs = require('fs');
+      const os = require('os');
+      const pathModule = require('path');
+
+      if (providerType === 'chatgpt') {
+        let isAppRunning = false;
+        let isChromeRunning = false;
+        let pid: number | undefined;
+
+        if (isDarwin) {
+          try {
+            const pgrepOut = execSync('pgrep -x ChatGPT || pgrep -f "com.openai.chat"', {
+              timeout: 1000,
+              stdio: 'pipe',
+            }).toString().trim();
+            if (pgrepOut) {
+              isAppRunning = true;
+              pid = parseInt(pgrepOut.split('\n')[0], 10);
+            }
+          } catch {
+            isAppRunning = false;
+          }
+
+          try {
+            const chromeOut = execSync('pgrep -x "Google Chrome"', {
+              timeout: 1000,
+              stdio: 'pipe',
+            }).toString().trim();
+            if (chromeOut) isChromeRunning = true;
+          } catch {
+            isChromeRunning = false;
+          }
+        }
+
+        integration.identity.detectedPid = pid;
+        if (integration.requirements.accessibilityGranted && (isAppRunning || isChromeRunning)) {
+          integration.status = 'verified';
+          integration.lastVerificationResult = {
+            ok: true,
+            message: isAppRunning
+              ? `ChatGPT Desktop running (PID: ${pid ?? 'active'}). Accessibility verified.`
+              : 'Google Chrome running with web planner access. Accessibility verified.',
+          };
+        } else if (!integration.requirements.accessibilityGranted && (isAppRunning || isChromeRunning)) {
+          integration.status = 'degraded';
+          integration.lastVerificationResult = {
+            ok: false,
+            message: 'Application detected running, but macOS Accessibility / Apple Events permission is denied.',
+          };
+        } else {
+          integration.status = 'not_detected';
+          integration.lastVerificationResult = {
+            ok: false,
+            message: 'ChatGPT Desktop or Google Chrome process not currently detected.',
+          };
+        }
+      } else if (providerType === 'opencode') {
+        let cliFound = false;
+        let serviceRunning = false;
+        let servicePort: number | undefined;
+
+        try {
+          execSync('which opencode', { timeout: 1000, stdio: 'pipe' });
+          cliFound = true;
+        } catch {
+          cliFound = false;
+        }
+
+        const servicePath = pathModule.join(os.homedir(), '.local', 'state', 'opencode', 'service.json');
+        if (fs.existsSync(servicePath)) {
+          try {
+            const content = JSON.parse(fs.readFileSync(servicePath, 'utf8'));
+            if (content.port || content.url) {
+              serviceRunning = true;
+              servicePort = content.port;
+              integration.identity.serviceUrl = content.url || `http://127.0.0.1:${content.port}`;
+            }
+          } catch {
+            // parse error
+          }
+        }
+
+        integration.requirements.cliInstalled = cliFound;
+        integration.requirements.serviceRunning = serviceRunning;
+
+        if (serviceRunning || cliFound) {
+          integration.status = 'verified';
+          integration.lastVerificationResult = {
+            ok: true,
+            message: serviceRunning
+              ? `OpenCode Shared Service active on port ${servicePort ?? 4096}`
+              : 'OpenCode CLI detected in PATH with process transport support',
+          };
+        } else {
+          integration.status = 'not_detected';
+          integration.lastVerificationResult = {
+            ok: false,
+            message: 'Neither OpenCode CLI executable nor service socket (~/.local/state/opencode/service.json) found',
+          };
+        }
+      } else if (providerType === 'vscode') {
+        let isRunning = false;
+        let cliFound = false;
+
+        try {
+          execSync('which code', { timeout: 1000, stdio: 'pipe' });
+          cliFound = true;
+        } catch {
+          cliFound = false;
+        }
+
+        if (isDarwin) {
+          try {
+            execSync('pgrep -f "Visual Studio Code" || pgrep -f "Code Helper"', {
+              timeout: 1000,
+              stdio: 'pipe',
+            });
+            isRunning = true;
+          } catch {
+            isRunning = false;
+          }
+        }
+
+        integration.requirements.cliInstalled = cliFound;
+        if (isRunning && integration.requirements.accessibilityGranted) {
+          integration.status = 'verified';
+          integration.lastVerificationResult = {
+            ok: true,
+            message: 'Visual Studio Code running with active workspace window accessibility',
+          };
+        } else if (isRunning && !integration.requirements.accessibilityGranted) {
+          integration.status = 'degraded';
+          integration.lastVerificationResult = {
+            ok: false,
+            message: 'VS Code running, but macOS Accessibility permission is required for workspace window inspection',
+          };
+        } else {
+          integration.status = 'not_detected';
+          integration.lastVerificationResult = {
+            ok: false,
+            message: 'Visual Studio Code process not currently running',
+          };
+        }
+      }
+    } catch (err: any) {
+      integration.status = 'degraded';
+      integration.lastVerificationResult = {
+        ok: false,
+        message: `Verification check error: ${err.message || String(err)}`,
+      };
+    }
+
+    integration.lastVerifiedAt = Date.now();
+    this.integrationsCache.set(providerType, integration);
+    return integration;
+  }
+
+  public async recheckAllIntegrations(): Promise<ProviderIntegration[]> {
+    const types: ProviderType[] = ['chatgpt', 'opencode', 'vscode'];
+    const results: ProviderIntegration[] = [];
+    for (const t of types) {
+      results.push(await this.verifyIntegration(t));
+    }
+    return results;
+  }
+
+  /* --- Worker AI Model Configuration & Application --- */
+
+  public async getSupportedModels(providerType: ProviderType): Promise<string[]> {
+    return RelayEngine.getSupportedModels(providerType);
+  }
+
+  public async getEffectiveModelConfig(
+    providerType: ProviderType,
+    projectId?: string,
+  ): Promise<EffectiveModelConfig> {
+    return this.engine.resolveEffectiveModelConfig(providerType, projectId as ProjectId | undefined);
+  }
+
+  public async setGlobalModelDefault(
+    providerType: ProviderType,
+    model: string,
+    note?: string,
+  ): Promise<ProviderSetting | null> {
+    const key = RelayEngine.providerSettingKey(providerType, 'transportModel');
+    return this.engine.setProviderSetting(key, model, { note, setBy: 'operator' });
+  }
+
+  public async setProjectModelOverride(
+    projectId: string,
+    providerType: ProviderType,
+    model: string,
+    justification: string,
+  ): Promise<ProviderSetting | null> {
+    return this.engine.setProjectModelOverride(
+      projectId as ProjectId,
+      providerType,
+      model,
+      justification,
+    );
+  }
+
+  public async clearProjectModelOverride(
+    projectId: string,
+    providerType: ProviderType,
+  ): Promise<void> {
+    await this.engine.clearProjectModelOverride(projectId as ProjectId, providerType);
   }
 }

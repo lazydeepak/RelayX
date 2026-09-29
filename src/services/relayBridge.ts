@@ -89,11 +89,11 @@ export const relayBridge: IRelayApi = {
     return getLocalFallbackService().createProject(name, description);
   },
 
-  updateProject: async (id: string, name: string, description?: string) => {
+  updateProject: async (id: string, nameOrProps: any, description?: string) => {
     if (typeof window !== 'undefined' && window.relayApi) {
-      return window.relayApi.updateProject(id, name, description);
+      return window.relayApi.updateProject(id, nameOrProps, description);
     }
-    return getLocalFallbackService().updateProject(id, name, description);
+    return getLocalFallbackService().updateProject(id, nameOrProps, description);
   },
 
   archiveProject: async (id: string) => {
@@ -248,14 +248,15 @@ export const relayBridge: IRelayApi = {
     return getLocalFallbackService().listRuntimeSessions();
   },
 
-  registerRuntimeSession: async (providerType, name, bundleIdentifier) => {
+  registerRuntimeSession: async (providerType, name, identityOrBundleId, projectId) => {
     if (typeof window !== 'undefined' && window.relayApi) {
-      return window.relayApi.registerRuntimeSession(providerType, name, bundleIdentifier);
+      return window.relayApi.registerRuntimeSession(providerType, name, identityOrBundleId, projectId);
     }
     return getLocalFallbackService().registerRuntimeSession(
       providerType,
       name,
-      bundleIdentifier,
+      identityOrBundleId,
+      projectId,
     );
   },
 
@@ -492,5 +493,61 @@ export const relayBridge: IRelayApi = {
       return window.relayApi.copyDiagnosticReport();
     }
     return getLocalFallbackService().copyDiagnosticReport();
+  },
+
+  listIntegrations: async () => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.listIntegrations();
+    }
+    return getLocalFallbackService().listIntegrations();
+  },
+
+  verifyIntegration: async (providerType) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.verifyIntegration(providerType);
+    }
+    return getLocalFallbackService().verifyIntegration(providerType);
+  },
+
+  recheckAllIntegrations: async () => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.recheckAllIntegrations();
+    }
+    return getLocalFallbackService().recheckAllIntegrations();
+  },
+
+  getSupportedModels: async (providerType) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.getSupportedModels(providerType);
+    }
+    return getLocalFallbackService().getSupportedModels(providerType);
+  },
+
+  getEffectiveModelConfig: async (providerType, projectId) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.getEffectiveModelConfig(providerType, projectId);
+    }
+    return getLocalFallbackService().getEffectiveModelConfig(providerType, projectId);
+  },
+
+  setGlobalModelDefault: async (providerType, model, note) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.setGlobalModelDefault(providerType, model, note);
+    }
+    return getLocalFallbackService().setGlobalModelDefault(providerType, model, note);
+  },
+
+  setProjectModelOverride: async (projectId, providerType, model, justification) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.setProjectModelOverride(projectId, providerType, model, justification);
+    }
+    return getLocalFallbackService().setProjectModelOverride(projectId, providerType, model, justification);
+  },
+
+  clearProjectModelOverride: async (projectId, providerType) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.clearProjectModelOverride(projectId, providerType);
+    }
+    return getLocalFallbackService().clearProjectModelOverride(projectId, providerType);
   },
 };

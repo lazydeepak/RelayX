@@ -1004,4 +1004,28 @@ export class MemoryRelayDatabase implements IRelayRepositories {
       throw err;
     }
   }
+
+  clear(): void {
+    const repos: Array<ISnapshotableMemoryRepo> = [
+      this.projects,
+      this.pairs,
+      this.sideIdentities,
+      this.sideCheckpoints,
+      this.checkpoints,
+      this.runtimes,
+      this.assignments,
+      this.attempts,
+      this.deliveries,
+      this.handoffs,
+      this.events,
+      this.attention,
+      this.associations,
+      this.planFirstRuns,
+      this.workUnits,
+      this.contractRevisions,
+      this.verificationResults,
+      this.providerSettings,
+    ];
+    repos.forEach((repo) => repo.restoreState([]));
+  }
 }

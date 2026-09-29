@@ -47,6 +47,7 @@ import {
   Project,
   Pair,
   RuntimeSession,
+  RuntimeProjectAssociation,
   Assignment,
   Attempt,
   Delivery,
@@ -338,17 +339,41 @@ export class RelayEngine {
     return project;
   }
 
-  public async updateProject(id: ProjectId, name?: string, description?: string): Promise<Project> {
+  public async updateProject(
+    id: ProjectId,
+    name?: string,
+    description?: string,
+    canonicalPath?: string,
+    gitRoot?: string,
+    plannerProjectUrl?: string,
+    workerWorkspacePath?: string,
+  ): Promise<Project> {
     const project = await this.repos.projects.findById(id);
     if (!project) throw new RelayDomainError(`Project ${id} not found`, 'NOT_FOUND');
 
-    project.update(name, description);
+    const pathChanged =
+      (canonicalPath !== undefined && canonicalPath !== project.canonicalPath) ||
+      (gitRoot !== undefined && gitRoot !== project.gitRoot) ||
+      (plannerProjectUrl !== undefined && plannerProjectUrl !== project.plannerProjectUrl) ||
+      (workerWorkspacePath !== undefined && workerWorkspacePath !== project.workerWorkspacePath);
+
+    project.update(name, description, canonicalPath, gitRoot, plannerProjectUrl, workerWorkspacePath);
     await this.repos.projects.save(project);
+
+    // Configuration changes invalidate dependent association evidence and trigger revalidation
+    if (pathChanged && this.repos.associations) {
+      const associations = await this.repos.associations.findByProjectId(id);
+      for (const assoc of associations) {
+        if (assoc.verificationState === 'verified') {
+          await this.repos.associations.save(assoc.withVerificationState('stale'));
+        }
+      }
+    }
 
     await this.emitEvent('project', id, 'project.updated', {
       actor: 'user',
       newState: project.status,
-      details: { name: project.name, description: project.description },
+      details: { name: project.name, description: project.description, pathChanged },
     });
     return project;
   }
@@ -495,13 +520,18 @@ export class RelayEngine {
     providerType: ProviderType,
     name: string,
     bundleIdentifier?: string,
+    externalSessionId?: string,
+    externalProjectRef?: string,
   ): Promise<RuntimeSession> {
     const runtime = RuntimeSession.create(providerType, name, bundleIdentifier);
+    if (externalSessionId || externalProjectRef) {
+      runtime.updateExternalIdentity(externalSessionId, externalProjectRef);
+    }
     await this.repos.runtimes.save(runtime);
     await this.emitEvent('runtime', runtime.id, 'runtime.registered', {
       actor: 'engine',
       newState: runtime.status,
-      details: { name, providerType, bundleIdentifier },
+      details: { name, providerType, bundleIdentifier, externalSessionId, externalProjectRef },
     });
     return runtime;
   }
@@ -974,7 +1004,7 @@ export class RelayEngine {
       instructionText,
       idempotencyKey,
       preDispatchWatermark: boundary.watermark,
-      modelOverride: await this.resolveProviderModelOverride(runtime.providerType),
+      modelOverride: await this.resolveProviderModelOverride(runtime.providerType, pair.projectId),
     });
 
     if (result.outcome === 'delivered') {
@@ -1581,7 +1611,102 @@ export class RelayEngine {
    * half-specified `provider/` reference would fail at the provider and the resulting error
    * would read as a provider fault rather than a configuration fault.
    */
-  private async resolveProviderModelOverride(providerType: ProviderType): Promise<string | null> {
+  public static getSupportedModels(providerType: ProviderType): string[] {
+    if (providerType === 'opencode') {
+      return [
+        'anthropic/claude-3-7-sonnet',
+        'anthropic/claude-3-5-sonnet',
+        'openai/o3-mini',
+        'openai/gpt-4o',
+        'google/gemini-2.5-pro',
+        'google/gemini-2.5-flash',
+        'deepseek/deepseek-r1',
+      ];
+    }
+    if (providerType === 'chatgpt') {
+      return ['openai/gpt-4o', 'openai/o3-mini', 'openai/o1'];
+    }
+    return [];
+  }
+
+  public async resolveEffectiveModelConfig(
+    providerType: ProviderType,
+    projectId?: ProjectId,
+  ): Promise<{
+    providerType: ProviderType;
+    globalDefault: string | null;
+    projectOverride: string | null;
+    effectiveModel: string;
+    isProjectOverride: boolean;
+    justification?: string | null;
+    supportedModels: string[];
+  }> {
+    const supportedModels = RelayEngine.getSupportedModels(providerType);
+    const globalSetting = await this.repos.providerSettings.get(
+      RelayEngine.providerSettingKey(providerType, 'transportModel'),
+    );
+    const globalDefault = globalSetting?.value || null;
+
+    let projectOverride: string | null = null;
+    let justification: string | null = null;
+    if (projectId) {
+      const projSetting = await this.repos.providerSettings.get(
+        `${providerType}:project:${projectId}:transportModel`,
+      );
+      if (projSetting && projSetting.value.trim()) {
+        projectOverride = projSetting.value.trim();
+        justification = projSetting.note || null;
+      }
+    }
+
+    const effectiveModel = projectOverride || globalDefault || supportedModels[0] || 'default';
+    const isProjectOverride = Boolean(projectOverride);
+
+    return {
+      providerType,
+      globalDefault,
+      projectOverride,
+      effectiveModel,
+      isProjectOverride,
+      justification,
+      supportedModels,
+    };
+  }
+
+  public async setProjectModelOverride(
+    projectId: ProjectId,
+    providerType: ProviderType,
+    model: string,
+    justification: string,
+  ): Promise<ProviderSetting | null> {
+    const key = `${providerType}:project:${projectId}:transportModel`;
+    return this.setProviderSetting(key, model, { note: justification, setBy: 'operator' });
+  }
+
+  public async clearProjectModelOverride(
+    projectId: ProjectId,
+    providerType: ProviderType,
+  ): Promise<void> {
+    const key = `${providerType}:project:${projectId}:transportModel`;
+    await this.setProviderSetting(key, '', { note: 'Cleared project override', setBy: 'operator' });
+  }
+
+  public async resolveProviderModelOverride(
+    providerType: ProviderType,
+    projectId?: ProjectId,
+  ): Promise<string | null> {
+    if (projectId) {
+      const projSetting = await this.repos.providerSettings.get(
+        `${providerType}:project:${projectId}:transportModel`,
+      );
+      if (projSetting) {
+        const val = projSetting.value.trim();
+        if (val.length > 0 && /^[^/\s]+\/[^/\s]+(#\S+)?$/.test(val)) {
+          return val;
+        }
+      }
+    }
+
     const setting = await this.repos.providerSettings.get(
       RelayEngine.providerSettingKey(providerType, 'transportModel'),
     );
@@ -1886,7 +2011,7 @@ export class RelayEngine {
       instructionText: assignment.instruction,
       idempotencyKey,
       preDispatchWatermark: boundary.watermark,
-      modelOverride: await this.resolveProviderModelOverride(worker.providerType),
+      modelOverride: await this.resolveProviderModelOverride(worker.providerType, pair.projectId),
     });
 
     // ---- Phase 3: record the outcome ----

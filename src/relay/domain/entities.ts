@@ -1273,6 +1273,20 @@ export class RuntimeProjectAssociation {
       updatedAt: Date.now(),
     });
   }
+
+  public withVerificationState(state: RuntimeProjectAssociationProps['verificationState']): RuntimeProjectAssociation {
+    return new RuntimeProjectAssociation({
+      id: this.id,
+      runtimeSessionId: this.runtimeSessionId,
+      projectId: this.projectId,
+      providerType: this.providerType,
+      externalSessionId: this.externalSessionId,
+      verificationState: state,
+      provenance: this.provenance,
+      createdAt: this.createdAt,
+      updatedAt: Date.now(),
+    });
+  }
 }
 
 /* --- PairCheckpoint Entity --- */

@@ -10,8 +10,8 @@ export function registerRelayIpcHandlers(service: RelayApiService): void {
   ipcMain.handle(RELAY_IPC_CHANNELS.CREATE_PROJECT, (_event, name, desc) =>
     service.createProject(name, desc),
   );
-  ipcMain.handle(RELAY_IPC_CHANNELS.UPDATE_PROJECT, (_event, id, name, desc) =>
-    service.updateProject(id, name, desc),
+  ipcMain.handle(RELAY_IPC_CHANNELS.UPDATE_PROJECT, (_event, id, nameOrProps, desc) =>
+    service.updateProject(id, nameOrProps, desc),
   );
   ipcMain.handle(RELAY_IPC_CHANNELS.ARCHIVE_PROJECT, (_event, id) => service.archiveProject(id));
   ipcMain.handle(RELAY_IPC_CHANNELS.UNARCHIVE_PROJECT, (_event, id) => service.unarchiveProject(id));
@@ -51,7 +51,8 @@ export function registerRelayIpcHandlers(service: RelayApiService): void {
   );
   ipcMain.handle(
     RELAY_IPC_CHANNELS.REGISTER_RUNTIME_SESSION,
-    (_event, type, name, bundleId) => service.registerRuntimeSession(type, name, bundleId),
+    (_event, type, name, identityOrBundleId, projectId) =>
+      service.registerRuntimeSession(type, name, identityOrBundleId, projectId),
   );
   ipcMain.handle(RELAY_IPC_CHANNELS.DISCOVER_RUNTIME, (_event, type) =>
     service.discoverRuntime(type),
@@ -154,5 +155,35 @@ export function registerRelayIpcHandlers(service: RelayApiService): void {
   );
   ipcMain.handle(RELAY_IPC_CHANNELS.COPY_DIAGNOSTIC_REPORT, () =>
     service.copyDiagnosticReport(),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.LIST_INTEGRATIONS, () =>
+    service.listIntegrations(),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.VERIFY_INTEGRATION, (_event, providerType) =>
+    service.verifyIntegration(providerType),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.RECHECK_ALL_INTEGRATIONS, () =>
+    service.recheckAllIntegrations(),
+  );
+
+  // Worker AI Model Configuration & Application
+  ipcMain.handle(RELAY_IPC_CHANNELS.GET_SUPPORTED_MODELS, (_event, providerType) =>
+    service.getSupportedModels(providerType),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.GET_EFFECTIVE_MODEL_CONFIG, (_event, providerType, projectId) =>
+    service.getEffectiveModelConfig(providerType, projectId),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.SET_GLOBAL_MODEL_DEFAULT, (_event, providerType, model, note) =>
+    service.setGlobalModelDefault(providerType, model, note),
+  );
+  ipcMain.handle(
+    RELAY_IPC_CHANNELS.SET_PROJECT_MODEL_OVERRIDE,
+    (_event, projectId, providerType, model, justification) =>
+      service.setProjectModelOverride(projectId, providerType, model, justification),
+  );
+  ipcMain.handle(
+    RELAY_IPC_CHANNELS.CLEAR_PROJECT_MODEL_OVERRIDE,
+    (_event, projectId, providerType) =>
+      service.clearProjectModelOverride(projectId, providerType),
   );
 }
