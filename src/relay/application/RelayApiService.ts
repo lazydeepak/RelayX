@@ -140,6 +140,8 @@ export class RelayApiService implements IRelayApi {
   private readonly databasePath: string;
   private readonly databaseType: 'sqlite_wal' | 'memory';
   private readonly userDataPath?: string;
+  private inFlightPlanner = new Map<string, Promise<any>>();
+  private inFlightWorker = new Map<string, Promise<any>>();
 
   constructor(
     public readonly db: IRelayRepositories,
@@ -1388,42 +1390,50 @@ export class RelayApiService implements IRelayApi {
     diagnostics?: any;
     error?: string;
   }> {
-    try {
-      const provider = this.engine.getProvider('opencode') as any;
-      if (!provider || typeof provider.matchSessionsByPath !== 'function') {
-        return { success: false, sessions: [], error: 'OpenCode provider does not support session matching' };
-      }
-      const matchRes = await provider.matchSessionsByPath(projectPath, gitRoot);
-      const sessions = matchRes.sessions || [];
-      const diagnostics = matchRes.diagnostics;
-
-      return {
-        success: true,
-        sessions: sessions.map((m: any) => {
-          const details = (m.evidence?.details || {}) as any;
-          // Only an authoritative id (shared service / persisted store) may
-          // become the bound worker session. Window-derived ids are display-only.
-          const authoritativeSessionId =
-            details.authoritativeSessionId || details.parsedSessionId;
-          return {
-            sessionId: authoritativeSessionId,
-            authoritativeSessionId,
-            sessionTitle: details.sessionTitle,
-            observedWindowSessionId: details.observedWindowSessionId,
-            authoritative: !!authoritativeSessionId,
-            windowTitle: m.windowTitle,
-            workspacePath: details.workspacePath,
-            matchScore: details.matchScore,
-            matchedVia: details.matchedVia,
-            openCodeProjectId: details.openCodeProjectId,
-            hasUiCorrelation: details.hasUiCorrelation,
-          };
-        }),
-        diagnostics,
-      };
-    } catch (err: any) {
-      return { success: false, sessions: [], error: err.message };
+    const key = `${projectPath}:${gitRoot ?? ''}`;
+    if (this.inFlightWorker.has(key)) {
+      return this.inFlightWorker.get(key)!;
     }
+    const promise = (async () => {
+      try {
+        const provider = this.engine.getProvider('opencode') as any;
+        if (!provider || typeof provider.matchSessionsByPath !== 'function') {
+          return { success: false, sessions: [], error: 'OpenCode provider does not support session matching' };
+        }
+        const matchRes = await provider.matchSessionsByPath(projectPath, gitRoot);
+        const sessions = matchRes.sessions || [];
+        const diagnostics = matchRes.diagnostics;
+
+        return {
+          success: true,
+          sessions: sessions.map((m: any) => {
+            const details = (m.evidence?.details || {}) as any;
+            const authoritativeSessionId =
+              details.authoritativeSessionId || details.parsedSessionId;
+            return {
+              sessionId: authoritativeSessionId,
+              authoritativeSessionId,
+              sessionTitle: details.sessionTitle,
+              observedWindowSessionId: details.observedWindowSessionId,
+              authoritative: !!authoritativeSessionId,
+              windowTitle: m.windowTitle,
+              workspacePath: details.workspacePath,
+              matchScore: details.matchScore,
+              matchedVia: details.matchedVia,
+              openCodeProjectId: details.openCodeProjectId,
+              hasUiCorrelation: details.hasUiCorrelation,
+            };
+          }),
+          diagnostics,
+        };
+      } catch (err: any) {
+        return { success: false, sessions: [], error: err.message };
+      } finally {
+        this.inFlightWorker.delete(key);
+      }
+    })();
+    this.inFlightWorker.set(key, promise);
+    return promise;
   }
 
   public async enumerateChatGPTConversations(projectId: string): Promise<ChatGPTConversationChoiceList> {
@@ -1978,15 +1988,25 @@ export class RelayApiService implements IRelayApi {
     error?: string;
     diagnostics?: any;
   }> {
-    try {
-      const provider = this.engine.getProvider('chatgpt') as any;
-      if (!provider || typeof provider.resolveChatGPTProject !== 'function') {
-        return { success: false, error: 'ChatGPT provider does not support project resolution' };
-      }
-      return await provider.resolveChatGPTProject(name);
-    } catch (err: any) {
-      return { success: false, error: err.message };
+    const key = name.trim().toLowerCase();
+    if (this.inFlightPlanner.has(key)) {
+      return this.inFlightPlanner.get(key)!;
     }
+    const promise = (async () => {
+      try {
+        const provider = this.engine.getProvider('chatgpt') as any;
+        if (!provider || typeof provider.resolveChatGPTProject !== 'function') {
+          return { success: false, error: 'ChatGPT provider does not support project resolution' };
+        }
+        return await provider.resolveChatGPTProject(name);
+      } catch (err: any) {
+        return { success: false, error: err.message };
+      } finally {
+        this.inFlightPlanner.delete(key);
+      }
+    })();
+    this.inFlightPlanner.set(key, promise);
+    return promise;
   }
 
   public async finalizeProjectSetup(setup: {

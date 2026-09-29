@@ -221,8 +221,8 @@ class RelayDiagnosticsEngine {
       },
       Performance: {
         component: 'Performance',
-        status: metrics.some(m => m.avgDurationMs > 2000) ? 'DEGRADED' : 'HEALTHY',
-        summary: metrics.some(m => m.avgDurationMs > 2000) ? 'Some operations exceeding latency threshold' : 'All operations within acceptable latency budget',
+        status: metrics.some(m => m.avgDurationMs > 1000) ? 'DEGRADED' : 'HEALTHY',
+        summary: metrics.some(m => m.avgDurationMs > 1000) ? 'Some operations exceeding 1000ms UX latency threshold' : 'All operations within acceptable latency budget',
         lastObservedAt: Date.now(),
         evidence: metrics.slice(0, 3).map(m => `${m.operation}: ${m.avgDurationMs}ms avg`)
       }
