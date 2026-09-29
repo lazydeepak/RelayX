@@ -263,7 +263,7 @@ describe('Fresh Planner session creation & atomic new/new Pair provisioning', ()
     assert.strictEqual(runtimes.length, 0);
   });
 
-  it('6. Worker creation failure after Planner creation leaves the Planner Session safely unpaired/adoptable', async () => {
+  it('6. Worker creation failure after Planner creation cleans up orphaned planner session so no half-pair/half-binding survives', async () => {
     const harness = await makeHarness({
       createPlanner: async () => ({
         conversationId: 'conv_preserved_planner_777',
@@ -292,16 +292,9 @@ describe('Fresh Planner session creation & atomic new/new Pair provisioning', ()
     const pairs = await harness.db.pairs.findAll();
     assert.strictEqual(pairs.length, 0);
 
-    // Planner runtime exists safely in database, adoptable
+    // No orphaned runtime survives in database (half-pair/half-binding cleaned up)
     const runtimes = await harness.db.runtimes.findAll();
-    assert.strictEqual(runtimes.length, 1);
-    assert.strictEqual(runtimes[0].externalSessionId, 'conv_preserved_planner_777');
-    assert.strictEqual(runtimes[0].name, 'Preserved Planner');
-
-    // And its association evidence exists
-    const associations = await harness.db.associations.findBySessionId(runtimes[0].id);
-    assert.strictEqual(associations.length, 1);
-    assert.strictEqual(associations[0].provenance, 'adoption');
+    assert.strictEqual(runtimes.length, 0);
   });
 
   it('7. Pair stores the exact returned Planner and Worker Session IDs', async () => {

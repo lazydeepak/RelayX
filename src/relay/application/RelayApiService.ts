@@ -1937,48 +1937,59 @@ export class RelayApiService implements IRelayApi {
     pairName: string,
     options?: { plannerName?: string; workerName?: string },
   ): Promise<ProvisionPairWithNewSessionsResult> {
-    if (!pairName.trim()) {
-      throw new Error('Pair name is required');
+    const title = pairName.trim();
+    if (!title) {
+      throw new Error('Pair & session title is required');
     }
     const proj = await this.db.projects.findById(projectId as ProjectId);
     if (!proj) {
       throw new Error(`Project not found: ${projectId}`);
     }
 
-    // Step A: Create and prove Planner session
-    const plannerRes = await this.createChatGPTPlannerSession(projectId, options?.plannerName);
+    // Step 3: Create ChatGPT planner session titled `title` (or options.plannerName)
+    const plannerSessionName = options?.plannerName?.trim() || title;
+    const plannerRes = await this.createChatGPTPlannerSession(projectId, plannerSessionName);
     if (!plannerRes.adopted || !plannerRes.runtime || !plannerRes.conversationId) {
-      throw new Error(plannerRes.error || 'Failed to create and verify new Planner session');
+      throw new Error(plannerRes.error || 'Failed to create and verify new ChatGPT planner session');
     }
 
-    // Step B: Create and prove Worker session
-    const workerRes = await this.createOpenCodeWorkerSession(projectId, options?.workerName);
-    if (!workerRes.adopted || !workerRes.runtime || !workerRes.sessionId) {
-      // NOTE: Planner session was created and adopted above. Because Worker creation failed,
-      // we preserve the Planner session as an adoptable, unpaired session in RelayX DB.
-      throw new Error(
-        `Failed to create worker session: ${workerRes.error || 'unknown worker error'}. The created planner session (${plannerRes.runtime.id}) was preserved for adoption.`,
-      );
-    }
-
-    // Step C: Persist/adopt both authoritative sessions (already adopted above)
     const plannerRuntime = plannerRes.runtime;
-    const workerRuntime = workerRes.runtime;
 
-    // Step D & E: Create Pair and bind exact sessions
-    const pair = await this.createPair(
-      projectId,
-      pairName,
-      plannerRuntime.id,
-      workerRuntime.id,
-      plannerRes.conversationUrl,
-    );
+    // Step 4 & 5: Create and validate OpenCode worker session titled `title` (or options.workerName)
+    const workerSessionName = options?.workerName?.trim() || title;
+    try {
+      const workerRes = await this.createOpenCodeWorkerSession(projectId, workerSessionName);
+      if (!workerRes.adopted || !workerRes.runtime || !workerRes.sessionId) {
+        throw new Error(workerRes.error || 'Failed to create and verify new OpenCode worker session');
+      }
 
-    return {
-      pair,
-      plannerRuntime,
-      workerRuntime,
-    };
+      const workerRuntime = workerRes.runtime;
+
+      // Step 7 & 8: Create SessionPair titled `title` and bind both sessions
+      const pair = await this.createPair(
+        projectId,
+        title,
+        plannerRuntime.id,
+        workerRuntime.id,
+        plannerRes.conversationUrl,
+      );
+
+      // Step 9: Return completed pair
+      return {
+        pair,
+        plannerRuntime,
+        workerRuntime,
+      };
+    } catch (workerErr: any) {
+      // Critical cleanup: if worker creation failed after planner succeeded, clean up the orphaned planner runtime
+      try {
+        await this.db.runtimes.delete(plannerRuntime.id as any);
+        console.log(`[RelayX Engine] Cleaned up orphaned planner runtime ${plannerRuntime.id} after worker creation failure.`);
+      } catch (cleanupErr) {
+        console.error(`[RelayX Engine] Failed to clean up orphaned planner runtime ${plannerRuntime.id}:`, cleanupErr);
+      }
+      throw new Error(`Failed to create worker session: ${workerErr?.message || 'unknown error'}. Pair creation aborted and orphaned planner session cleaned up.`);
+    }
   }
 
   public async discoverChatGPTPlanner(name: string): Promise<{

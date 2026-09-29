@@ -239,39 +239,11 @@ export const PairModal: React.FC<PairModalProps> = ({
     try {
       if (mode === 'create') {
         if (creationMode === 'automatic') {
-          // Automatic intent-driven flow: create fresh planner + worker + bind pair in one operation
-          const plannerName = newPlannerSessionName.trim() || name.trim();
-          const workerName = newWorkerSessionName.trim() || name.trim();
-
-          const plannerRes = await relayBridge.createChatGPTPlannerSession(projectId, plannerName);
-          if (!plannerRes.adopted || !plannerRes.runtime || !plannerRes.conversationId) {
-            throw new Error(plannerRes.error || 'Failed to create authoritative ChatGPT planner session');
-          }
-          const finalPlannerId = plannerRes.runtime.id;
-          const finalConvUrl = plannerRes.conversationUrl;
-
-          try {
-            const workerRes = await relayBridge.createOpenCodeWorkerSession(projectId, workerName);
-            if (!workerRes.adopted || !workerRes.runtime || !workerRes.sessionId) {
-              throw new Error(`Failed to create OpenCode worker session: ${workerRes.error || 'unknown error'}. The created planner session was preserved as adoptable.`);
-            }
-            const finalWorkerId = workerRes.runtime.id;
-
-            await relayBridge.createPair(
-              projectId,
-              name.trim(),
-              finalPlannerId,
-              finalWorkerId,
-              finalConvUrl || undefined,
-            );
-
-            onSuccess(`Session Pair "${name.trim()}" created successfully in Automatic mode`);
-            onClose();
-            return;
-          } catch (workerErr: any) {
-            // Planner succeeded but worker failed -> do not create falsely complete pair, preserve planner as adoptable
-            throw workerErr;
-          }
+          // Automatic intent-driven flow: create fresh planner + worker + bind pair via provisionPairWithNewSessions
+          await relayBridge.provisionPairWithNewSessions(projectId, name.trim());
+          onSuccess(`Session Pair & Sessions "${name.trim()}" created successfully in Automatic mode`);
+          onClose();
+          return;
         } else {
           // Manual mode
           let finalPlannerId = plannerSessionId;
@@ -508,12 +480,12 @@ export const PairModal: React.FC<PairModalProps> = ({
             )}
 
             <div>
-              <label className="block text-slate-300 font-medium mb-1.5">Pair Name *</label>
+              <label className="block text-slate-300 font-medium mb-1.5">Pair & Session Title *</label>
               <input
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. OdareHub Development"
+                placeholder="e.g. RelayX Development"
                 className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-blue-500"
                 required
               />
@@ -528,51 +500,17 @@ export const PairModal: React.FC<PairModalProps> = ({
                       <Cpu className="w-3.5 h-3.5" />
                       Planner (ChatGPT)
                     </div>
-                    <div className="text-slate-300 truncate">Session: {newPlannerSessionName || name || 'Pair Name'}</div>
-                    <div className="text-[10px] text-emerald-400 font-medium">✓ Fresh session created automatically</div>
+                    <div className="text-slate-300 truncate font-mono">{name || 'Title'}</div>
+                    <div className="text-[10px] text-emerald-400 font-medium">✓ New session will be created</div>
                   </div>
                   <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 space-y-1">
                     <div className="text-emerald-400 font-medium flex items-center gap-1">
                       <Cpu className="w-3.5 h-3.5" />
                       Worker (OpenCode)
                     </div>
-                    <div className="text-slate-300 truncate">Session: {newWorkerSessionName || name || 'Pair Name'}</div>
-                    <div className="text-[10px] text-emerald-400 font-medium">✓ Fresh session created automatically</div>
+                    <div className="text-slate-300 truncate font-mono">{name || 'Title'}</div>
+                    <div className="text-[10px] text-emerald-400 font-medium">✓ New session will be created</div>
                   </div>
-                </div>
-
-                <div className="pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowAdvancedNaming(!showAdvancedNaming)}
-                    className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 font-medium"
-                  >
-                    <Sliders className="w-3.5 h-3.5" />
-                    <span>{showAdvancedNaming ? 'Hide Advanced Session Naming' : 'Advanced: Customize Session Names'}</span>
-                  </button>
-
-                  {showAdvancedNaming && (
-                    <div className="mt-3 space-y-3 p-3 rounded-lg bg-slate-900 border border-slate-800">
-                      <div>
-                        <label className="block text-slate-300 font-medium mb-1">Planner Session Name</label>
-                        <input
-                          type="text"
-                          value={newPlannerSessionName}
-                          onChange={(e) => setNewPlannerSessionName(e.target.value)}
-                          className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-slate-200"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-slate-300 font-medium mb-1">Worker Session Name</label>
-                        <input
-                          type="text"
-                          value={newWorkerSessionName}
-                          onChange={(e) => setNewWorkerSessionName(e.target.value)}
-                          className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-slate-200"
-                        />
-                      </div>
-                    </div>
-                  )}
                 </div>
               </div>
             ) : (
