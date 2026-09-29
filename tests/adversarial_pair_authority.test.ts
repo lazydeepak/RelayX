@@ -152,7 +152,7 @@ describe('Adversarial Pair & Session Authority Regression Suite', () => {
     const pair = await engine.createPair(proj.id, 'Pair 9', planner.id, workerOld.id);
     await engine.loadAndActivate(pair.id);
 
-    const asgn = await engine.createAssignment(pair.id, proj.id, 'Task 1', 'Do work');
+    const asgn = await engine.createAssignment(pair.id, 'Task 1', 'Do work');
     const dispatched = await engine.dispatchAssignment(asgn.id);
     assert.strictEqual(dispatched.attempt.workerSessionId, workerOld.id);
 
@@ -281,7 +281,7 @@ describe('Adversarial Pair & Session Authority Regression Suite', () => {
     const pair = await engine.createPair(proj.id, 'Pair 18', planner.id, worker.id);
     await engine.loadAndActivate(pair.id);
 
-    const asgn = await engine.createAssignment(pair.id, proj.id, 'Task 1', 'Do work');
+    const asgn = await engine.createAssignment(pair.id, 'Task 1', 'Do work');
     await engine.dispatchAssignment(asgn.id);
     const pReloaded = await db.pairs.findById(pair.id);
     assert.strictEqual(pReloaded?.activeAssignmentId, asgn.id);
@@ -296,7 +296,7 @@ describe('Adversarial Pair & Session Authority Regression Suite', () => {
     const pair = await engine.createPair(proj.id, 'Pair 19', planner.id, worker1.id);
     await engine.loadAndActivate(pair.id);
 
-    const asgn = await engine.createAssignment(pair.id, proj.id, 'Task 1', 'Do work');
+    const asgn = await engine.createAssignment(pair.id, 'Task 1', 'Do work');
     const dispatched = await engine.dispatchAssignment(asgn.id);
     assert.strictEqual(dispatched.attempt.workerSessionId, worker1.id);
 
@@ -316,13 +316,13 @@ describe('Adversarial Pair & Session Authority Regression Suite', () => {
     const pair = await engine.createPair(proj.id, 'Pair 20', planner.id, worker1.id);
     await engine.loadAndActivate(pair.id);
 
-    const asgn1 = await engine.createAssignment(pair.id, proj.id, 'Task 1', 'Do work');
+    const asgn1 = await engine.createAssignment(pair.id, 'Task 1', 'Do work');
     await engine.dispatchAssignment(asgn1.id);
     await engine.completeAssignment(asgn1.id);
 
     await engine.updatePair(pair.id, { workerSessionId: worker2.id });
 
-    const asgn2 = await engine.createAssignment(pair.id, proj.id, 'Task 2', 'Do work 2');
+    const asgn2 = await engine.createAssignment(pair.id, 'Task 2', 'Do work 2');
     const dispatched2 = await engine.dispatchAssignment(asgn2.id);
 
     assert.strictEqual(dispatched2.attempt.workerSessionId, worker2.id);
