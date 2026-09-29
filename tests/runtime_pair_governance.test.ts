@@ -657,6 +657,8 @@ describe('S6 closure group I — the provider-contact surface cannot grow silent
       'RelayApiService.ts:resolveChatGPTProject': 'pre-Pair project resolution',
       'RelayApiService.ts:matchSessionsByPath': 'pre-Pair discovery / adoption',
       'RelayApiService.ts:createWorkerSession': 'pre-Pair creation',
+      'RelayApiService.ts:createPlannerSession': 'pre-Pair creation',
+      'RelayApiService.ts:canonicalizeChatGPTProjectUrl': 'pre-Pair URL canonicalization; pure helper',
     };
 
     const found: string[] = [];

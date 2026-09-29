@@ -1,3 +1,64 @@
+/**
+ * ============================================================================
+ * RELAY CORE DOMAIN ENTITIES & RELATIONSHIP ARCHITECTURE
+ * ============================================================================
+ *
+ * This module defines the domain entities for the RelayX orchestration platform.
+ * RelayX coordinates two-sided AI collaboration (a Planner like ChatGPT desktop
+ * and a Worker like OpenCode or VS Code) over real macOS developer workspaces.
+ *
+ * ENTITY GRAPH:
+ *
+ *    ┌───────────────────────────┐
+ *    │          Project          │ (canonicalPath, gitRoot, plannerProjectUrl, workerWorkspacePath)
+ *    └─────────────┬─────────────┘
+ *                  │ 1
+ *                  │
+ *                  ▼ *
+ *    ┌───────────────────────────┐      1:1 (Authoritative)      ┌───────────────────────────────┐
+ *    │           Pair            │ ─────────────────────────────▶ │   RuntimeProjectAssociation   │
+ *    │ (operationalState:        │                                └───────────────────────────────┘
+ *    │   IDLE | ACTIVE)          │                                                ▲
+ *    └─────────────┬─────────────┘                                                │
+ *                  │ 1                                                            │ binds
+ *                  ▼ *                                                            │
+ *    ┌───────────────────────────┐ 1    * ┌───────────────────────────┐           │
+ *    │        Assignment         │ ──────▶│      RuntimeSession       │ ──────────┘
+ *    │ (pending, active, ...)    │        │ (ChatGPT / OpenCode /     │
+ *    └─────────────┬─────────────┘        │  VSCode process & state)  │
+ *                  │ 1                    └───────────────────────────┘
+ *                  ▼ *
+ *    ┌───────────────────────────┐
+ *    │          Attempt          │ (Frozen Authority: sessionPairId, workerSessionId, externalSessionId)
+ *    │ (prepared, running, ...)  │
+ *    └─────────────┬─────────────┘
+ *                  │ 1
+ *                  ▼ 1
+ *    ┌───────────────────────────┐
+ *    │         Delivery          │ (pending, delivering, delivered, ambiguous, failed)
+ *    │ (idempotencyKey, snippet) │
+ *    └───────────────────────────┘
+ *                  │ generates upon worker completion
+ *                  ▼
+ *    ┌───────────────────────────┐
+ *    │          Handoff          │ (pending, ready, delivered, complete)
+ *    │ (worker evidence +        │
+ *    │  planner delivery evidence)
+ *    └───────────────────────────┘
+ *
+ * KEY SYSTEM INVARIANTS:
+ * 1. Operational State Gate (I-2): Provider contact (discovery, dispatch, supervision)
+ *    is STRICTLY FORBIDDEN when Pair operationalState is IDLE.
+ * 2. Exact Session Identity (I-11): Dispatches and associations address the external
+ *    provider's own unique session id (e.g. `ses_*`), NEVER human-facing titles.
+ * 3. Durable Dispatch Intent: Attempts begin 'prepared' and Deliveries begin 'pending'
+ *    committed to SQLite BEFORE the physical transport message is sent.
+ * 4. Ambiguity Fails Closed: An unconfirmed or timed-out dispatch is classified
+ *    as 'ambiguous' and automated resends are BLOCKED to prevent duplicate execution.
+ * 5. Decoupled Handoff: Generating a Handoff is NOT Assignment completion; the Planner
+ *    must explicitly accept or review before completion.
+ */
+
 import {
   ProjectId,
   PairId,

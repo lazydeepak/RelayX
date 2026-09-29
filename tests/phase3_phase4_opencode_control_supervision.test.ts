@@ -33,6 +33,42 @@ class HermeticIdentityOpenCode extends OpenCodeProvider {
       reason: null,
     };
   }
+
+  public override async deliverInstruction(
+    request: any,
+  ): Promise<any> {
+    const focus = this.runAppleScript('tell application "OpenCode" to activate');
+    if (!focus.success) {
+      return { outcome: 'failed', reason: 'Focus failed' };
+    }
+    const send = this.runAppleScript('tell application "System Events" to key code 36');
+    if (!send.success) {
+      return {
+        outcome: 'ambiguous',
+        reason: send.error || 'AppleScript timeout',
+        evidence: {
+          id: `ev_ambig_${Date.now()}`,
+          timestamp: Date.now(),
+          source: 'macos_system_events',
+          runtimeSessionId: request.runtimeSessionId,
+        },
+      };
+    }
+    const hasStop = (send.output ?? '').includes('true');
+    return {
+      outcome: 'delivered',
+      evidence: {
+        id: `ev_deliv_${Date.now()}`,
+        timestamp: Date.now(),
+        source: 'macos_system_events',
+        runtimeSessionId: request.runtimeSessionId,
+        visibleButtonState: {
+          sendButtonVisible: !hasStop,
+          stopButtonVisible: hasStop,
+        },
+      },
+    };
+  }
 }
 
 describe('Phase 3 & Phase 4 — OpenCode UI Control & Worker Supervision', () => {

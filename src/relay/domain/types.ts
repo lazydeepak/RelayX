@@ -545,6 +545,13 @@ export const CHECKPOINT_BASELINE_REQUIRED = 'CHECKPOINT_BASELINE_REQUIRED';
 export const CHECKPOINT_OBSERVATION_REQUIRED = 'CHECKPOINT_OBSERVATION_REQUIRED';
 
 
+/**
+ * High-level lifecycle states of an Assignment (a unit of work assigned to a Pair).
+ *
+ * State Transitions:
+ *   pending -> active -> waiting_for_handoff -> completed
+ *   pending / active -> cancelled | failed
+ */
 export type AssignmentStatus =
   | 'pending'
   | 'active'
@@ -553,12 +560,21 @@ export type AssignmentStatus =
   | 'failed'
   | 'cancelled';
 
+/**
+ * Execution attempt lifecycle representing a single physical execution of an assignment.
+ *
+ * State Transitions:
+ *   prepared (durable intent recorded) -> running (confirmed execution) -> completed_physical | interrupted
+ */
 export type AttemptStatus =
   | 'prepared'
   | 'running'
   | 'completed_physical'
   | 'interrupted';
 
+/**
+ * Observed state of an external agent / runtime process (OpenCode, ChatGPT desktop, etc.).
+ */
 export type RuntimeSessionStatus =
   | 'unknown'
   | 'available'
@@ -569,6 +585,15 @@ export type RuntimeSessionStatus =
   | 'terminated'
   | 'archived';
 
+/**
+ * Physical instruction delivery status from RelayX to the external worker runtime.
+ *
+ * - pending: queued in RelayX
+ * - delivering: transport initiated
+ * - delivered: provider confirmed message receipt in external transcript/UI
+ * - ambiguous: send attempted but receipt could not be proven; automated resend BLOCKED
+ * - failed: delivery attempt conclusively failed prior to dispatch
+ */
 export type DeliveryStatus =
   | 'pending'
   | 'delivering'
@@ -681,18 +706,41 @@ export const classifyHandoffStatus = (status: HandoffStatus): ExternalEffectClas
   }
 };
 
+/** Severity levels for items requiring human operator or automated attention. */
 export type AttentionSeverity = 'info' | 'warning' | 'critical';
 
+/** Attention item resolution lifecycle. */
 export type AttentionStatus = 'open' | 'acknowledged' | 'resolved';
 
+/**
+ * Escalation tiers for automated and operator-driven error recovery.
+ * - tier_1_deterministic: Automated recovery rules (e.g. refocus, safe retry on known failure)
+ * - tier_2_planner_assisted: Consultation with Planner AI to formulate an alternative plan
+ * - tier_3_ai_agent: Escalation to human operator or autonomous high-level supervisory agent
+ */
 export type RecoveryTier = 'tier_1_deterministic' | 'tier_2_planner_assisted' | 'tier_3_ai_agent';
 
+/** Target provider implementations supported by the Relay architecture. */
 export type ProviderType = 'chatgpt' | 'opencode' | 'vscode' | 'generic_ui';
 
+/** Integration capability level of a provider adapter in the current runtime environment. */
 export type ProviderIntegrationStatus = 'real' | 'partial' | 'unsupported';
 
+/** Verification fidelity of an external session binding or evidence claim. */
 export type VerificationState = 'verified' | 'unverified' | 'manual' | 'stale';
 
+/**
+ * Origin provenance of a Runtime-to-Project Association.
+ *
+ * Authoritative provenances admitting pre-pair verification are:
+ * - 'discovery': Discovered via direct provider query (e.g., shared service directory scan)
+ * - 'adoption': Explicitly confirmed and adopted by user action or verified URL binding
+ * - 'setup': Established during initial project initialization
+ *
+ * Non-authoritative provenances (cannot authorize pairing without independent evidence):
+ * - 'manual_registration': Arbitrary unverified user input
+ * - 'pair_binding': Legacy implicit association without external verification
+ */
 export type AssociationProvenance = 'discovery' | 'adoption' | 'manual_registration' | 'pair_binding' | 'setup';
 
 /* --- Observable UI Evidence Model --- */

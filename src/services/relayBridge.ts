@@ -1,3 +1,23 @@
+/**
+ * ============================================================================
+ * RELAY BRIDGE — CLIENT IPC & IN-MEMORY DEV FALLBACK BRIDGE
+ * ============================================================================
+ *
+ * This module exports `relayBridge`, implementing the `IRelayApi` interface.
+ *
+ * RUNTIME MODES:
+ * 1. Electron Desktop App:
+ *    When running within Electron, `window.relayApi` is exposed by the preload
+ *    script via contextIsolation IPC. All calls delegate directly to the
+ *    main Electron process with native SQLite and macOS system automation.
+ *
+ * 2. Web / Dev Preview (Fallback):
+ *    When running in a standard web browser or AI Studio preview where Electron
+ *    is absent, `relayBridge` lazily instantiates a local in-memory `RelayApiService`
+ *    backed by `MemoryRelayDatabase` and simulated browser providers. This enables
+ *    full UI testing and live state exploration without requiring native macOS binaries.
+ */
+
 import { IRelayApi } from '../types/relayApi.ts';
 import { MemoryRelayDatabase } from '../relay/persistence/memory/MemoryDatabase.ts';
 import { RelayEngine } from '../relay/application/RelayEngine.ts';

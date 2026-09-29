@@ -1,3 +1,32 @@
+/**
+ * ============================================================================
+ * RELAY API SERVICE — APPLICATION SERVICE & UI INTEGRATION LAYER
+ * ============================================================================
+ *
+ * `RelayApiService` is the primary application boundary connecting frontend UI
+ * views, background bridge pollers, and management workflows to the underlying
+ * `RelayEngine` and SQLite repositories.
+ *
+ * RESPONSIBILITIES:
+ * 1. Project Onboarding & Discovery Wizard:
+ *    - Decoupled discovery of existing ChatGPT projects (`resolveChatGPTProject`).
+ *    - Directory-scoped OpenCode session matching (`discoverOpenCodeSessions`).
+ *    - Atomic project finalization (`finalizeProjectSetup`).
+ *
+ * 2. Pairing & Authoritative Session Adoption:
+ *    - Strict pre-pair association validation (`assertPrePairAuthoritativeAssociation`).
+ *    - Normalization and validation of ChatGPT conversation URLs (`g-p-<32hex>/c/<uuid>`).
+ *    - Proving workspace ownership for OpenCode worker sessions before binding.
+ *
+ * 3. Supervision & Dashboard Projection:
+ *    - Aggregates full system status into `DashboardState`.
+ *    - Maps domain entities (`Pair`, `Attempt`, `Delivery`, `Handoff`) into presentation
+ *      types (`UIPair`, `UIAssignment`, etc.).
+ *
+ * 4. Provider Contact Governance:
+ *    - Gates runtime inspections through operational state checks (S6 governance).
+ */
+
 import {
   BrowserChatGPTProvider,
   BrowserOpenCodeProvider,

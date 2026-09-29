@@ -1,3 +1,39 @@
+/**
+ * ============================================================================
+ * RELAY PROVIDER ADAPTERS — MACOS DESKTOP, CHROME, & CLI BRIDGES
+ * ============================================================================
+ *
+ * This module implements the provider adapters that allow RelayX to observe,
+ * control, and coordinate external developer AI agents on macOS without requiring
+ * invasive plugins or custom protocols.
+ *
+ * ADAPTERS IMPLEMENTED:
+ *
+ * 1. BaseMacOSProvider:
+ *    - Process probing (`pgrep`, `ps aux`) and bundle identifier resolution.
+ *    - Native AppleScript window focus and keystroke generation via System Events.
+ *    - Observable evidence capture (`ObservableEvidence`) with visible UI button states.
+ *
+ * 2. ChatGPTProvider (Planner):
+ *    - Discovers active ChatGPT sessions in Google Chrome via AppleScript tab inspection.
+ *    - Navigates ChatGPT UI using native keyboard shortcuts (`Cmd+K`) and DOM search injection.
+ *    - Parses and normalizes project/conversation URLs (`chatgpt.com/g/<project>/c/<conversation>`).
+ *
+ * 3. OpenCodeProvider (Worker):
+ *    - Shared Service Protocol: Inspects `~/.local/state/opencode/service.json` to query
+ *      the local OpenCode HTTP service for directory-scoped sessions.
+ *    - CLI Inspection: Falls back to `opencode session list --format json`.
+ *    - Phase E Exact Worker Transport:
+ *      * Verifies target `ses_*` session exists in provider store.
+ *      * Captures durable pre-dispatch watermark prior to transport.
+ *      * Executes `opencode run --session <id> --continue` without shell expansion.
+ *      * Reconciles external transcript turns against watermark on all exit paths.
+ *      * Evaluates transport delivery and worker execution independently.
+ *
+ * 4. VSCodeProvider (Worker/Editor):
+ *    - Inspects window titles to track active workspace and active editor file.
+ */
+
 import {
   RuntimeSessionId,
   RuntimeSessionStatus,
@@ -3749,7 +3785,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
   }> {
     const { discovery, client } = await this.resolveSharedServiceClient();
     const baseDiagnostics: Record<string, unknown> = {
-      source: 'reconciliation_probe',
+      source: 'opencode_shared_service',
       projectPath,
       serviceFile: discovery.path,
     };
@@ -4437,7 +4473,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
         // eligible rows so the user can explicitly choose one.
         sessions: authRes.ambiguous ? authRes.eligibleResults : authRes.results,
         diagnostics: {
-          source: 'reconciliation_probe',
+          source: 'opencode_shared_service',
           projectPath,
           gitRoot,
           authoritativeSessionsDiscovered: sharedRes.sessions.length,

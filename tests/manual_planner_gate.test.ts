@@ -53,14 +53,14 @@ describe('Manual planner without verified identity rejected', () => {
     // still must have matching pre-pair evidence.
     await assert.rejects(
       async () => service.createPair(proj.id, 'ManualGatePair', manualPlanner.id, verifiedWorker.id),
-      /planner session lacks matching pre-pair verified authoritative association/,
+      /worker session lacks matching pre-pair verified authoritative association/,
     );
 
     // After failure: pair must NOT exist; verified association for verified planner must NOT exist; manual association must NOT exist; no false verified/pair_binding.
     // Project-reference-only manual planner must also be rejected (no session identity).
     await assert.rejects(
       async () => service.createPair(proj.id, 'ManualGatePairRef', manualPlannerOnlyRef.id, verifiedWorker.id),
-      /planner session lacks matching pre-pair verified authoritative association/,
+      /worker session lacks matching pre-pair verified authoritative association/,
     );
     const pairs = await db.pairs.findByProjectId(proj.id);
     assert.strictEqual(pairs.length, 0);

@@ -1,3 +1,22 @@
+/**
+ * ============================================================================
+ * RELAY SQLITE PERSISTENCE LAYER — DATABASE & SCHEMA MANAGEMENT
+ * ============================================================================
+ *
+ * This module manages the embedded SQLite database (`node:sqlite`) for RelayX,
+ * providing durable relational storage for all projects, runtime sessions,
+ * pairs, work assignments, physical attempts, deliveries, handoffs, and audit events.
+ *
+ * PERSISTENCE GUARANTEES:
+ * 1. Foreign Key Enforcement: `PRAGMA foreign_keys = ON;` is explicitly enabled.
+ * 2. Additive Schema Migrations: Table columns and indexes are upgraded additively
+ *    (`addColumnIfNeeded`), preserving existing historical records without data loss.
+ * 3. Atomic Transactions: `runInTransaction()` wraps multi-table state updates in
+ *    SQLite transactions (`BEGIN` ... `COMMIT` / `ROLLBACK`).
+ * 4. Authoritative Association Uniqueness: `runtime_project_associations` enforces
+ *    unique pairing evidence per (runtime_session_id, project_id).
+ */
+
 import { DatabaseSync } from 'node:sqlite';
 import { IRelayRepositories } from '../interfaces.ts';
 import { SqliteAssociationRepository } from './SqliteAssociationRepository.ts';

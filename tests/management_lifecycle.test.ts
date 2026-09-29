@@ -293,20 +293,19 @@ test('Project, Pair, and Runtime Session Management Lifecycle and Deletion Guard
     assert.strictEqual(project?.canonicalPath, '/Users/test/alpha-app');
     assert.strictEqual(project?.gitRoot, '/Users/test/alpha-app');
 
-    // Verify Pair created
+    // Setup registers the runtimes but must NOT pair them: the session ids in
+    // the wizard payload are caller input, not provider-verified evidence, so
+    // pairing is deferred to the discovery/adoption path.
     const pairs = await db.pairs.findByProjectId(result.projectId as any);
-    assert.strictEqual(pairs.length, 1);
-    const pair = pairs[0];
-    assert.strictEqual(pair.name, 'Default Pair');
-    assert.ok(pair.plannerSessionId);
-    assert.ok(pair.workerSessionId);
+    assert.deepStrictEqual(pairs, []);
 
     // Verify Runtimes registered and bound
-    const planner = await db.runtimes.findById(pair.plannerSessionId!);
+    const runtimes = await db.runtimes.findAll();
+    const planner = runtimes.find((r) => r.providerType === 'chatgpt');
     assert.strictEqual(planner?.providerType, 'chatgpt');
     assert.strictEqual((planner?.lastEvidence?.details as any)?.projectUrl, 'https://chatgpt.com/p/alpha-id');
 
-    const worker = await db.runtimes.findById(pair.workerSessionId!);
+    const worker = runtimes.find((r) => r.providerType === 'opencode');
     assert.strictEqual(worker?.providerType, 'opencode');
     assert.strictEqual((worker?.lastEvidence?.details as any)?.sessionId, 'session_alpha_99');
   });
