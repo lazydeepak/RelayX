@@ -68,7 +68,7 @@
  * Timestamps are still recorded as evidence, never as the deciding comparison.
  */
 
-import { createHash } from 'node:crypto';
+import { sha256 } from 'js-sha256';
 
 /* -------------------------------------------------------------------------- */
 /* Frozen vocabulary                                                          */
@@ -313,7 +313,7 @@ export function normalizeInstructionText(raw: string | null | undefined): string
 
 /** sha256 of the normalised text, hex. `sha256_<hex>` to match RelayX's evidence convention. */
 export function instructionFingerprint(raw: string | null | undefined): string {
-  return `sha256_${createHash('sha256').update(normalizeInstructionText(raw), 'utf8').digest('hex')}`;
+  return `sha256_${sha256(normalizeInstructionText(raw))}`;
 }
 
 /* -------------------------------------------------------------------------- */
