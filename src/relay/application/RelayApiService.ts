@@ -1899,6 +1899,7 @@ export class RelayApiService implements IRelayApi {
     try {
       creationRes = await provider.createPlannerSession(plannerProjectUrl, name, {
         knownConversationIds,
+        projectName: proj.name,
       });
     } catch (err: any) {
       return {

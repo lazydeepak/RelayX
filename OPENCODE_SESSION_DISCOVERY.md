@@ -216,6 +216,28 @@ The Basic-auth implementation in `OpenCodeSessionClient` is reserved for the
 proven read-only shared-service GET discovery client. It is not a session-
 creation mechanism.
 
+### Bootstrap initialization for automatic worker provisioning (§C-4, I-16 open)
+
+Automatic session pair creation requires a worker bootstrap turn that establishes
+authoritative session identity before pairing completes. The mechanism uses
+the provider-supported CLI message submission path:
+
+- After `createWorkerSession()` produces an authoritative `ses_*`, the adapter
+  submits a bootstrap prompt via CLI `POST /api/session/{sessionId}/message`.
+- The prompt template (`RELAYX_WORKER_BOOTSTRAP_PROMPT_TEMPLATE`) contains the
+  requested session title and project name, no internal word "pair", and no
+  system-role or instruction framing.
+- The mechanism never adopts a transient placeholder identity; the authoritative
+  session identity must be verified through the existing confirmation and
+  settlement contract before adoption.
+- Failure to submit or confirm the bootstrap results in provisioning failure;
+  the planner runtime is cleaned up rather than leaving a partially-valid pair.
+
+This mechanism preserves the existing creation (`POST /api/session`) and
+confirmation (`GET /api/session?directory=...`) contracts; it only adds the
+message-submission step required by the automatic provisioning lifecycle. No
+parallel dispatch mechanism is invented.
+
 ### Adoption, binding, registration, and confirmation
 
 - Creation and adoption are separate. Creation produces an external session;

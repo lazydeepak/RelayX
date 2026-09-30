@@ -18,23 +18,29 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import {
-  RELAYX_PLANNER_BOOTSTRAP_PROMPT,
+  RELAYX_PLANNER_BOOTSTRAP_PROMPT_TEMPLATE,
   isBootstrapProvisioningTurn,
   isExcludedFromAssignmentCorrelation,
 } from '../src/relay/providers/adapters.ts';
 
 describe('Bootstrap Isolation Regression', () => {
   it('excludes the provisioning bootstrap user turn from planner assignment correlation', () => {
-    assert.strictEqual(isBootstrapProvisioningTurn(RELAYX_PLANNER_BOOTSTRAP_PROMPT), true);
-    assert.strictEqual(isExcludedFromAssignmentCorrelation(RELAYX_PLANNER_BOOTSTRAP_PROMPT), true);
+    const bootstrapPrompt = RELAYX_PLANNER_BOOTSTRAP_PROMPT_TEMPLATE
+      .replace('{pairName}', 'TestPair')
+      .replace('{projectName}', 'TestProject');
+    assert.strictEqual(isBootstrapProvisioningTurn(bootstrapPrompt), true);
+    assert.strictEqual(isExcludedFromAssignmentCorrelation(bootstrapPrompt), true);
   });
 
   it('excludes the assistant reply triggered by that bootstrap from assignment execution records', () => {
     // The reply itself is innocuous text. It is excluded because of WHAT CAUSED it, not
     // what it says: it answers RelayX's own provisioning prompt, never an Assignment.
     const assistantReply = 'Understood. Starting analysis...';
+    const bootstrapPrompt = RELAYX_PLANNER_BOOTSTRAP_PROMPT_TEMPLATE
+      .replace('{pairName}', 'TestPair')
+      .replace('{projectName}', 'TestProject');
     assert.strictEqual(
-      isExcludedFromAssignmentCorrelation(RELAYX_PLANNER_BOOTSTRAP_PROMPT, assistantReply),
+      isExcludedFromAssignmentCorrelation(bootstrapPrompt, assistantReply),
       true,
     );
   });

@@ -1473,12 +1473,15 @@ export function parseActiveTabReadResult(raw: string): {
  * ChatGPT macOS Application Provider.
  * Status: Partial (macOS process and window discovery via System Events).
  */
-export const RELAYX_PLANNER_BOOTSTRAP_PROMPT =
-  '[RelayX Provisioning] Fresh planner session initialized for RelayX project orchestration. Awaiting initial assignment.';
+export const RELAYX_PLANNER_BOOTSTRAP_PROMPT_TEMPLATE =
+  '[RelayX Provisioning] Planner session initialized for "{pairName}" in project "{projectName}". Awaiting initial assignment.';
+
+export const RELAYX_WORKER_BOOTSTRAP_PROMPT_TEMPLATE =
+  '[RelayX Provisioning] Worker session initialized for "{sessionTitle}" in project "{projectName}". Awaiting initial assignment.';
 
 // Actual production exclusion guard (not just a comment).
 export function isBootstrapProvisioningTurn(text: string): boolean {
-  return typeof text === 'string' && text.includes('[RelayX Provisioning]') && text.includes('Fresh planner session initialized');
+  return typeof text === 'string' && text.includes('[RelayX Provisioning]') && text.includes('Planner session initialized');
 }
 
 export function isExcludedFromAssignmentCorrelation(turnText: string, responseText?: string): boolean {
@@ -1843,47 +1846,273 @@ export class ChatGPTProvider extends BaseMacOSProvider {
     return res.success && (res.output || '').trim() === 'FOUND';
   }
 
-  /** Observes that the bootstrap user turn was accepted in the retained tab. */
+  /**
+   * BOOTSTRAP PROVISIONING TRACE (observation only).
+   *
+   * This records what the retained handle actually reported at each stage so a live run
+   * can distinguish a selector problem from a readiness/timing problem, a wrong-handle
+   * problem, or an auth/page-state problem. It performs NO navigation, NO send, and NO
+   * state change: it only reads the handle, records what came back, and returns.
+   *
+   * Nothing in the provisioning flow branches on this trace. It exists so that a live
+   * failure is explained by evidence rather than by inference.
+   */
+  private bootstrapTrace: Array<Record<string, unknown>> = [];
+
+  /** Wall-clock origin for one provisioning attempt, so trace entries carry elapsed time. */
+  private bootstrapClock: { startedAt: number } = { startedAt: 0 };
+
+  private traceBootstrap(stage: string, detail: Record<string, unknown>): void {
+    const entry = {
+      stage,
+      atMs: Date.now(),
+      elapsedSinceProvisionStartMs: this.bootstrapClock.startedAt
+        ? Date.now() - this.bootstrapClock.startedAt
+        : null,
+      ...detail,
+    };
+    this.bootstrapTrace.push(entry);
+    const line = JSON.stringify(entry);
+    console.log('[RelayX BootstrapTrace]', line);
+    // Mirror to disk: a packaged macOS app launched from Finder has no visible stdout,
+    // so console output alone would make the evidence unrecoverable after a UI-driven test.
+    this.appendTraceToDisk(line);
+  }
+
+  /** Appends one trace line to the diagnostic log, best-effort and never fatal. */
+  private appendTraceToDisk(line: string): void {
+    try {
+      const { appendFileSync } = require('fs');
+      const { homedir } = require('os');
+      const { join } = require('path');
+      const dir = join(homedir(), 'Library', 'Logs', 'RelayX');
+      const { mkdirSync } = require('fs');
+      mkdirSync(dir, { recursive: true });
+      appendFileSync(join(dir, 'bootstrap-trace.log'), line + '\n');
+    } catch {
+      // Diagnostics must never break provisioning.
+    }
+  }
+
+  /** Returns and clears the accumulated bootstrap trace for the current attempt. */
+  private takeBootstrapTrace(): Array<Record<string, unknown>> {
+    const trace = this.bootstrapTrace;
+    this.bootstrapTrace = [];
+    return trace;
+  }
+
+  /**
+   * Reads the retained handle's URL and page state, recording both the raw read and the
+   * `parseChatGPTConversationUrl` verdict. Reports what was observed; never infers.
+   */
+  private inspectRetainedHandle(
+    handle: BrowserHandle,
+    stage: string,
+  ): { url: string | null; conversationId: string | null; projectId: string | null } {
+    const started = Date.now();
+    const url = this.readHandleUrl(handle);
+    const parsed = url ? parseChatGPTConversationUrl(url) : null;
+    this.traceBootstrap(stage, {
+      handle: `WIN:${handle.windowId}|TAB:${handle.tabId}`,
+      readHandleUrl: url,
+      parsedConversationId: parsed?.conversationId ?? null,
+      parsedProjectId: parsed?.projectId ?? null,
+      parsedShape: url
+        ? (parsed ? 'g/<project>/c/<id>' : 'NOT_a_g-p-c-shape')
+        : 'null_url',
+      readDurationMs: Date.now() - started,
+    });
+    return {
+      url,
+      conversationId: parsed?.conversationId ?? null,
+      projectId: parsed?.projectId ?? null,
+    };
+  }
+
+  /**
+   * Reads the retained tab's DOM state through the SAME handle: document readyState and
+   * the composer/send-button candidates that the bootstrap insertion depends on.
+   *
+   * This is the evidence that separates "composer genuinely absent" (NO_TEXTAREA) from
+   * "composer present but page not ready", and it reports the page state (loading, login,
+   * error, new-chat) instead of collapsing all of them into one failure string.
+   */
+  private inspectRetainedPageState(
+    handle: BrowserHandle,
+    stage: string,
+  ): Record<string, unknown> | null {
+    const probeJs = `(() => {
+      const textareas = [...document.querySelectorAll('textarea')].map(function (t) {
+        return { id: t.id || null, testid: t.getAttribute('data-testid'), placeholder: t.getAttribute('placeholder'), visible: !!(t.offsetWidth > 0 || t.offsetHeight > 0 || t.getClientRects().length > 0) };
+      });
+      const editables = [...document.querySelectorAll('[contenteditable="true"]')].map(function (e) {
+        return { tag: e.tagName, id: e.id || null, role: e.getAttribute('role'), testid: e.getAttribute('data-testid'), classHint: (e.className || '').toString().slice(0, 120), visible: !!(e.offsetWidth > 0 || e.offsetHeight > 0 || e.getClientRects().length > 0) };
+      });
+      const sendButtons = [...document.querySelectorAll('button')].filter(function (b) {
+        const label = (b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('data-testid') || '');
+        return /send/i.test(label);
+      }).map(function (b) {
+        return { testid: b.getAttribute('data-testid'), ariaLabel: b.getAttribute('aria-label'), disabled: b.disabled === true };
+      });
+      const hasPromptTextarea = !!document.querySelector('#prompt-textarea');
+      const bodyText = (document.body ? (document.body.innerText || '') : '').slice(0, 400);
+      return JSON.stringify({
+        url: location.href,
+        pathname: location.pathname,
+        readyState: document.readyState,
+        title: document.title,
+        hasPromptTextarea: hasPromptTextarea,
+        textareaCount: textareas.length,
+        contenteditableCount: editables.length,
+        textareas: textareas.slice(0, 5),
+        editables: editables.slice(0, 5),
+        sendButtons: sendButtons.slice(0, 5),
+        bodyExcerpt: bodyText
+      });
+    })();`;
+    const res = this.executeHandleJavaScript(handle, probeJs, 3000);
+    if (!res.success || !res.output || res.output.startsWith('ERR::')) {
+      this.traceBootstrap(stage, {
+        probeFailed: true,
+        error: res.error ?? res.output ?? 'unknown',
+        handle: `WIN:${handle.windowId}|TAB:${handle.tabId}`,
+      });
+      return null;
+    }
+    let parsed: any;
+    try {
+      parsed = JSON.parse(res.output);
+    } catch {
+      this.traceBootstrap(stage, { probeParseFailed: true, raw: (res.output || '').slice(0, 500) });
+      return null;
+    }
+    this.traceBootstrap(stage, { handle: `WIN:${handle.windowId}|TAB:${handle.tabId}`, ...parsed });
+    return parsed;
+  }
+
+  /**
+   * Observes that the bootstrap user turn was accepted in the retained tab, by polling the
+   * SAME retained handle until an authoritative conversation identity settles.
+   *
+   * ## Why this used to report a visibly-materialized conversation as absent
+   *
+   * The committed version took exactly ONE URL read ~277ms after the Return keypress and
+   * returned on that single sample. A live run captured the real sequence:
+   *
+   *   t=2966ms  .../project                       -> parse null -> acknowledged:false -> FAIL
+   *   t=3900ms  .../c/local-chatgpt%3A<uuid4>     -> transient placeholder
+   *   later     .../c/<server-uuid>               -> authoritative
+   *
+   * Materialization therefore happened at least 933ms AFTER the only observation the old
+   * function ever made, and the 12x600ms URL poll below it was unreachable on the failure
+   * path. Evidence ruled out the alternatives: the parser handled the project-scoped form
+   * correctly, every read came from the same `WIN:id|TAB:id`, and the page was fully
+   * loaded and authenticated.
+   *
+   * ## Contract now enforced here
+   *
+   * Settled = the supported conversation URL shape yields a non-placeholder authoritative ID.
+   * Not settled = no conversation ID yet, OR a transient `local-chatgpt:` identity, OR a URL
+   * that fails the authoritative shape requirements. The wait is BOUNDED and a local
+   * placeholder is NEVER adopted after timeout, because ChatGPT replaces it — adopting it
+   * would persist an identity that can never correlate later.
+   */
   private async observeBootstrapSubmission(
     handle: BrowserHandle,
     slug: string,
-    timeoutMs = 3000,
-  ): Promise<{ acknowledged: boolean; reason?: string }> {
-    // Read the exact tab's content or title/state through the handle.
-    const script = `
-      tell application "Google Chrome"
-        try
-          set t to tab id ${handle.tabId} of window id ${handle.windowId}
-          -- Evidence of submission: either user message appears in visible chat or composer state changes.
-          -- We observe the URL transition or visible message content.
-          set pageUrl to URL of t
-          return pageUrl
-        on error
-          return "ERR::TAB_OR_WINDOW_NOT_FOUND"
-        end try
-      end tell
-    `;
-    const res = this.runAppleScript(script, timeoutMs);
-    if (!res.success) {
-      return { acknowledged: false, reason: `Identity lost during observation: ${res.error}` };
+    maxWaitMs = CHATGPT_SETTLEMENT_MAX_WAIT_MS,
+  ): Promise<ChatGPTSettlementResult> {
+    const handleLabel = `WIN:${handle.windowId}|TAB:${handle.tabId}`;
+    const startedAt = Date.now();
+
+    // Reads the EXACT retained tab. Never the frontmost window, never a re-resolved handle:
+    // the window/tab IDs are bound once, here, and reused for every poll.
+    const readThroughRetainedHandle = (): ChatGPTSettlementRead => {
+      const script = `
+        tell application "Google Chrome"
+          try
+            set t to tab id ${handle.tabId} of window id ${handle.windowId}
+            -- Evidence of submission: either user message appears in visible chat or composer state changes.
+            -- We observe the URL transition or visible message content.
+            set pageUrl to URL of t
+            return pageUrl
+          on error
+            return "ERR::TAB_OR_WINDOW_NOT_FOUND"
+          end try
+        end tell
+      `;
+      const res = this.runAppleScript(script, 5000);
+      if (!res.success) return { kind: 'failed', error: res.error };
+      const trimmed = (res.output || '').trim();
+      if (trimmed === 'ERR::TAB_OR_WINDOW_NOT_FOUND') return { kind: 'lost' };
+      return { kind: 'url', url: trimmed || null };
+    };
+
+    const result = await settleChatGPTConversationIdentity(readThroughRetainedHandle, {
+      maxWaitMs,
+      pollIntervalMs: CHATGPT_SETTLEMENT_POLL_INTERVAL_MS,
+      sleep: (ms) => this.sleep(ms),
+      onObservation: ({ poll, verdict }) => {
+        this.traceBootstrap('bootstrap_settlement_poll', {
+          poll,
+          handle: handleLabel,
+          state: verdict.state,
+          url: verdict.url ?? null,
+          projectId: verdict.projectId ?? null,
+          authoritativeConversationId: verdict.conversationId ?? null,
+          transientId: verdict.transientId ?? null,
+          elapsedSinceProvisionStartMs: this.bootstrapClock.startedAt
+            ? Date.now() - this.bootstrapClock.startedAt
+            : null,
+        });
+      },
+    });
+
+    this.traceBootstrap('bootstrap_settlement_result', {
+      handle: handleLabel,
+      outcome: result.outcome,
+      acknowledged: result.acknowledged,
+      authoritativeConversationId: result.conversationId ?? null,
+      projectId: result.projectId ?? null,
+      transientId: result.transientId ?? null,
+      lastUrl: result.lastUrl ?? null,
+      polls: result.polls,
+      elapsedMs: result.elapsedMs,
+      reason: result.reason ?? null,
+      wallClockMs: Date.now() - startedAt,
+    });
+
+    return result;
+  }
+
+  /** Bounded readiness verification for Defect D (intermittent NO_TEXTAREA).
+   * Polls the retained handle for the composer (textarea / contenteditable) and
+   * send-button candidates, bounded by maxWaitMs. Never waits indefinitely.
+   */
+  private async verifyComposerReady(
+    handle: BrowserHandle,
+    maxWaitMs = 5000,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    const deadline = Date.now() + maxWaitMs;
+    let polls = 0;
+    while (Date.now() < deadline) {
+      polls += 1;
+      const probeDir = this.inspectRetainedPageState(handle, `composer_readiness_poll_${polls}`);
+      if (probeDir) {
+        const editablesArr = (probeDir.editables as any[]) || [];
+        const hasComposer = (probeDir.hasPromptTextarea === true) || ((probeDir.contenteditableCount as number) > 0) ||
+                            editablesArr.some((e: any) => (e as any)?.visible === true);
+        if (hasComposer) return { ok: true };
+      }
+      await this.sleep(300);
     }
-    const trimmed = (res.output || '').trim();
-    if (trimmed === 'ERR::TAB_OR_WINDOW_NOT_FOUND') {
-      return { acknowledged: false, reason: 'Browser identity lost during bootstrap submission observation' };
-    }
-    // If the URL has moved to /c/<id>, that proves the bootstrap was accepted and materialized.
-    const parsed = trimmed ? parseChatGPTConversationUrl(trimmed) : null;
-    if (parsed?.conversationId) {
-      return { acknowledged: true };
-    }
-    // If URL is still project composer but page hasn't thrown an error, consider partial.
-    return { acknowledged: false, reason: 'Bootstrap submission not acknowledged: no conversation materialization observed' };
+    return { ok: false, reason: `Planner composer not ready after ${polls} readiness polls over ${maxWaitMs}ms (Defect D: intermittent composer readiness)` };
   }
 
   public async createPlannerSession(
     projectUrlOrRef: string,
     name?: string,
-    options?: { knownConversationIds?: Set<string> | string[] },
+    options?: { knownConversationIds?: Set<string> | string[]; projectName?: string },
   ): Promise<{
     conversationId: string;
     conversationUrl: string;
@@ -1915,11 +2144,26 @@ export class ChatGPTProvider extends BaseMacOSProvider {
         : [],
     );
 
+    // DIAGNOSTIC ONLY: open a fresh trace window and clock for this attempt.
+    this.bootstrapTrace = [];
+    this.bootstrapClock.startedAt = Date.now();
+    this.traceBootstrap('provision_start', {
+      requestedName: name ?? null,
+      projectNameOption: options?.projectName ?? null,
+      targetProjectSlug: slug,
+      knownConversationIdsCount: knownSet.size,
+    });
+
     // 1. Create a dedicated Chrome window + tab and capture stable identity.
     this.runAppleScript('tell application "Google Chrome" to activate', 1500);
     const targetUrl = `https://chatgpt.com/g/${slug}`;
+    this.traceBootstrap('opening_dedicated_window', { targetUrl });
     const handle = this.openDedicatedWindowAndCaptureId(targetUrl);
     if (!handle) {
+      this.traceBootstrap('boundary_failed', {
+        boundary: 'openDedicatedWindowAndCaptureId',
+        message: 'Failed to create dedicated browser window/tab for planner session',
+      });
       return {
         conversationId: '',
         conversationUrl: '',
@@ -1930,6 +2174,11 @@ export class ChatGPTProvider extends BaseMacOSProvider {
 
     // Verify identity survives before proceeding.
     if (!this.verifyHandleExists(handle)) {
+      this.traceBootstrap('boundary_failed', {
+        boundary: 'verifyHandleExists',
+        handle: `WIN:${handle.windowId}|TAB:${handle.tabId}`,
+        message: 'Browser identity lost immediately after creation',
+      });
       return {
         conversationId: '',
         conversationUrl: '',
@@ -1937,11 +2186,27 @@ export class ChatGPTProvider extends BaseMacOSProvider {
         error: 'Browser identity lost immediately after creation (tab/window not resolvable)',
       };
     }
+    this.traceBootstrap('handle_verified', {
+      handle: `WIN:${handle.windowId}|TAB:${handle.tabId}`,
+      targetUrl,
+    });
 
     // 2. Read initial URL through the retained handle (not active/frontmost).
     await this.sleep(1200);
     let url = this.readHandleUrl(handle);
     let parsed = url ? parseChatGPTConversationUrl(url) : null;
+
+    // DIAGNOSTIC ONLY: record the retained handle, the URL it actually reports, and the
+    // page/composer state visible through that SAME handle before anything is submitted.
+    // This is the evidence that separates a wrong-handle problem from a readiness problem
+    // and from an auth/page-state problem.
+    this.traceBootstrap('retained_handle_confirmed', {
+      handle: `WIN:${handle.windowId}|TAB:${handle.tabId}`,
+      urlBeforeBootstrap: url ?? null,
+      parsedBeforeBootstrap: parsed?.conversationId ?? null,
+      openDedicatedWindowReturnedNull: false,
+    });
+    this.inspectRetainedPageState(handle, 'page_state_before_bootstrap');
 
     // Confirm initial state: project composer, no conversation ID.
     if (url && parsed?.conversationId) {
@@ -1961,16 +2226,32 @@ export class ChatGPTProvider extends BaseMacOSProvider {
       };
     }
 
+    const pairName = (name || 'Unknown Pair').trim();
+    const projectName = (options?.projectName || slug || 'Unknown Project').trim();
+    const bootstrapPrompt = RELAYX_PLANNER_BOOTSTRAP_PROMPT_TEMPLATE
+      .replace('{pairName}', pairName)
+      .replace('{projectName}', projectName);
+
     if (!parsed?.conversationId) {
+      // DIAGNOSTIC ONLY: record the exact prompt string that is about to be submitted, so
+      // Checkpoint A ("did ChatGPT receive the dynamic prompt or the old static one?")
+      // can be answered from the runtime rather than from a screenshot.
+      this.traceBootstrap('bootstrap_prompt_rendered', {
+        pairName,
+        projectName,
+        bootstrapPrompt,
+        promptLength: bootstrapPrompt.length,
+      });
+
       // 3. Submit provisioning bootstrap through the exact retained handle.
       const promptJs = `(() => {
         const textarea = document.querySelector('#prompt-textarea') || document.querySelector('div[contenteditable="true"]');
         if (!textarea) return 'NO_TEXTAREA';
         textarea.focus();
         if (textarea.tagName === 'TEXTAREA') {
-          textarea.value = '${escapeAppleScriptStringLiteral(RELAYX_PLANNER_BOOTSTRAP_PROMPT)}';
+          textarea.value = '${escapeAppleScriptStringLiteral(bootstrapPrompt)}';
         } else {
-          textarea.innerText = '${escapeAppleScriptStringLiteral(RELAYX_PLANNER_BOOTSTRAP_PROMPT)}';
+          textarea.innerText = '${escapeAppleScriptStringLiteral(bootstrapPrompt)}';
         }
         textarea.dispatchEvent(new Event('input', { bubbles: true }));
         const sendBtn = document.querySelector('button[data-testid="send-button"]') ||
@@ -1985,6 +2266,23 @@ export class ChatGPTProvider extends BaseMacOSProvider {
 
       const jsRes = this.executeHandleJavaScript(handle, promptJs, 3000);
       const outputTrimmed = (jsRes.output || '').trim();
+
+      // DIAGNOSTIC ONLY: record the submission outcome through the retained handle.
+      this.traceBootstrap('bootstrap_submit_result', {
+        jsSucceeded: jsRes.success,
+        jsError: jsRes.error ?? null,
+        outputTrimmed: outputTrimmed || null,
+        interpretedAs:
+          outputTrimmed === 'CLICKED_SEND'
+            ? 'send_button_clicked'
+            : outputTrimmed === 'PROMPT_ENTERED'
+              ? 'return_key_fallback'
+              : outputTrimmed === 'NO_TEXTAREA'
+                ? 'composer_absent'
+                : outputTrimmed
+                  ? 'unexpected'
+                  : 'empty',
+      });
 
       if (jsRes.success && outputTrimmed === 'CLICKED_SEND') {
         // Send triggered via JS directly; observe acknowledgement through handle.
@@ -2005,6 +2303,15 @@ export class ChatGPTProvider extends BaseMacOSProvider {
           error: `Bootstrap insertion failed: ${jsRes.error || 'JavaScript execution error on retained handle'}`,
         };
       } else if (outputTrimmed === 'NO_TEXTAREA') {
+        this.traceBootstrap('boundary_failed', {
+          boundary: 'composer_discovery',
+          handle: `WIN:${handle.windowId}|TAB:${handle.tabId}`,
+          message:
+            'Planner composer not ready: no prompt-textarea or contenteditable found',
+        });
+        // Re-probe page state at the moment of failure to capture readyState, page state,
+        // and every textarea/[contenteditable]/send candidate that WAS present.
+        this.inspectRetainedPageState(handle, 'page_state_at_composer_failure');
         return {
           conversationId: '',
           conversationUrl: '',
@@ -2020,18 +2327,24 @@ export class ChatGPTProvider extends BaseMacOSProvider {
         };
       }
 
-      // 4. Observe bootstrap submission acknowledgement before polling URL.
-      const submissionEvidence = await this.observeBootstrapSubmission(handle, slug, 3000);
+      // 4. Poll the retained handle until an authoritative conversation identity settles.
+      //
+      // `observeBootstrapSubmission` already waited for a SETTLED identity, so reaching here
+      // means ChatGPT has issued a durable conversation ID. The bounded poll below only
+      // re-confirms that identity through the same retained handle; it uses the same
+      // settlement classifier so a transient `local-chatgpt:` ID can never satisfy it.
+      const submissionEvidence = await this.observeBootstrapSubmission(handle, slug);
       if (!submissionEvidence.acknowledged) {
         return {
           conversationId: '',
           conversationUrl: '',
           projectSlug: slug,
-          error: submissionEvidence.reason || 'Bootstrap submission not acknowledged by retained handle',
+          error:
+            submissionEvidence.reason ||
+            'Bootstrap submission not acknowledged by retained handle',
         };
       }
 
-      // 4. Poll through the retained handle (never active/frontmost fallback).
       for (let poll = 0; poll < 12; poll++) {
         await this.sleep(600);
         if (!this.verifyHandleExists(handle)) {
@@ -2043,11 +2356,18 @@ export class ChatGPTProvider extends BaseMacOSProvider {
           };
         }
         url = this.readHandleUrl(handle);
-        if (url) {
-          parsed = parseChatGPTConversationUrl(url);
-          if (parsed?.conversationId) {
-            break;
-          }
+        const identity = classifyChatGPTConversationIdentity(url);
+        this.traceBootstrap('url_poll', {
+          poll: poll + 1,
+          url: url ?? null,
+          state: identity.state,
+          parsedConversationId: identity.conversationId ?? null,
+          parsedProjectId: identity.projectId ?? null,
+          transientId: identity.transientId ?? null,
+        });
+        if (identity.state === 'settled') {
+          parsed = { projectId: identity.projectId as string, conversationId: identity.conversationId as string };
+          break;
         }
       }
     }
@@ -2064,25 +2384,50 @@ export class ChatGPTProvider extends BaseMacOSProvider {
     url = this.readHandleUrl(handle);
     parsed = url ? parseChatGPTConversationUrl(url) : null;
 
-    if (parsed?.conversationId && url) {
+    // The AUTHORITATIVE identity gate for what gets returned to the service layer and
+    // ultimately persisted as the planner runtime identity. Structural parseability alone
+    // is not enough: a transient `local-chatgpt:` ID is conversation-shaped but is replaced
+    // by ChatGPT, so adopting it would persist an identity that can never correlate later.
+    const finalIdentity = classifyChatGPTConversationIdentity(url);
+    this.traceBootstrap('final_identity_verification', {
+      handle: `WIN:${handle.windowId}|TAB:${handle.tabId}`,
+      url: url ?? null,
+      state: finalIdentity.state,
+      authoritativeConversationId: finalIdentity.conversationId ?? null,
+      transientId: finalIdentity.transientId ?? null,
+    });
+
+    if (finalIdentity.state === 'transient_local_identity') {
+      return {
+        conversationId: '',
+        conversationUrl: '',
+        projectSlug: slug,
+        error:
+          `Could not authoritatively verify newly created ChatGPT conversation: retained handle is on a ` +
+          `transient local identity '${finalIdentity.transientId}', which ChatGPT replaces and RelayX never adopts`,
+      };
+    }
+
+    if (finalIdentity.state === 'settled' && url) {
+      const authoritativeConversationId = finalIdentity.conversationId as string;
       // Uniqueness check: verify this conversation ID was not already known.
-      if (knownSet.has(parsed.conversationId)) {
+      if (knownSet.has(authoritativeConversationId)) {
         return {
           conversationId: '',
           conversationUrl: '',
           projectSlug: slug,
-          error: `Provider observed existing conversation '${parsed.conversationId}' instead of creating a fresh conversation`,
+          error: `Provider observed existing conversation '${authoritativeConversationId}' instead of creating a fresh conversation`,
         };
       }
 
       return {
-        conversationId: parsed.conversationId,
+        conversationId: authoritativeConversationId,
         conversationUrl: url,
-        projectSlug: parsed.projectId,
+        projectSlug: finalIdentity.projectId as string,
       };
     }
 
-    // If ChatGPT does not allocate a /c/<id> or if verification timed out,
+    // If ChatGPT does not allocate an authoritative /c/<id> or if verification timed out,
     // fail closed: do NOT invent an ID, do NOT assume frontmost tab without evidence.
     return {
       conversationId: '',
@@ -2816,6 +3161,284 @@ export function parseChatGPTConversationUrl(url: string): {
   const conversationId = match[2];
   if (!conversationId) return null;
   return { projectId: match[1], conversationId };
+}
+
+/**
+ * Semantic identity states for a ChatGPT conversation URL.
+ *
+ * This layer is deliberately SEPARATE from `parseChatGPTConversationUrl`, which remains a
+ * structural "is this a project-conversation-shaped URL" parser used by six call sites.
+ * Structural parseability is not the same thing as having an authoritative, durable
+ * conversation identity, and only the provisioning/identity layer should care about the
+ * difference.
+ *
+ * - `not_materialized_yet`      ChatGPT has not produced a conversation URL yet. Covers the
+ *                               project composer (`.../project`), the project root, a bare
+ *                               `/c/<id>` URL (not a supported shape), and any non-ChatGPT
+ *                               or malformed URL.
+ * - `transient_local_identity`  A conversation-shaped URL whose ID is ChatGPT's optimistic
+ *                               local placeholder (`local-chatgpt:<uuid4>`). This identity is
+ *                               REPLACED by a durable server ID moments later, so it must
+ *                               never be adopted or persisted as authoritative.
+ * - `settled`                   A supported conversation URL shape yielding a non-placeholder
+ *                               authoritative conversation ID.
+ */
+export type ChatGPTConversationIdentityState =
+  | 'not_materialized_yet'
+  | 'transient_local_identity'
+  | 'settled';
+
+export interface ChatGPTConversationIdentityVerdict {
+  state: ChatGPTConversationIdentityState;
+  /** The URL exactly as observed. Diagnostic only. */
+  url: string | null;
+  /** Authoritative project ID. Present for `settled` and `transient_local_identity`. */
+  projectId: string | null;
+  /** Authoritative conversation ID, URL-decoded. Non-null ONLY when `settled`. */
+  conversationId: string | null;
+  /** The rejected transient identity, for diagnostics. Never authoritative. */
+  transientId: string | null;
+}
+
+/** Matches ChatGPT's optimistic local conversation placeholder, encoded or decoded. */
+const CHATGPT_TRANSIENT_LOCAL_ID = /^local-chatgpt[:_-]/i;
+
+/**
+ * Classifies a ChatGPT conversation URL into a semantic identity state.
+ *
+ * Deliberately tolerant of a null/blank/unparseable URL: anything that does not yield an
+ * authoritative identity is reported as `not_materialized_yet` rather than throwing, so
+ * callers can poll on a settled identity without special-casing every malformed shape.
+ */
+export function classifyChatGPTConversationIdentity(
+  url: string | null | undefined,
+): ChatGPTConversationIdentityVerdict {
+  const pending = (u: string | null): ChatGPTConversationIdentityVerdict => ({
+    state: 'not_materialized_yet',
+    url: u,
+    projectId: null,
+    conversationId: null,
+    transientId: null,
+  });
+
+  if (!url || typeof url !== 'string') return pending(null);
+  const trimmed = url.trim();
+  if (!trimmed) return pending(null);
+
+  const parsed = parseChatGPTConversationUrl(trimmed);
+  if (!parsed?.conversationId) return pending(trimmed);
+
+  // `URL.pathname` preserves percent-encoding, and the local placeholder encodes its
+  // colon (`local-chatgpt%3A...`). Decode before testing so the placeholder is detected
+  // in either form, and so a settled ID is never handed back still-encoded.
+  let decoded = parsed.conversationId;
+  try {
+    decoded = decodeURIComponent(parsed.conversationId);
+  } catch {
+    decoded = parsed.conversationId;
+  }
+  decoded = decoded.trim();
+  if (!decoded) return pending(trimmed);
+
+  if (CHATGPT_TRANSIENT_LOCAL_ID.test(decoded)) {
+    return {
+      state: 'transient_local_identity',
+      url: trimmed,
+      projectId: parsed.projectId,
+      conversationId: null,
+      transientId: decoded,
+    };
+  }
+
+  return {
+    state: 'settled',
+    url: trimmed,
+    projectId: parsed.projectId,
+    conversationId: decoded,
+    transientId: null,
+  };
+}
+
+/** One read of the retained tab's URL, preserving why a read could not produce a URL. */
+export type ChatGPTSettlementRead =
+  | { kind: 'url'; url: string | null }
+  | { kind: 'lost' }
+  | { kind: 'failed'; error?: string };
+
+export type ChatGPTSettlementOutcome =
+  | 'settled'
+  | 'not_materialized_yet'
+  | 'transient_local_identity'
+  | 'handle_lost'
+  | 'read_failed'
+  | 'timeout';
+
+export interface ChatGPTSettlementResult {
+  outcome: ChatGPTSettlementOutcome;
+  /** True only for `settled`. Kept so existing acknowledgement call sites stay explicit. */
+  acknowledged: boolean;
+  /** Authoritative project ID. Non-null only when settled. */
+  projectId: string | null;
+  /** Authoritative conversation ID. Non-null ONLY when settled. */
+  conversationId: string | null;
+  /** Rejected transient identity, for diagnostics. Never authoritative. */
+  transientId: string | null;
+  /** Last URL observed through the retained handle. Diagnostic only. */
+  lastUrl: string | null;
+  polls: number;
+  elapsedMs: number;
+  reason?: string;
+}
+
+/**
+ * Bounded polling policy for conversation-identity settlement.
+ *
+ * `maxWaitMs` is an OPERATIONAL SAFETY LIMIT, not a claim that ChatGPT normally needs this
+ * long. The wait must never be unbounded: a signed-out / local-only ChatGPT will never
+ * produce an authoritative identity, and that must fail closed rather than hang.
+ */
+export const CHATGPT_SETTLEMENT_POLL_INTERVAL_MS = 500;
+export const CHATGPT_SETTLEMENT_MAX_WAIT_MS = 20000;
+
+/**
+ * Polls the SAME retained handle until an authoritative, settled conversation identity is
+ * observed, or a bounded budget is exhausted.
+ *
+ * Tolerates the real ChatGPT materialization sequence:
+ *   `.../project` -> `.../c/local-chatgpt:<uuid4>` -> `.../c/<server-uuid>`
+ *
+ * and never adopts the transient middle form. Fails closed with distinct reasons for
+ * "never materialized" versus "stuck on a transient local identity".
+ */
+export async function settleChatGPTConversationIdentity(
+  read: () => ChatGPTSettlementRead,
+  options?: {
+    maxWaitMs?: number;
+    pollIntervalMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+    now?: () => number;
+    onObservation?: (observation: {
+      poll: number;
+      elapsedMs: number;
+      read: ChatGPTSettlementRead;
+      verdict: ChatGPTConversationIdentityVerdict;
+    }) => void;
+  },
+): Promise<ChatGPTSettlementResult> {
+  const maxWaitMs = options?.maxWaitMs ?? CHATGPT_SETTLEMENT_MAX_WAIT_MS;
+  const pollIntervalMs = options?.pollIntervalMs ?? CHATGPT_SETTLEMENT_POLL_INTERVAL_MS;
+  const sleep = options?.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const now = options?.now ?? (() => Date.now());
+
+  const startedAt = now();
+  let polls = 0;
+  let lastVerdict: ChatGPTConversationIdentityVerdict = {
+    state: 'not_materialized_yet',
+    url: null,
+    projectId: null,
+    conversationId: null,
+    transientId: null,
+  };
+
+  for (;;) {
+    polls += 1;
+    const elapsedMs = now() - startedAt;
+    const readResult = read();
+    const verdict: ChatGPTConversationIdentityVerdict =
+      readResult.kind === 'url'
+        ? classifyChatGPTConversationIdentity(readResult.url)
+        : {
+            state: 'not_materialized_yet',
+            url: null,
+            projectId: null,
+            conversationId: null,
+            transientId: null,
+          };
+
+    options?.onObservation?.({ poll: polls, elapsedMs, read: readResult, verdict });
+
+    if (readResult.kind === 'lost') {
+      return {
+        outcome: 'handle_lost',
+        acknowledged: false,
+        projectId: null,
+        conversationId: null,
+        transientId: null,
+        lastUrl: null,
+        polls,
+        elapsedMs: now() - startedAt,
+        reason: 'Browser identity lost during bootstrap submission observation',
+      };
+    }
+    if (readResult.kind === 'failed') {
+      return {
+        outcome: 'read_failed',
+        acknowledged: false,
+        projectId: null,
+        conversationId: null,
+        transientId: null,
+        lastUrl: null,
+        polls,
+        elapsedMs: now() - startedAt,
+        reason: `Identity lost during observation: ${readResult.error ?? 'unknown read failure'}`,
+      };
+    }
+    if (verdict.state === 'settled') {
+      return {
+        outcome: 'settled',
+        acknowledged: true,
+        projectId: verdict.projectId,
+        conversationId: verdict.conversationId,
+        transientId: null,
+        lastUrl: verdict.url,
+        polls,
+        elapsedMs: now() - startedAt,
+      };
+    }
+
+    lastVerdict = verdict;
+
+    const remaining = maxWaitMs - (now() - startedAt);
+    if (remaining <= 0) break;
+    await sleep(Math.min(pollIntervalMs, remaining));
+  }
+
+  const elapsedMs = now() - startedAt;
+
+  // A local-only / signed-out ChatGPT holds the placeholder forever. Report that as its
+  // own outcome so the caller can distinguish it from "no materialization happened",
+  // and never adopt the placeholder as authoritative.
+  if (lastVerdict.state === 'transient_local_identity') {
+    return {
+      outcome: 'transient_local_identity',
+      acknowledged: false,
+      projectId: null,
+      conversationId: null,
+      transientId: lastVerdict.transientId,
+      lastUrl: lastVerdict.url,
+      polls,
+      elapsedMs,
+      reason:
+        `Bootstrap conversation identity never settled: ChatGPT remained on a transient local identity ` +
+        `'${lastVerdict.transientId}' through ${polls} polls over ${elapsedMs}ms. ` +
+        `RelayX requires an authoritative, durable ChatGPT conversation identity; local identities are ` +
+        `replaced by ChatGPT and are never adopted (this usually means ChatGPT is signed out).`,
+    };
+  }
+
+  return {
+    outcome: 'not_materialized_yet',
+    acknowledged: false,
+    projectId: null,
+    conversationId: null,
+    transientId: null,
+    lastUrl: lastVerdict.url,
+    polls,
+    elapsedMs,
+    reason:
+      `Bootstrap submission not acknowledged: no conversation materialization observed after ` +
+      `${polls} polls over ${elapsedMs}ms (last URL from retained handle: ${lastVerdict.url ?? 'null'})`,
+  };
 }
 
 /**
@@ -4010,6 +4633,33 @@ export class OpenCodeProvider extends BaseMacOSProvider {
     };
   }
 
+  /** Diagnostic-only trace for C2 (no behavior change to creation/confirmation contracts).
+   * Writes to ~/Library/Logs/RelayX/opencode-c2-trace.log so diagnosis evidence survives
+   * even when launched from Finder with no stdout.
+   */
+  private opencodeDiagClock: { startedAt: number } = { startedAt: 0 };
+
+  private traceC2(stage: string, detail: Record<string, unknown>): void {
+    const entry = {
+      c2diag: true,
+      stage,
+      atMs: Date.now(),
+      elapsedMs: this.opencodeDiagClock.startedAt ? Date.now() - this.opencodeDiagClock.startedAt : null,
+      ...detail,
+    };
+    try {
+      const { appendFileSync } = require('fs');
+      const { homedir } = require('os');
+      const { join } = require('path');
+      const dir = join(homedir(), 'Library', 'Logs', 'RelayX');
+      const { mkdirSync } = require('fs');
+      mkdirSync(dir, { recursive: true });
+      appendFileSync(join(dir, 'opencode-c2-trace.log'), JSON.stringify(entry) + '\n');
+    } catch {
+      /* diagnostics must never break provisioning */
+    }
+  }
+
   /** CLI-backed session creation (correct auth mechanism for v2.0.16). */
   public async createWorkerSession(
     projectPath: string,
@@ -4033,6 +4683,17 @@ export class OpenCodeProvider extends BaseMacOSProvider {
       metadata: null,
       permissions: null,
     });
+    this.opencodeDiagClock.startedAt = Date.now();
+    // C2 DIAGNOSTICS: capture CREATE request
+    const c2createTs = Date.now();
+    this.traceC2('worker_create_request', {
+      stage_seq: '1_create',
+      cli,
+      command: ['api', 'POST', '/api/session', '-d', payload],
+      targetProjectPath: projectPath,
+      sessionTitle: name?.trim() || 'OpenCode Worker Session',
+      atMs: c2createTs,
+    });
     try {
       const { spawnSync } = await import('child_process');
       const res = spawnSync(cli, ['api', 'POST', '/api/session', '-d', payload], {
@@ -4041,7 +4702,9 @@ export class OpenCodeProvider extends BaseMacOSProvider {
         maxBuffer: 10 * 1024 * 1024,
         env: process.env,
       });
+      const c2createDoneTs = Date.now();
       if (res.error) {
+        this.traceC2('worker_create_error', { stage_seq: '1_create', error: res.error.message, elapsedMs: c2createDoneTs - c2createTs });
         return { sessionId: '', workspaceDir: '', error: res.error.message };
       }
       const stdout = res.stdout || '';
@@ -4049,12 +4712,132 @@ export class OpenCodeProvider extends BaseMacOSProvider {
       const data = parsed?.data ?? parsed;
       const sessionId = data?.id ?? '';
       const workspaceDir = typeof data?.location?.directory === 'string' ? data.location.directory : projectPath;
+      // C2 DIAGNOSTICS: capture CREATE response
+      this.traceC2('worker_create_response', {
+        stage_seq: '1_create',
+        createdSessionId: sessionId,
+        returnedTitle: data?.title ?? null,
+        returnedDirectory: data?.location?.directory ?? null,
+        returnedAgent: data?.agent ?? null,
+        returnedModel: data?.model ?? null,
+        returnedAllIds: Array.isArray(data?.id) ? data.id : null,
+        rawStdoutLength: stdout.length,
+        rawStdoutSnippet: stdout.slice(0, 800),
+        elapsedMs: c2createDoneTs - c2createTs,
+        exitCode: res.status,
+      });
       if (!sessionId || typeof sessionId !== 'string' || !sessionId.startsWith('ses_')) {
         return { sessionId: sessionId || '', workspaceDir, error: `Invalid session id: ${String(sessionId).slice(0, 40)}` };
       }
+
+      // Bootstrap initialization turn: submit first-turn message to establish the
+      // worker session identity per the contract (§C-4). Uses provider-supported CLI
+      // mechanism (same binary/auth as session creation/confirmation). This is the
+      // mechanism that addresses the contract gap where automatic provisioning requires
+      // an initialized session with a verified identity before pairing can proceed.
+      const bootstrapRes = await this.submitWorkerBootstrap(
+        sessionId,
+        name?.trim() || 'OpenCode Worker Session',
+        projectPath,
+      );
+      if (!bootstrapRes.submitted) {
+        return {
+          sessionId,
+          workspaceDir,
+          error: `Worker bootstrap initialization failed: ${bootstrapRes.error ?? 'unknown'}`,
+        };
+      }
+
       return { sessionId, workspaceDir };
     } catch (err: any) {
       return { sessionId: '', workspaceDir: '', error: err?.message ?? String(err) };
+    }
+  }
+
+  /** CLI-backed bootstrap message submission for worker session initialization.
+   *
+   * Uses the provider-supported CLI mechanism (same binary/auth as session creation
+   * and confirmation). This submits the first-turn bootstrap message to the exact
+   * session created by createWorkerSession, establishing the initial user turn that
+   * the provisioning contract requires.
+   */
+  private async submitWorkerBootstrap(
+    sessionId: string,
+    sessionTitle: string,
+    projectName: string,
+  ): Promise<{ submitted: boolean; error?: string; messageEvidence?: string }> {
+    const cliPaths = [
+      '/Users/lazydeepak/Library/Application Support/ai.opencode.desktop/cli/2.0.16/opencode-cli',
+      'opencode-cli',
+    ];
+    try {
+      const { spawnSync } = await import('child_process');
+      const fs = await import('fs');
+      const cli = cliPaths.find((p: string) => {
+        try {
+          return fs.existsSync(p);
+        } catch {
+          return false;
+        }
+      }) || 'opencode-cli';
+      const promptText = RELAYX_WORKER_BOOTSTRAP_PROMPT_TEMPLATE
+        .replace('{sessionTitle}', sessionTitle || 'Unknown')
+        .replace('{projectName}', projectName || 'Unknown');
+      const payload = JSON.stringify({ prompt: promptText, message: promptText.trim() });
+      // C2 DIAGNOSTICS: capture bootstrap POST
+      const c2bootTs = Date.now();
+      this.traceC2('worker_bootstrap_request', {
+        stage_seq: '2_bootstrap',
+        targetSessionId: sessionId,
+        sessionTitle,
+        promptText,
+        command: ['api', 'POST', `/api/session/${encodeURIComponent(sessionId)}/message`, '-d', payload],
+        atMs: c2bootTs,
+      });
+      const res = spawnSync(cli, ['api', 'POST', `/api/session/${encodeURIComponent(sessionId)}/message`, '-d', payload], {
+        encoding: 'utf8',
+        timeout: 15000,
+        maxBuffer: 5 * 1024 * 1024,
+        env: process.env,
+      });
+      const c2bootDoneTs = Date.now();
+      if (res.error) {
+        this.traceC2('worker_bootstrap_error', { stage_seq: '2_bootstrap', error: res.error.message, elapsedMs: c2bootDoneTs - c2bootTs });
+        return { submitted: false, error: `Bootstrap message submission failed: ${res.error.message}` };
+      }
+      if (res.status !== 0) {
+        this.traceC2('worker_bootstrap_exit', { stage_seq: '2_bootstrap', exitCode: res.status, stderr: (res.stderr || '').slice(0, 300), elapsedMs: c2bootDoneTs - c2bootTs });
+        return { submitted: false, error: `Bootstrap message submission CLI exit non-zero (${res.status})` };
+      }
+      const stdout = (res.stdout || '').trim();
+      if (!stdout) {
+        this.traceC2('worker_bootstrap_no_output', { stage_seq: '2_bootstrap', elapsedMs: c2bootDoneTs - c2bootTs });
+        return { submitted: false, error: 'Bootstrap message submission produced no CLI output' };
+      }
+      try {
+        const parsed = JSON.parse(stdout);
+        const accepted = parsed?.status === 'ok' || parsed?.ok === true || parsed?.success === true || parsed?.data;
+        this.traceC2('worker_bootstrap_response', {
+          stage_seq: '2_bootstrap',
+          targetSessionId: sessionId,
+          submitted: accepted,
+          parsedStatus: parsed?.status ?? null,
+          parsedOk: parsed?.ok ?? null,
+          parsedSuccess: parsed?.success ?? null,
+          hasData: !!parsed?.data,
+          messageId: parsed?.data?.id ?? parsed?.id ?? null,
+          rawStdoutSnippet: stdout.slice(0, 800),
+          elapsedMs: c2bootDoneTs - c2bootTs,
+        });
+        if (accepted) {
+          return { submitted: true, messageEvidence: stdout.slice(0, 300) };
+        }
+        return { submitted: false, error: `Bootstrap message submission returned unexpected response: ${stdout.slice(0, 300)}` };
+      } catch {
+        return { submitted: false, error: `Bootstrap message submission returned non-JSON: ${stdout.slice(0, 300)}` };
+      }
+    } catch (err: any) {
+      return { submitted: false, error: err?.message ?? String(err) };
     }
   }
 
@@ -4081,14 +4864,62 @@ export class OpenCodeProvider extends BaseMacOSProvider {
         maxBuffer: 5 * 1024 * 1024,
         env: process.env,
       });
+      // C2 DIAGNOSTICS: capture confirmation GET command/response
+      this.traceC2('worker_confirmation_get', {
+        stage_seq: '3_confirm',
+        targetSessionId: sessionId,
+        projectPath,
+        command: ['api', 'GET', `/api/session?directory=${encodeURIComponent(projectPath)}&limit=10`],
+        exitCode: res.status,
+        stdoutLength: (res.stdout || '').length,
+        stdoutSnippet: (res.stdout || '').slice(0, 1200),
+        stderrSnippet: (res.stderr || '').slice(0, 300),
+      });
       if (res.error || res.status !== 0 || !res.stdout) {
+        this.traceC2('worker_confirmation_get_failed', {
+          stage_seq: '3_confirm',
+          error: res.error?.message ?? null,
+          exitCode: res.status,
+        });
         return { confirmed: false };
       }
-      const parsed = JSON.parse(res.stdout);
+      const stdout = res.stdout || '';
+      const parsed = JSON.parse(stdout);
       const sessions = parsed?.data ?? parsed?.sessions ?? parsed;
-      const exact = Array.isArray(sessions)
-        ? sessions.find((s: any) => s?.id === sessionId && ((s?.evidence?.details?.authoritativeSessionId === sessionId) || (s?.id === sessionId)))
-        : null;
+      if (!Array.isArray(sessions)) {
+        this.traceC2('worker_confirmation_non_array', {
+          stage_seq: '3_confirm',
+          parsedType: typeof parsed,
+          parsedKeys: parsed && typeof parsed === 'object' ? Object.keys(parsed) : null,
+        });
+        return { confirmed: false };
+      }
+      // C2 DIAGNOSTICS: enumerate all returned sessions with full detail
+      this.traceC2('worker_confirmation_session_list', {
+        stage_seq: '3_confirm',
+        targetSessionId: sessionId,
+        count: sessions.length,
+        sessions: sessions.map((s: any, idx: number) => ({
+          idx,
+          id: s?.id ?? null,
+          title: s?.title ?? null,
+          directory: s?.location?.directory ?? s?.workspace ?? null,
+          agent: s?.agent ?? null,
+          model: s?.model ?? null,
+          evidence: s?.evidence ?? null,
+          rawKeys: s && typeof s === 'object' ? Object.keys(s) : null,
+        })),
+      });
+      const exact = sessions.find((s: any) => s?.id === sessionId && ((s?.evidence?.details?.authoritativeSessionId === sessionId) || (s?.id === sessionId)));
+      const targetPresent = sessions.some((s: any) => s?.id === sessionId);
+      this.traceC2('worker_confirmation_match', {
+        stage_seq: '3_confirm',
+        targetSessionId: sessionId,
+        targetPresent,
+        exactMatchFound: !!exact,
+        matchRequiredEvidenceField: exact ? !!(exact.evidence?.details?.authoritativeSessionId === sessionId) : false,
+        projectPath,
+      });
       if (exact) {
         return {
           confirmed: true,
@@ -4096,8 +4927,38 @@ export class OpenCodeProvider extends BaseMacOSProvider {
           evidence: exact.evidence || { details: { authoritativeSessionId: sessionId } },
         };
       }
+      // C2 DIAGNOSTICS: target missing — begin bounded diagnostic polling using
+      // identical GET. This is observation-only and does NOT change the confirmation
+      // contract return (still unconfirmed until evidence appears).
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const r2 = spawnSync(cli, ['api', 'GET', `/api/session?directory=${encodeURIComponent(projectPath)}&limit=10`], {
+          encoding: 'utf8',
+          timeout: 15000,
+          maxBuffer: 5 * 1024 * 1024,
+          env: process.env,
+        });
+        const stdout2 = r2.stdout || '';
+        let sessions2: any[] = [];
+        try { if (stdout2) { const parsed2 = JSON.parse(stdout2); sessions2 = parsed2?.data ?? parsed2?.sessions ?? parsed2; if (!Array.isArray(sessions2)) sessions2 = []; } } catch { sessions2 = []; }
+        const present2 = sessions2.some((s: any) => s?.id === sessionId);
+        this.traceC2('worker_confirmation_diagnostic_poll', {
+          stage_seq: '3_confirm_diagnostic',
+          pollAttempt: attempt,
+          targetSessionId: sessionId,
+          targetPresent: present2,
+          count: sessions2.length,
+          sessions: sessions2.map((s: any, idx: number) => ({ idx, id: s?.id ?? null, title: s?.title ?? null, directory: s?.location?.directory ?? s?.workspace ?? null })),
+        });
+        if (present2) break;
+      }
       return { confirmed: false };
-    } catch {
+    } catch (err: any) {
+      this.traceC2('worker_confirmation_exception', {
+        stage_seq: '3_confirm',
+        targetSessionId: sessionId,
+        error: err?.message ?? String(err),
+      });
       return { confirmed: false };
     }
   }
