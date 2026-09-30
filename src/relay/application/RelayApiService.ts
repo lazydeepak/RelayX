@@ -639,6 +639,13 @@ export class RelayApiService implements IRelayApi {
     return p;
   }
 
+  public async loadAndActivatePair(pairId: string): Promise<UIPair> {
+    await this.engine.loadAndActivate(pairId as PairId);
+    const p = await this.getPair(pairId);
+    if (!p) throw new Error(`Pair ${pairId} not found`);
+    return p;
+  }
+
   public async pausePair(pairId: string): Promise<UIPair> {
     await this.engine.pausePair(pairId as PairId);
     const p = await this.getPair(pairId);
@@ -2052,6 +2059,13 @@ export class RelayApiService implements IRelayApi {
         workerRuntime.id,
         plannerRes.conversationUrl,
       );
+
+      // Automatically load and activate the newly created pair so it starts ACTIVE and ready
+      try {
+        await this.engine.loadAndActivate(pair.id as PairId);
+      } catch (actErr) {
+        console.warn(`[RelayX Engine] Auto-activation after provisioning failed:`, actErr);
+      }
 
       // Step 9: Return completed pair
       return {

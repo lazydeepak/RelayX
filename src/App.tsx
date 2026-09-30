@@ -373,8 +373,12 @@ export default function App() {
 
   const handleStartPair = async (pairId: string) => {
     try {
+      const pair = pairs.find((p) => p.id === pairId);
+      if (pair && pair.status === 'idle') {
+        await relayBridge.loadAndActivatePair(pairId);
+      }
       await relayBridge.startPair(pairId);
-      notify('Pair resumed to active state');
+      notify('Pair activated and started successfully');
       await loadData();
     } catch (err: any) {
       notify(`Pair action error: ${err.message}`);
@@ -527,6 +531,7 @@ export default function App() {
               <PairView
                 pairs={pairs}
                 projects={projects}
+                sessions={sessions}
                 onOpenCreateProject={() => setIsAddProjectWizardOpen(true)}
                 onOpenEditProject={(project) =>
                   setProjectModal({ isOpen: true, mode: 'edit', project })
@@ -550,6 +555,7 @@ export default function App() {
                 onStartPair={handleStartPair}
                 onPausePair={handlePausePair}
                 onViewEvidence={(ev) => setSelectedEvidence(ev)}
+                onOpenSessionDetail={handleOpenSessionDetail}
               />
             )}
 

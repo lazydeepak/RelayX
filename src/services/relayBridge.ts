@@ -192,6 +192,13 @@ export const relayBridge: IRelayApi = {
     return getLocalFallbackService().startPair(pairId);
   },
 
+  loadAndActivatePair: async (pairId: string) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return (window.relayApi as any).loadAndActivatePair ? (window.relayApi as any).loadAndActivatePair(pairId) : getLocalFallbackService().loadAndActivatePair(pairId);
+    }
+    return getLocalFallbackService().loadAndActivatePair(pairId);
+  },
+
   pausePair: async (pairId: string) => {
     if (typeof window !== 'undefined' && window.relayApi) {
       return window.relayApi.pausePair(pairId);

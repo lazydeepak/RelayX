@@ -44,6 +44,7 @@ const relayApi: IRelayApi = {
   detachPairRuntime: (pairId: string, role: 'planner' | 'worker') =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.DETACH_PAIR_RUNTIME, pairId, role),
   startPair: (pairId: string) => ipcRenderer.invoke(RELAY_IPC_CHANNELS.START_PAIR, pairId),
+  loadAndActivatePair: (pairId: string) => ipcRenderer.invoke(RELAY_IPC_CHANNELS.START_PAIR, pairId),
   pausePair: (pairId: string) => ipcRenderer.invoke(RELAY_IPC_CHANNELS.PAUSE_PAIR, pairId),
   resumePair: (pairId: string) => ipcRenderer.invoke(RELAY_IPC_CHANNELS.RESUME_PAIR, pairId),
   stopPair: (pairId: string) => ipcRenderer.invoke(RELAY_IPC_CHANNELS.STOP_PAIR, pairId),

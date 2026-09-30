@@ -220,6 +220,7 @@ export interface IRelayApi {
   rebindPairWorker(pairId: string, workerSessionId: string): Promise<UIPair>;
   detachPairRuntime(pairId: string, role: 'planner' | 'worker'): Promise<UIPair>;
   startPair(pairId: string): Promise<UIPair>;
+  loadAndActivatePair(pairId: string): Promise<UIPair>;
   pausePair(pairId: string): Promise<UIPair>;
   resumePair(pairId: string): Promise<UIPair>;
   stopPair(pairId: string): Promise<UIPair>;
