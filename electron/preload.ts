@@ -70,6 +70,8 @@ const relayApi: IRelayApi = {
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.DISCOVER_RUNTIME, providerType),
   inspectRuntime: (sessionId: string) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.INSPECT_RUNTIME, sessionId),
+  activateRuntime: (sessionId: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.ACTIVATE_RUNTIME, sessionId),
   recoverRuntime: (sessionId: string) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.RECOVER_RUNTIME, sessionId),
   detachRuntime: (sessionId: string) =>

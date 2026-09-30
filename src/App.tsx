@@ -371,6 +371,27 @@ export default function App() {
     }
   };
 
+  const formatFriendlyError = (err: any): string => {
+    const msg = err?.message || String(err);
+    if (msg.includes('IDLE') || msg.includes('ACTIVE') || msg.includes('DESIGN_FREEZE')) {
+      return 'Pair is currently idle or requires activation. Please click Start/Play to activate the pair before starting execution.';
+    }
+    return msg.replace(/\s*\(freeze\s*§[^)]+\)/gi, '').replace(/RelayDomainError:\s*/gi, '');
+  };
+
+  const handleActivateRuntime = async (sessionId: string) => {
+    try {
+      const success = await relayBridge.activateRuntime(sessionId);
+      if (success) {
+        notify('Opened / focused OpenCode session successfully');
+      } else {
+        notify('OpenCode session process/window activation signal sent');
+      }
+    } catch (err: any) {
+      notify(`Session open error: ${formatFriendlyError(err)}`);
+    }
+  };
+
   const handleStartPair = async (pairId: string) => {
     try {
       const pair = pairs.find((p) => p.id === pairId);
@@ -381,7 +402,7 @@ export default function App() {
       notify('Pair activated and started successfully');
       await loadData();
     } catch (err: any) {
-      notify(`Pair action error: ${err.message}`);
+      notify(`Pair action error: ${formatFriendlyError(err)}`);
     }
   };
 
@@ -556,6 +577,7 @@ export default function App() {
                 onPausePair={handlePausePair}
                 onViewEvidence={(ev) => setSelectedEvidence(ev)}
                 onOpenSessionDetail={handleOpenSessionDetail}
+                onActivateRuntime={handleActivateRuntime}
               />
             )}
 

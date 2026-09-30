@@ -88,13 +88,15 @@ function firstString(record: Record<string, unknown>, keys: string[]): string | 
 export function extractSessionIdentity(session: UIRuntimeSession): SessionIdentity {
   const details = readEvidenceDetails(session);
   return {
-    externalSessionId: firstString(details, [
-      'sessionId',
-      'parsedSessionId',
-      'authoritativeSessionId',
-      'externalSessionId',
-    ]),
-    workspacePath: firstString(details, ['workspacePath']),
+    externalSessionId:
+      firstString(details, [
+        'sessionId',
+        'parsedSessionId',
+        'authoritativeSessionId',
+        'externalSessionId',
+      ]) || session.externalSessionId || undefined,
+    workspacePath:
+      firstString(details, ['workspacePath']) || session.externalProjectRef || undefined,
     openCodeProjectId: firstString(details, ['openCodeProjectId']),
     projectUrl: firstString(details, ['projectUrl']),
   };

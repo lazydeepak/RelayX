@@ -1026,6 +1026,18 @@ export class RelayApiService implements IRelayApi {
     }
   }
 
+  public async activateRuntime(sessionId: string): Promise<boolean> {
+    const runtime = await this.db.runtimes.findById(sessionId as RuntimeSessionId);
+    if (!runtime) return false;
+    try {
+      const provider = this.engine.getProvider(runtime.providerType);
+      if (provider && typeof provider.activateRuntime === 'function') {
+        return await provider.activateRuntime(runtime.id as RuntimeSessionId);
+      }
+    } catch {}
+    return false;
+  }
+
   /**
    * S6 CLOSURE — runtime recovery.
    *
@@ -1756,6 +1768,7 @@ export class RelayApiService implements IRelayApi {
     }
 
     const runtime = RuntimeSession.create('opencode', name?.trim() || `OpenCode session ${trimmed}`);
+    runtime.status = 'available';
     runtime.updateExternalIdentity(trimmed, proj.workerWorkspacePath ?? null);
     await this.db.runtimes.save(runtime);
 
@@ -1980,6 +1993,7 @@ export class RelayApiService implements IRelayApi {
     try {
       const sessionName = name?.trim() || `ChatGPT Planner (${creationRes.conversationId.slice(0, 8)})`;
       const runtime = RuntimeSession.create('chatgpt', sessionName);
+      runtime.status = 'available';
       const canonicalProjectUrl =
         (typeof provider.canonicalizeChatGPTProjectUrl === 'function'
           ? provider.canonicalizeChatGPTProjectUrl(creationRes.conversationUrl)

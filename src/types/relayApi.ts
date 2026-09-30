@@ -237,6 +237,7 @@ export interface IRelayApi {
   ): Promise<UIRuntimeSession>;
   discoverRuntime(providerType: ProviderType): Promise<{ success: boolean; runtime?: UIRuntimeSession; isNew?: boolean; error?: string }>;
   inspectRuntime(sessionId: string): Promise<{ success: boolean; evidence?: ObservableEvidence; error?: string }>;
+  activateRuntime(sessionId: string): Promise<boolean>;
   /**
    * S6 CLOSURE — `error` is populated ONLY when the attempt was refused by the I-2
    * runtime->Pair governance guard (the owning Pair is IDLE, or its ownership is

@@ -46,6 +46,7 @@ interface PairViewProps {
   onInspectPair: (pairId: string) => void;
   onViewEvidence: (ev: ObservableEvidence) => void;
   onOpenSessionDetail: (sessionId: string) => void;
+  onActivateRuntime: (sessionId: string) => void;
   onStartPair?: (pairId: string) => void;
   onPausePair?: (pairId: string) => void;
 }
@@ -70,6 +71,7 @@ export const PairView: React.FC<PairViewProps> = ({
   onInspectPair,
   onViewEvidence,
   onOpenSessionDetail,
+  onActivateRuntime,
   onStartPair,
   onPausePair,
 }) => {
@@ -451,14 +453,25 @@ export const PairView: React.FC<PairViewProps> = ({
                                   if (extId) {
                                     const chatUrl = extId.startsWith('http') ? extId : `https://chatgpt.com/c/${extId}`;
                                     window.open(chatUrl, '_blank');
+                                  } else {
+                                    alert('No authoritative external conversation ID bound to this planner');
                                   }
-                                  onOpenSessionDetail(pair.plannerSessionId!);
                                 }}
                                 className="px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-semibold flex items-center gap-1 transition-colors"
-                                title="Open exact attached ChatGPT conversation"
+                                title="Open exact attached ChatGPT conversation in browser"
                               >
                                 <ExternalLink className="w-3 h-3" />
                                 <span>Open</span>
+                              </button>
+                            )}
+                            {pair.plannerSessionId && (
+                              <button
+                                onClick={() => onOpenSessionDetail(pair.plannerSessionId!)}
+                                className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-semibold flex items-center gap-1 transition-colors"
+                                title="View session details & telemetry"
+                              >
+                                <Eye className="w-3 h-3" />
+                                <span>Details</span>
                               </button>
                             )}
                             {pair.plannerSessionId && (
@@ -509,13 +522,28 @@ export const PairView: React.FC<PairViewProps> = ({
                             {pair.workerSessionId && (
                               <button
                                 onClick={() => {
-                                  onOpenSessionDetail(pair.workerSessionId!);
+                                  const sesId = workerSession?.externalSessionId;
+                                  if (sesId) {
+                                    onActivateRuntime(pair.workerSessionId!);
+                                  } else {
+                                    alert('No authoritative OpenCode session ID bound to this worker');
+                                  }
                                 }}
                                 className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-semibold flex items-center gap-1 transition-colors"
                                 title="Open / focus exact attached OpenCode ses_* session"
                               >
                                 <ExternalLink className="w-3 h-3" />
                                 <span>Open</span>
+                              </button>
+                            )}
+                            {pair.workerSessionId && (
+                              <button
+                                onClick={() => onOpenSessionDetail(pair.workerSessionId!)}
+                                className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-semibold flex items-center gap-1 transition-colors"
+                                title="View session details & telemetry"
+                              >
+                                <Eye className="w-3 h-3" />
+                                <span>Details</span>
                               </button>
                             )}
                             {pair.workerSessionId && (

@@ -281,6 +281,13 @@ export const relayBridge: IRelayApi = {
     return getLocalFallbackService().inspectRuntime(sessionId);
   },
 
+  activateRuntime: async (sessionId: string) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.activateRuntime(sessionId);
+    }
+    return getLocalFallbackService().activateRuntime(sessionId);
+  },
+
   recoverRuntime: async (sessionId: string) => {
     if (typeof window !== 'undefined' && window.relayApi) {
       return window.relayApi.recoverRuntime(sessionId);
