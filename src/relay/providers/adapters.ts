@@ -4923,6 +4923,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
       if (exact) {
         return {
           confirmed: true,
+          externalSessionId: sessionId,
           projectPath,
           evidence: exact.evidence || { details: { authoritativeSessionId: sessionId } },
         };
