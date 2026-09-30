@@ -2091,7 +2091,7 @@ export class ChatGPTProvider extends BaseMacOSProvider {
    */
   private async verifyComposerReady(
     handle: BrowserHandle,
-    maxWaitMs = 5000,
+    maxWaitMs = 20000,
   ): Promise<{ ok: boolean; reason?: string }> {
     const deadline = Date.now() + maxWaitMs;
     let polls = 0;
@@ -2106,7 +2106,7 @@ export class ChatGPTProvider extends BaseMacOSProvider {
       }
       await this.sleep(300);
     }
-    return { ok: false, reason: `Planner composer not ready after ${polls} readiness polls over ${maxWaitMs}ms (Defect D: intermittent composer readiness)` };
+    return { ok: false, reason: `Planner composer not ready after ${polls} readiness polls over ${maxWaitMs}ms (bounded composer readiness timeout)` };
   }
 
   public async createPlannerSession(
@@ -2243,7 +2243,23 @@ export class ChatGPTProvider extends BaseMacOSProvider {
         promptLength: bootstrapPrompt.length,
       });
 
-      // 3. Submit provisioning bootstrap through the exact retained handle.
+      // 3. Wait for composer readiness boundedly, then submit provisioning bootstrap through the exact retained handle.
+      const readiness = await this.verifyComposerReady(handle, 20000);
+      if (!readiness.ok) {
+        this.traceBootstrap('boundary_failed', {
+          boundary: 'composer_discovery',
+          handle: `WIN:${handle.windowId}|TAB:${handle.tabId}`,
+          message: readiness.reason || 'Planner composer not ready: no prompt-textarea or contenteditable found within 20s bound',
+        });
+        this.inspectRetainedPageState(handle, 'page_state_at_composer_failure');
+        return {
+          conversationId: '',
+          conversationUrl: '',
+          projectSlug: slug,
+          error: readiness.reason || 'Planner composer not ready: no prompt-textarea or contenteditable found within 20s bound',
+        };
+      }
+
       const promptJs = `(() => {
         const textarea = document.querySelector('#prompt-textarea') || document.querySelector('div[contenteditable="true"]');
         if (!textarea) return 'NO_TEXTAREA';
@@ -4664,6 +4680,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
   public async createWorkerSession(
     projectPath: string,
     name?: string,
+    options?: { projectName?: string },
   ): Promise<{ sessionId: string; workspaceDir: string; error?: string }> {
     const cliPaths = [
       '/Users/lazydeepak/Library/Application Support/ai.opencode.desktop/cli/2.0.16/opencode-cli',
@@ -4735,10 +4752,14 @@ export class OpenCodeProvider extends BaseMacOSProvider {
       // mechanism (same binary/auth as session creation/confirmation). This is the
       // mechanism that addresses the contract gap where automatic provisioning requires
       // an initialized session with a verified identity before pairing can proceed.
+      const resolvedProjectName =
+        options?.projectName?.trim() ||
+        (projectPath.includes('/') ? projectPath.split('/').filter(Boolean).pop() : '') ||
+        projectPath;
       const bootstrapRes = await this.submitWorkerBootstrap(
         sessionId,
         name?.trim() || 'OpenCode Worker Session',
-        projectPath,
+        resolvedProjectName,
       );
       if (!bootstrapRes.submitted) {
         return {
@@ -4928,9 +4949,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
           evidence: exact.evidence || { details: { authoritativeSessionId: sessionId } },
         };
       }
-      // C2 DIAGNOSTICS: target missing — begin bounded diagnostic polling using
-      // identical GET. This is observation-only and does NOT change the confirmation
-      // contract return (still unconfirmed until evidence appears).
+      // Bounded polling if session is transitional/delayed in initial GET.
       for (let attempt = 1; attempt <= 4; attempt++) {
         await new Promise((r) => setTimeout(r, 1500));
         const r2 = spawnSync(cli, ['api', 'GET', `/api/session?directory=${encodeURIComponent(projectPath)}&limit=10`], {
@@ -4942,16 +4961,23 @@ export class OpenCodeProvider extends BaseMacOSProvider {
         const stdout2 = r2.stdout || '';
         let sessions2: any[] = [];
         try { if (stdout2) { const parsed2 = JSON.parse(stdout2); sessions2 = parsed2?.data ?? parsed2?.sessions ?? parsed2; if (!Array.isArray(sessions2)) sessions2 = []; } } catch { sessions2 = []; }
-        const present2 = sessions2.some((s: any) => s?.id === sessionId);
+        const exact2 = sessions2.find((s: any) => s?.id === sessionId && ((s?.evidence?.details?.authoritativeSessionId === sessionId) || (s?.id === sessionId)));
         this.traceC2('worker_confirmation_diagnostic_poll', {
           stage_seq: '3_confirm_diagnostic',
           pollAttempt: attempt,
           targetSessionId: sessionId,
-          targetPresent: present2,
+          targetPresent: !!exact2,
           count: sessions2.length,
           sessions: sessions2.map((s: any, idx: number) => ({ idx, id: s?.id ?? null, title: s?.title ?? null, directory: s?.location?.directory ?? s?.workspace ?? null })),
         });
-        if (present2) break;
+        if (exact2) {
+          return {
+            confirmed: true,
+            externalSessionId: sessionId,
+            projectPath,
+            evidence: exact2.evidence || { details: { authoritativeSessionId: sessionId } },
+          };
+        }
       }
       return { confirmed: false };
     } catch (err: any) {

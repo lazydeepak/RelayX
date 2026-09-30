@@ -1799,7 +1799,7 @@ export class RelayApiService implements IRelayApi {
     // never reconstructs credentials, retries POST, or injects a chat message.
     let creationRes: { sessionId: string; workspaceDir: string; error?: string };
     try {
-      creationRes = await provider.createWorkerSession(workspacePath, name);
+      creationRes = await provider.createWorkerSession(workspacePath, name, { projectName: proj.name });
     } catch (err: any) {
       return {
         sessionId: '',

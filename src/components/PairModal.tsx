@@ -70,8 +70,56 @@ export const PairModal: React.FC<PairModalProps> = ({
   const [createdWorkerInfo, setCreatedWorkerInfo] = useState<{ id: string; sessionId: string } | null>(null);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [provisioningStage, setProvisioningStage] = useState<
+    | 'idle'
+    | 'creating_planner'
+    | 'waiting_chatgpt'
+    | 'initializing_planner'
+    | 'verifying_planner'
+    | 'creating_worker'
+    | 'initializing_worker'
+    | 'verifying_worker'
+    | 'creating_pair'
+    | 'ready'
+  >('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isAddProjectWizardOpen, setIsAddProjectWizardOpen] = useState(false);
+
+  const getPlannerCardStatus = () => {
+    if (provisioningStage === 'idle') return '✓ New session will be created';
+    if (provisioningStage === 'creating_planner') return 'Creating planner conversation...';
+    if (provisioningStage === 'waiting_chatgpt') return 'Waiting for ChatGPT composer...';
+    if (provisioningStage === 'initializing_planner') return 'Initializing planner session...';
+    if (provisioningStage === 'verifying_planner') return 'Verifying authoritative UUID...';
+    return '✓ Verified ChatGPT Planner';
+  };
+
+  const getWorkerCardStatus = () => {
+    if (provisioningStage === 'idle') return '✓ New session will be created';
+    if (['creating_planner', 'waiting_chatgpt', 'initializing_planner', 'verifying_planner'].includes(provisioningStage)) {
+      return 'Awaiting planner verification...';
+    }
+    if (provisioningStage === 'creating_worker') return 'Creating OpenCode session...';
+    if (provisioningStage === 'initializing_worker') return 'Initializing worker session...';
+    if (provisioningStage === 'verifying_worker') return 'Verifying workspace & ses_*...';
+    if (provisioningStage === 'creating_pair') return 'Joining Session Pair...';
+    return '✓ Verified OpenCode Worker';
+  };
+
+  const getButtonText = () => {
+    switch (provisioningStage) {
+      case 'creating_planner': return 'Creating planner…';
+      case 'waiting_chatgpt': return 'Waiting for ChatGPT…';
+      case 'initializing_planner': return 'Initializing planner…';
+      case 'verifying_planner': return 'Verifying planner…';
+      case 'creating_worker': return 'Creating worker…';
+      case 'initializing_worker': return 'Initializing worker…';
+      case 'verifying_worker': return 'Verifying worker…';
+      case 'creating_pair': return 'Creating pair…';
+      case 'ready': return 'Ready';
+      default: return mode === 'create' ? 'Create Session Pair' : 'Save Changes';
+    }
+  };
 
   const activeProjects = projects.filter((p) => p.status !== 'archived');
   const runtimePool = [
@@ -118,6 +166,7 @@ export const PairModal: React.FC<PairModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       setErrorMessage(null);
+      setProvisioningStage('idle');
       if (mode === 'edit' && pair) {
         setName(pair.name);
         setProjectId(pair.projectId);
@@ -239,8 +288,44 @@ export const PairModal: React.FC<PairModalProps> = ({
     try {
       if (mode === 'create') {
         if (creationMode === 'automatic') {
-          // Automatic intent-driven flow: create fresh planner + worker + bind pair via provisionPairWithNewSessions
-          await relayBridge.provisionPairWithNewSessions(projectId, name.trim());
+          // Step 1: Create, initialize, and verify ChatGPT Planner
+          setProvisioningStage('creating_planner');
+          const plannerSessionName = newPlannerSessionName.trim() || name.trim();
+          const plannerRes = await relayBridge.createChatGPTPlannerSession(projectId, plannerSessionName);
+          if (!plannerRes.adopted || !plannerRes.runtime || !plannerRes.conversationId) {
+            throw new Error(plannerRes.error || 'Failed to create and verify new ChatGPT planner session');
+          }
+          const plannerRuntime = plannerRes.runtime;
+
+          // Step 2: Create, initialize, and verify OpenCode Worker
+          setProvisioningStage('creating_worker');
+          let workerRuntime: UIRuntimeSession;
+          try {
+            const workerSessionName = newWorkerSessionName.trim() || name.trim();
+            const workerRes = await relayBridge.createOpenCodeWorkerSession(projectId, workerSessionName);
+            if (!workerRes.adopted || !workerRes.runtime || !workerRes.sessionId) {
+              throw new Error(workerRes.error || 'Failed to create and verify new OpenCode worker session');
+            }
+            workerRuntime = workerRes.runtime;
+          } catch (workerErr: any) {
+            // Transactional cleanup: clean up orphaned planner session if worker fails
+            try {
+              await relayBridge.deleteRuntimeSession(plannerRuntime.id);
+            } catch {}
+            throw new Error(`Failed to create worker session: ${workerErr?.message || 'unknown error'}. Pair creation aborted and orphaned planner session cleaned up.`);
+          }
+
+          // Step 3: Persist verified Session Pair
+          setProvisioningStage('creating_pair');
+          await relayBridge.createPair(
+            projectId,
+            name.trim(),
+            plannerRuntime.id,
+            workerRuntime.id,
+            plannerRes.conversationUrl,
+          );
+          setProvisioningStage('ready');
+
           onSuccess(`Session Pair & Sessions "${name.trim()}" created successfully in Automatic mode`);
           onClose();
           return;
@@ -501,7 +586,7 @@ export const PairModal: React.FC<PairModalProps> = ({
                       Planner (ChatGPT)
                     </div>
                     <div className="text-slate-300 truncate font-mono">{name || 'Title'}</div>
-                    <div className="text-[10px] text-emerald-400 font-medium">✓ New session will be created</div>
+                    <div className="text-[10px] text-emerald-400 font-medium animate-pulse">{getPlannerCardStatus()}</div>
                   </div>
                   <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 space-y-1">
                     <div className="text-emerald-400 font-medium flex items-center gap-1">
@@ -509,7 +594,7 @@ export const PairModal: React.FC<PairModalProps> = ({
                       Worker (OpenCode)
                     </div>
                     <div className="text-slate-300 truncate font-mono">{name || 'Title'}</div>
-                    <div className="text-[10px] text-emerald-400 font-medium">✓ New session will be created</div>
+                    <div className="text-[10px] text-emerald-400 font-medium animate-pulse">{getWorkerCardStatus()}</div>
                   </div>
                 </div>
               </div>
@@ -694,13 +779,13 @@ export const PairModal: React.FC<PairModalProps> = ({
               >
                 {mode === 'create' ? (
                   <>
-                    <GitMerge className="w-3.5 h-3.5" />
-                    <span>Create Session Pair</span>
+                    <GitMerge className={`w-3.5 h-3.5 ${provisioningStage !== 'idle' && provisioningStage !== 'ready' ? 'animate-spin' : ''}`} />
+                    <span>{getButtonText()}</span>
                   </>
                 ) : (
                   <>
                     <Edit3 className="w-3.5 h-3.5" />
-                    <span>Save Changes</span>
+                    <span>{getButtonText()}</span>
                   </>
                 )}
               </button>
