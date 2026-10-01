@@ -2540,7 +2540,24 @@ export class RelayApiService implements IRelayApi {
         messageSubmission: Boolean(config.capabilities?.dispatchInstruction),
         observation: Boolean(config.capabilities?.observeCompletion),
       },
-      supportedModels: config.id === 'claude_desktop' ? ['anthropic/claude-3-7-sonnet', 'anthropic/claude-3-5-sonnet', 'anthropic/claude-3-opus'] : config.id === 'chatgpt' ? ['openai/gpt-4o', 'openai/o3-mini', 'openai/o1'] : config.id === 'opencode' ? ['anthropic/claude-3-7-sonnet', 'openai/o3-mini', 'google/gemini-2.5-pro'] : [],
+      supportedModels: config.id === 'claude_desktop' 
+        ? ['anthropic/claude-3-7-sonnet', 'anthropic/claude-3-5-sonnet', 'anthropic/claude-3-opus'] 
+        : config.id === 'chatgpt' 
+        ? ['openai/gpt-4o', 'openai/o3-mini', 'openai/o1'] 
+        : config.id === 'opencode' 
+        ? [
+            'opencode-zen/free-default',
+            'openrouter/free',
+            'thinking-machines/inkling:free',
+            'thinking-machines/inkling-small:free',
+            'nvidia/nemotron-3-ultra:free',
+            'nvidia/nemotron-3.5-lightning:free',
+            'poolside/laguna-s-2.1:free',
+            'poolside/laguna-xs-2.1:free',
+            'cohere/north-mini-code:free',
+            'google/gemini-2.5-flash:free'
+          ] 
+        : [],
       automationBreakdown: {
         'Launch application': config.scripts?.launchScript ? 'Script' : config.launchBehavior === 'open_bundle' ? 'Native App Bundle' : config.launchBehavior === 'service_call' ? 'Shared Daemon Service' : 'CLI Executable',
         'Create session': config.scripts?.createSessionScript ? 'Configured Script' : config.id === 'chatgpt' ? 'Desktop App / Chrome Tab' : config.id === 'opencode' ? 'opencode CLI runner' : config.id === 'claude_desktop' ? 'AppleScript (Cmd+N)' : 'Editor Workspace',

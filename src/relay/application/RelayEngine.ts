@@ -1700,13 +1700,16 @@ export class RelayEngine {
   public static getSupportedModels(providerType: ProviderType): string[] {
     if (providerType === 'opencode') {
       return [
-        'anthropic/claude-3-7-sonnet',
-        'anthropic/claude-3-5-sonnet',
-        'openai/o3-mini',
-        'openai/gpt-4o',
-        'google/gemini-2.5-pro',
-        'google/gemini-2.5-flash',
-        'deepseek/deepseek-r1',
+        'opencode-zen/free-default',
+        'openrouter/free',
+        'thinking-machines/inkling:free',
+        'thinking-machines/inkling-small:free',
+        'nvidia/nemotron-3-ultra:free',
+        'nvidia/nemotron-3.5-lightning:free',
+        'poolside/laguna-s-2.1:free',
+        'poolside/laguna-xs-2.1:free',
+        'cohere/north-mini-code:free',
+        'google/gemini-2.5-flash:free',
       ];
     }
     if (providerType === 'chatgpt') {

@@ -39,7 +39,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [isVerifying, setIsVerifying] = useState(false);
   const [verifyingType, setVerifyingType] = useState<ProviderType | null>(null);
 
-  const [effectiveWorkerModel, setEffectiveWorkerModel] = useState<string>('anthropic/claude-3-7-sonnet');
+  const [effectiveWorkerModel, setEffectiveWorkerModel] = useState<string>('opencode-zen/free-default');
   const [supportedWorkerModels, setSupportedWorkerModels] = useState<string[]>([]);
   const [modelSavedMsg, setModelSavedMsg] = useState<string | null>(null);
   const [archiveInterval, setArchiveInterval] = useState<string>('7d');
