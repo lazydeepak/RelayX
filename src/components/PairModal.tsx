@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, GitMerge, Edit3, Trash2, Archive, AlertTriangle, CheckCircle2, Cpu, Unlink, FolderPlus, Plus, MessageSquare, Sliders } from 'lucide-react';
+import { X, GitMerge, Edit3, Trash2, Archive, AlertTriangle, CheckCircle2, Check, Cpu, Unlink, FolderPlus, Plus, MessageSquare, Sliders, Loader2 } from 'lucide-react';
 import { UIPair, UIProject, UIRuntimeSession } from '../types/ui.ts';
 import type { ChatGPTConversationChoice, WorkerChoice } from '../types/relayApi.ts';
 import { relayBridge } from '../services/relayBridge.ts';
@@ -84,26 +84,37 @@ export const PairModal: React.FC<PairModalProps> = ({
   >('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isAddProjectWizardOpen, setIsAddProjectWizardOpen] = useState(false);
+  const [defaultPlannerApp, setDefaultPlannerApp] = useState<string>('ChatGPT');
+  const [defaultWorkerApp, setDefaultWorkerApp] = useState<string>('OpenCode');
+  const [integrations, setIntegrations] = useState<any[]>([]);
+
+  useEffect(() => {
+    if (isOpen) {
+      relayBridge.listIntegrations().then((list) => setIntegrations(list)).catch(() => {});
+      relayBridge.getDefaultPlannerIntegration().then((p) => setDefaultPlannerApp(p?.name || 'ChatGPT')).catch(() => {});
+      relayBridge.getDefaultWorkerIntegration().then((w) => setDefaultWorkerApp(w?.name || 'OpenCode')).catch(() => {});
+    }
+  }, [isOpen]);
 
   const getPlannerCardStatus = () => {
-    if (provisioningStage === 'idle') return '✓ New session will be created';
-    if (provisioningStage === 'creating_planner') return 'Creating planner conversation...';
-    if (provisioningStage === 'waiting_chatgpt') return 'Waiting for ChatGPT composer...';
-    if (provisioningStage === 'initializing_planner') return 'Initializing planner session...';
-    if (provisioningStage === 'verifying_planner') return 'Verifying authoritative UUID...';
-    return '✓ Verified ChatGPT Planner';
+    if (provisioningStage === 'idle') return `✓ New session will be created via ${defaultPlannerApp}`;
+    if (provisioningStage === 'creating_planner') return `Creating ${defaultPlannerApp} session…`;
+    if (provisioningStage === 'waiting_chatgpt') return 'Waiting for planner…';
+    if (provisioningStage === 'initializing_planner') return 'Initializing planner session…';
+    if (provisioningStage === 'verifying_planner') return 'Verifying authoritative session…';
+    return `✓ Verified ${defaultPlannerApp} Planner`;
   };
 
   const getWorkerCardStatus = () => {
-    if (provisioningStage === 'idle') return '✓ New session will be created';
+    if (provisioningStage === 'idle') return `✓ New session will be created via ${defaultWorkerApp}`;
     if (['creating_planner', 'waiting_chatgpt', 'initializing_planner', 'verifying_planner'].includes(provisioningStage)) {
-      return 'Awaiting planner verification...';
+      return 'Awaiting planner verification…';
     }
-    if (provisioningStage === 'creating_worker') return 'Creating OpenCode session...';
-    if (provisioningStage === 'initializing_worker') return 'Initializing worker session...';
-    if (provisioningStage === 'verifying_worker') return 'Verifying workspace & ses_*...';
-    if (provisioningStage === 'creating_pair') return 'Joining Session Pair...';
-    return '✓ Verified OpenCode Worker';
+    if (provisioningStage === 'creating_worker') return `Creating ${defaultWorkerApp} session…`;
+    if (provisioningStage === 'initializing_worker') return 'Initializing worker session…';
+    if (provisioningStage === 'verifying_worker') return 'Verifying workspace session…';
+    if (provisioningStage === 'creating_pair') return 'Joining Session Pair…';
+    return `✓ Verified ${defaultWorkerApp} Worker`;
   };
 
   const getButtonText = () => {
@@ -131,9 +142,20 @@ export const PairModal: React.FC<PairModalProps> = ({
     if (!proj) return false;
     return true;
   });
-  const plannerOptions = projectRuntimes.filter((r) => r.providerType === 'chatgpt');
-  const workerOptions = projectRuntimes.filter(
-    (r) => r.providerType === 'opencode' || r.providerType === 'vscode',
+  const plannerProviderTypes = new Set(
+    integrations.filter((i) => i.role === 'planner' || i.role === 'both').map((i) => i.providerType || i.id),
+  );
+  const workerProviderTypes = new Set(
+    integrations.filter((i) => i.role === 'worker' || i.role === 'both').map((i) => i.providerType || i.id),
+  );
+
+  const plannerOptions = projectRuntimes.filter((r) =>
+    plannerProviderTypes.size > 0 ? plannerProviderTypes.has(r.providerType) : r.providerType === 'chatgpt',
+  );
+  const workerOptions = projectRuntimes.filter((r) =>
+    workerProviderTypes.size > 0
+      ? (workerProviderTypes.has(r.providerType) || r.providerType === 'opencode' || r.providerType === 'vscode')
+      : (r.providerType === 'opencode' || r.providerType === 'vscode'),
   );
   const workerDiscoveredChoices = workerChoices.filter(
     (c): c is Extract<WorkerChoice, { kind: 'discovered' }> =>
@@ -288,45 +310,22 @@ export const PairModal: React.FC<PairModalProps> = ({
     try {
       if (mode === 'create') {
         if (creationMode === 'automatic') {
-          // Step 1: Create, initialize, and verify ChatGPT Planner
           setProvisioningStage('creating_planner');
           const plannerSessionName = newPlannerSessionName.trim() || name.trim();
-          const plannerRes = await relayBridge.createChatGPTPlannerSession(projectId, plannerSessionName);
-          if (!plannerRes.adopted || !plannerRes.runtime || !plannerRes.conversationId) {
-            throw new Error(plannerRes.error || 'Failed to create and verify new ChatGPT planner session');
-          }
-          const plannerRuntime = plannerRes.runtime;
+          const workerSessionName = newWorkerSessionName.trim() || name.trim();
 
-          // Step 2: Create, initialize, and verify OpenCode Worker
-          setProvisioningStage('creating_worker');
-          let workerRuntime: UIRuntimeSession;
-          try {
-            const workerSessionName = newWorkerSessionName.trim() || name.trim();
-            const workerRes = await relayBridge.createOpenCodeWorkerSession(projectId, workerSessionName);
-            if (!workerRes.adopted || !workerRes.runtime || !workerRes.sessionId) {
-              throw new Error(workerRes.error || 'Failed to create and verify new OpenCode worker session');
-            }
-            workerRuntime = workerRes.runtime;
-          } catch (workerErr: any) {
-            // Transactional cleanup: clean up orphaned planner session if worker fails
-            try {
-              await relayBridge.deleteRuntimeSession(plannerRuntime.id);
-            } catch {}
-            throw new Error(`Failed to create worker session: ${workerErr?.message || 'unknown error'}. Pair creation aborted and orphaned planner session cleaned up.`);
-          }
-
-          // Step 3: Persist verified Session Pair
-          setProvisioningStage('creating_pair');
-          await relayBridge.createPair(
+          await relayBridge.provisionPairWithNewSessions(
             projectId,
             name.trim(),
-            plannerRuntime.id,
-            workerRuntime.id,
-            plannerRes.conversationUrl,
+            {
+              plannerName: plannerSessionName,
+              workerName: workerSessionName,
+            },
           );
           setProvisioningStage('ready');
 
           onSuccess(`Session Pair & Sessions "${name.trim()}" created successfully in Automatic mode`);
+          if (onRefresh) onRefresh();
           onClose();
           return;
         } else {
@@ -435,6 +434,46 @@ export const PairModal: React.FC<PairModalProps> = ({
     }
   };
 
+  const createWorkerSession = async () => {
+    const sessionName = newWorkerSessionName.trim();
+    if (!projectId) {
+      setErrorMessage('Select a project before creating a worker session');
+      return;
+    }
+    if (!sessionName) {
+      setErrorMessage('Enter a name for the new worker session');
+      return;
+    }
+
+    setIsCreatingWorker(true);
+    setErrorMessage(null);
+    setWorkerCreationMessage(null);
+    try {
+      const result = await relayBridge.createOpenCodeWorkerSession(projectId, sessionName);
+      if (!result.adopted || !result.runtime || !result.sessionId) {
+        throw new Error(result.error || 'Failed to create authoritative worker session');
+      }
+      setAdoptedRuntimes((prev) =>
+        prev.some((runtime) => runtime.id === result.runtime!.id)
+          ? prev
+          : [...prev, result.runtime!],
+      );
+      setWorkerSessionId(result.runtime.id);
+      setCreatedWorkerInfo({
+        id: result.runtime.id,
+        sessionId: result.sessionId,
+      });
+      setWorkerCreationMessage(
+        `Created and verified worker session “${shortenExternalId(result.sessionId, 12)}”. Save the pair to bind.`,
+      );
+      if (onRefresh) onRefresh();
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Failed to create the worker session');
+    } finally {
+      setIsCreatingWorker(false);
+    }
+  };
+
   const adoptWorkerSession = async (sessionId: string) => {
     try {
       setErrorMessage(null);
@@ -443,6 +482,7 @@ export const PairModal: React.FC<PairModalProps> = ({
         prev.some((r) => r.id === runtime.id) ? prev : [...prev, runtime],
       );
       setWorkerSessionId(runtime.id);
+      setWorkerSourceMode('existing');
       if (onRefresh) onRefresh();
     } catch (err: any) {
       setErrorMessage(err?.message || 'Failed to adopt the discovered session');
@@ -455,6 +495,7 @@ export const PairModal: React.FC<PairModalProps> = ({
       return;
     }
     setWorkerSessionId(value);
+    setWorkerSourceMode('existing');
   };
 
   return (
@@ -583,7 +624,7 @@ export const PairModal: React.FC<PairModalProps> = ({
                   <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 space-y-1">
                     <div className="text-purple-400 font-medium flex items-center gap-1">
                       <Cpu className="w-3.5 h-3.5" />
-                      Planner (ChatGPT)
+                      Planner ({defaultPlannerApp})
                     </div>
                     <div className="text-slate-300 truncate font-mono">{name || 'Title'}</div>
                     <div className="text-[10px] text-emerald-400 font-medium animate-pulse">{getPlannerCardStatus()}</div>
@@ -591,7 +632,7 @@ export const PairModal: React.FC<PairModalProps> = ({
                   <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 space-y-1">
                     <div className="text-emerald-400 font-medium flex items-center gap-1">
                       <Cpu className="w-3.5 h-3.5" />
-                      Worker (OpenCode)
+                      Worker ({defaultWorkerApp})
                     </div>
                     <div className="text-slate-300 truncate font-mono">{name || 'Title'}</div>
                     <div className="text-[10px] text-emerald-400 font-medium animate-pulse">{getWorkerCardStatus()}</div>
@@ -692,7 +733,35 @@ export const PairModal: React.FC<PairModalProps> = ({
                       </select>
 
                       {mode === 'create' && (
-                        <div className="space-y-2">
+                        <div className="space-y-2 pt-1 border-t border-slate-800/60">
+                          <label className="block text-[11px] text-slate-300 font-medium">
+                            ChatGPT Conversation URL (Optional if using bound runtime)
+                          </label>
+
+                          {conversationChoices.length > 0 && (
+                            <div className="space-y-1">
+                              <label className="text-[10px] text-slate-400">Quick-select observed / bound conversation:</label>
+                              <select
+                                value={conversationChoiceValue}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  if (val !== '__new__') {
+                                    setConversationUrl(val);
+                                    setConversationConfirmed(true);
+                                  }
+                                }}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-slate-300 text-xs"
+                              >
+                                <option value="__new__">-- Enter custom conversation URL below --</option>
+                                {conversationChoices.map((c) => (
+                                  <option key={c.conversationId} value={c.url}>
+                                    {describeConversationChoice(c)}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
+
                           <input
                             type="text"
                             value={conversationUrl}
@@ -703,6 +772,58 @@ export const PairModal: React.FC<PairModalProps> = ({
                             placeholder="https://chatgpt.com/g/g-p-…/c/…"
                             className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-200"
                           />
+
+                          {conversationUrl.trim() && (
+                            <div className="space-y-1.5">
+                              {!conversationValidation.ok ? (
+                                <p className="text-[11px] text-amber-400 flex items-center gap-1">
+                                  <AlertTriangle className="w-3 h-3 shrink-0" />
+                                  <span>{conversationValidation.reason}</span>
+                                </p>
+                              ) : plannerConflictBoundId ? (
+                                <p className="text-[11px] text-red-400 flex items-center gap-1">
+                                  <AlertTriangle className="w-3 h-3 shrink-0" />
+                                  <span>
+                                    Conflict: selected planner is already bound to {plannerConflictBoundId}.
+                                  </span>
+                                </p>
+                              ) : conversationConflictRuntime ? (
+                                <p className="text-[11px] text-red-400 flex items-center gap-1">
+                                  <AlertTriangle className="w-3 h-3 shrink-0" />
+                                  <span>
+                                    Conflict: this conversation is already bound to runtime "{conversationConflictRuntime.name}".
+                                  </span>
+                                </p>
+                              ) : conversationConfirmed ? (
+                                <div className="p-2 rounded bg-emerald-950/40 border border-emerald-500/40 text-emerald-300 text-[11px] flex items-center justify-between">
+                                  <span className="flex items-center gap-1">
+                                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                    <span>Verified Conversation ID: {parsedConversationId}</span>
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => setConversationConfirmed(false)}
+                                    className="text-[10px] text-slate-400 hover:text-slate-200 underline"
+                                  >
+                                    Change
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="flex items-center justify-between pt-1">
+                                  <span className="text-[11px] text-blue-400">
+                                    Valid conversation ID: {parsedConversationId}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => setConversationConfirmed(true)}
+                                    className="px-2.5 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-medium transition-colors"
+                                  >
+                                    Confirm Conversation
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -731,27 +852,96 @@ export const PairModal: React.FC<PairModalProps> = ({
                     )}
                   </div>
 
-                  <select
-                    value={workerSessionId}
-                    onChange={(e) => handleWorkerChange(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-200"
-                  >
-                    <option value="">(None / Unassigned)</option>
-                    {workerOptions.map((r) => (
-                      <option key={r.id} value={r.id}>
-                        {r.name} ({r.providerType.toUpperCase()}) • {r.status}
-                      </option>
-                    ))}
-                    {workerDiscoveredChoices.length > 0 && (
-                      <optgroup label="Discovered OpenCode sessions">
-                        {workerDiscoveredChoices.map((c) => (
-                          <option key={c.sessionId} value={`adopt:${c.sessionId}`}>
-                            {describeDiscoveredWorkerChoice(c)}
+                  {mode === 'create' && (
+                    <div className="flex items-center gap-1.5 p-1 rounded-lg bg-slate-950 border border-slate-800">
+                      <button
+                        type="button"
+                        onClick={() => setWorkerSourceMode('new')}
+                        className={`flex-1 py-1.5 px-3 rounded-md text-xs font-medium transition-colors ${
+                          workerSourceMode === 'new'
+                            ? 'bg-emerald-600/90 text-white shadow'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        + New Worker Session
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setWorkerSourceMode('existing')}
+                        className={`flex-1 py-1.5 px-3 rounded-md text-xs font-medium transition-colors ${
+                          workerSourceMode === 'existing'
+                            ? 'bg-emerald-600/90 text-white shadow'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Use Existing Worker Session
+                      </button>
+                    </div>
+                  )}
+
+                  {mode === 'create' && workerSourceMode === 'new' ? (
+                    <div className="space-y-2.5 p-3 rounded-lg bg-slate-950/60 border border-slate-800/80">
+                      <div className="grid grid-cols-[1fr_auto] gap-2">
+                        <input
+                          type="text"
+                          value={newWorkerSessionName}
+                          onChange={(e) => setNewWorkerSessionName(e.target.value)}
+                          placeholder="New worker session name"
+                          className="min-w-0 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-200"
+                        />
+                        <button
+                          type="button"
+                          onClick={createWorkerSession}
+                          disabled={isCreatingWorker || !projectId || !newWorkerSessionName.trim()}
+                          className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white font-medium"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>{isCreatingWorker ? 'Creating…' : 'Create Session'}</span>
+                        </button>
+                      </div>
+                      {createdWorkerInfo && (
+                        <div className="p-2.5 rounded-lg bg-emerald-950/40 border border-emerald-500/40 text-emerald-200">
+                          Verified session ID: {createdWorkerInfo.sessionId}
+                        </div>
+                      )}
+                      {workerCreationMessage && (
+                        <div className="text-[11px] text-emerald-300 font-mono">
+                          {workerCreationMessage}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <select
+                        value={workerSessionId}
+                        onChange={(e) => handleWorkerChange(e.target.value)}
+                        className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-200"
+                      >
+                        <option value="">(None / Unassigned)</option>
+                        {workerOptions.map((r) => (
+                          <option key={r.id} value={r.id}>
+                            {r.name} ({r.providerType.toUpperCase()}) • {r.status}
                           </option>
                         ))}
-                      </optgroup>
-                    )}
-                  </select>
+                        {workerDiscoveredChoices.length > 0 && (
+                          <optgroup label="Discovered OpenCode sessions (Click to adopt)">
+                            {workerDiscoveredChoices.map((c) => (
+                              <option key={c.sessionId} value={`adopt:${c.sessionId}`}>
+                                {describeDiscoveredWorkerChoice(c)} (Adoptable)
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                      </select>
+
+                      {workerSessionId && (
+                        <div className="text-[11px] text-slate-400 flex items-center gap-1">
+                          <Check className="w-3 h-3 text-emerald-400" />
+                          <span>Selected worker runtime: {workerOptions.find((w) => w.id === workerSessionId)?.name || workerSessionId}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </>
             )}
@@ -772,8 +962,26 @@ export const PairModal: React.FC<PairModalProps> = ({
                   isCreatingWorker ||
                   !name.trim() ||
                   (mode === 'create' && (!projectId || activeProjects.length === 0)) ||
-                  (mode === 'create' && creationMode === 'manual' && plannerSourceMode === 'existing' && (!plannerSessionId || !conversationConfirmed)) ||
-                  (mode === 'create' && creationMode === 'manual' && workerSourceMode === 'existing' && !workerSessionId)
+                  (mode === 'create' &&
+                    creationMode === 'manual' &&
+                    plannerSourceMode === 'new' &&
+                    !plannerSessionId &&
+                    !createdPlannerInfo &&
+                    !newPlannerSessionName.trim()) ||
+                  (mode === 'create' &&
+                    creationMode === 'manual' &&
+                    plannerSourceMode === 'existing' &&
+                    (!plannerSessionId || (conversationUrl.trim().length > 0 && !conversationConfirmed))) ||
+                  (mode === 'create' &&
+                    creationMode === 'manual' &&
+                    workerSourceMode === 'new' &&
+                    !workerSessionId &&
+                    !createdWorkerInfo &&
+                    !newWorkerSessionName.trim()) ||
+                  (mode === 'create' &&
+                    creationMode === 'manual' &&
+                    workerSourceMode === 'existing' &&
+                    !workerSessionId)
                 }
                 className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-medium shadow-md transition-colors"
               >

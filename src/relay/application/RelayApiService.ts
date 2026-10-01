@@ -36,6 +36,7 @@ import { RuntimeSession, Project, RuntimeProjectAssociation } from '../domain/en
 import { IRelayRepositories } from '../persistence/interfaces.ts';
 import { RelayEngine } from './RelayEngine.ts';
 import { relayDiagnostics } from './RelayDiagnostics.ts';
+import { IntegrationManager, AppIntegrationConfig } from '../integrations/index.ts';
 import {
   IRelayApi,
   DashboardState,
@@ -149,6 +150,7 @@ export class RelayApiService implements IRelayApi {
   private readonly userDataPath?: string;
   private inFlightPlanner = new Map<string, Promise<any>>();
   private inFlightWorker = new Map<string, Promise<any>>();
+  public readonly integrationManager: IntegrationManager;
 
   constructor(
     public readonly db: IRelayRepositories,
@@ -159,6 +161,8 @@ export class RelayApiService implements IRelayApi {
     this.databasePath = options.databasePath ?? ':memory:';
     this.databaseType = options.databaseType ?? (this.databasePath === ':memory:' ? 'memory' : 'sqlite_wal');
     this.userDataPath = options.userDataPath;
+    this.integrationManager = new IntegrationManager(this.db, this.engine);
+    this.engine.setRegistry(this.integrationManager.getRegistry());
   }
 
   public async getAppStatus(): Promise<AppStatus> {
@@ -482,11 +486,11 @@ export class RelayApiService implements IRelayApi {
 
     if (plannerSessionId) {
       if (!planner) throw new Error('Planner runtime not found');
-      if (planner.providerType !== 'chatgpt') throw new Error('Planner session must be ChatGPT');
+      if (!this.engine.isPlannerProvider(planner.providerType)) throw new Error('Planner session must be ChatGPT');
     }
     if (workerSessionId) {
       if (!worker) throw new Error('Worker runtime not found');
-      if (worker.providerType !== 'opencode' && worker.providerType !== 'vscode') throw new Error('Worker session must be OpenCode or VS Code');
+      if (!this.engine.isWorkerProvider(worker.providerType)) throw new Error('Worker session must be OpenCode or VS Code');
     }
 
     // ChatGPT conversation binding contract (explicit, caller-supplied URL).
@@ -498,7 +502,7 @@ export class RelayApiService implements IRelayApi {
     // read from Chrome — the caller hands over an already-observed URL.
     const normalizeChatRef = normalizeChatProjectSlug;
     let conversationBinding: { projectId: string; conversationId: string } | null = null;
-    if (plannerConversationUrl) {
+    if (plannerConversationUrl && planner?.providerType === 'chatgpt') {
       if (!plannerSessionId || !planner) {
         throw new Error('plannerConversationUrl requires a selected ChatGPT planner runtime');
       }
@@ -1029,6 +1033,14 @@ export class RelayApiService implements IRelayApi {
   public async activateRuntime(sessionId: string): Promise<boolean> {
     const runtime = await this.db.runtimes.findById(sessionId as RuntimeSessionId);
     if (!runtime) return false;
+
+    // S6 CLOSURE — I-2 GATE. activateRuntime mutation requires permitted contact.
+    try {
+      await this.engine.assertRuntimeProviderContactPermitted(runtime.id);
+    } catch {
+      return false;
+    }
+
     try {
       const provider = this.engine.getProvider(runtime.providerType);
       if (provider && typeof provider.activateRuntime === 'function') {
@@ -2046,32 +2058,81 @@ export class RelayApiService implements IRelayApi {
       throw new Error(`Project not found: ${projectId}`);
     }
 
-    // Step 3: Create ChatGPT planner session titled `title` (or options.plannerName)
+    // Requirement 7: RelayX effectively asks: give me the Planner, give me the Worker.
+    // The integration layer resolves those to the currently configured defaults.
+    const plannerHandler = await this.integrationManager.getDefaultPlanner();
+    const workerHandler = await this.integrationManager.getDefaultWorker();
+
     const plannerSessionName = options?.plannerName?.trim() || title;
-    const plannerRes = await this.createChatGPTPlannerSession(projectId, plannerSessionName);
-    if (!plannerRes.adopted || !plannerRes.runtime || !plannerRes.conversationId) {
-      throw new Error(plannerRes.error || 'Failed to create and verify new ChatGPT planner session');
+    const workerSessionName = options?.workerName?.trim() || title;
+
+    // Create planner session using resolved default planner's handler
+    let plannerRuntime: UIRuntimeSession;
+    let conversationUrl: string | undefined;
+
+    const pRes = await plannerHandler.createSession({
+      projectId,
+      projectName: proj.name,
+      projectPath: proj.canonicalPath,
+      projectUrl: proj.plannerProjectUrl,
+      sessionTitle: plannerSessionName,
+    });
+    if (pRes.error || !pRes.externalSessionId) {
+      throw new Error(pRes.error || `Failed to create session with default planner "${plannerHandler.config.name}"`);
     }
 
-    const plannerRuntime = plannerRes.runtime;
+    const pRuntime = await this.registerRuntimeSession(
+      plannerHandler.config.id as ProviderType,
+      plannerSessionName,
+      pRes.externalSessionId,
+      projectId,
+    );
+    await this.recordAssociationEvidence(
+      pRuntime.id as RuntimeSessionId,
+      projectId as ProjectId,
+      pRes.externalSessionId,
+      plannerHandler.config.id as ProviderType,
+      'adoption',
+    );
+    plannerRuntime = pRuntime;
+    conversationUrl = pRes.sessionUrl;
 
-    // Step 4 & 5: Create and validate OpenCode worker session titled `title` (or options.workerName)
-    const workerSessionName = options?.workerName?.trim() || title;
+    // Create worker session using resolved default worker's handler
     try {
-      const workerRes = await this.createOpenCodeWorkerSession(projectId, workerSessionName);
-      if (!workerRes.adopted || !workerRes.runtime || !workerRes.sessionId) {
-        throw new Error(workerRes.error || 'Failed to create and verify new OpenCode worker session');
+      let workerRuntime: UIRuntimeSession;
+
+      const wRes = await workerHandler.createSession({
+        projectId,
+        projectName: proj.name,
+        projectPath: proj.canonicalPath || proj.workerWorkspacePath || `/tmp/${proj.name.toLowerCase().replace(/\s+/g, '_')}`,
+        sessionTitle: workerSessionName,
+      });
+      if (wRes.error || !wRes.externalSessionId) {
+        throw new Error(wRes.error || `Failed to create session with default worker "${workerHandler.config.name}"`);
       }
+      const wRuntime = await this.registerRuntimeSession(
+        workerHandler.config.id as ProviderType,
+        workerSessionName,
+        wRes.externalSessionId,
+        projectId,
+      );
+      await this.recordAssociationEvidence(
+        wRuntime.id as RuntimeSessionId,
+        projectId as ProjectId,
+        wRes.externalSessionId,
+        workerHandler.config.id as ProviderType,
+        'adoption',
+      );
+      workerRuntime = wRuntime;
 
-      const workerRuntime = workerRes.runtime;
-
-      // Step 7 & 8: Create SessionPair titled `title` and bind both sessions
+      // Requirement 8: Once sessions are created, the Pair is bound to those actual integrations/sessions.
+      // Existing Pairs should not suddenly switch because somebody later changes the defaults.
       const pair = await this.createPair(
         projectId,
         title,
         plannerRuntime.id,
         workerRuntime.id,
-        plannerRes.conversationUrl,
+        conversationUrl,
       );
 
       // Automatically load and activate the newly created pair so it starts ACTIVE and ready
@@ -2081,7 +2142,6 @@ export class RelayApiService implements IRelayApi {
         console.warn(`[RelayX Engine] Auto-activation after provisioning failed:`, actErr);
       }
 
-      // Step 9: Return completed pair
       return {
         pair,
         plannerRuntime,
@@ -2272,312 +2332,152 @@ export class RelayApiService implements IRelayApi {
 
   /* --- Provider / App Integration & Capability Model --- */
 
-  private integrationsCache: Map<ProviderType, ProviderIntegration> = new Map();
-
-  private getInitialIntegration(providerType: ProviderType): ProviderIntegration {
-    if (providerType === 'chatgpt') {
-      return {
-        providerType: 'chatgpt',
-        name: 'ChatGPT Desktop & Web',
-        role: 'planner',
-        status: 'unconfigured',
-        identity: {
-          kind: 'app_bundle',
-          bundleId: 'com.openai.chat',
-          processName: 'ChatGPT',
-          windowTitlePattern: 'ChatGPT*',
-        },
-        requirements: {
-          accessibilityRequired: true,
-          accessibilityGranted: false,
-          systemEventsRequired: true,
-          systemEventsAvailable: false,
-          notes: 'Requires macOS Accessibility permission and active ChatGPT window or Chrome project tab',
-        },
-        capabilities: {
-          discoverProjects: true,
-          discoverSessions: true,
-          createSession: true,
-          dispatchInstruction: true,
-          captureTransportBoundary: false,
-          reconcileExactSession: false,
-          observeCompletion: true,
-          extractResponse: true,
-        },
-      };
-    } else if (providerType === 'opencode') {
-      return {
-        providerType: 'opencode',
-        name: 'OpenCode CLI & Shared Service',
-        role: 'worker',
-        status: 'unconfigured',
-        identity: {
-          kind: 'cli_service',
-          executable: 'opencode',
-          serviceUrl: 'http://127.0.0.1:4096',
-          processName: 'opencode',
-        },
-        requirements: {
-          accessibilityRequired: false,
-          accessibilityGranted: true,
-          systemEventsRequired: false,
-          systemEventsAvailable: true,
-          serviceRunning: false,
-          cliInstalled: false,
-          notes: 'Requires OpenCode CLI in PATH or local HTTP service socket (~/.local/state/opencode/service.json)',
-        },
-        capabilities: {
-          discoverProjects: true,
-          discoverSessions: true,
-          createSession: true,
-          dispatchInstruction: true,
-          captureTransportBoundary: true,
-          reconcileExactSession: true,
-          observeCompletion: true,
-          extractResponse: true,
-        },
-      };
-    } else {
-      return {
-        providerType: 'vscode',
-        name: 'Visual Studio Code',
-        role: 'worker',
-        status: 'unconfigured',
-        identity: {
-          kind: 'editor',
-          bundleId: 'com.microsoft.VSCode',
-          executable: 'code',
-          processName: 'Code',
-          windowTitlePattern: '*Visual Studio Code',
-        },
-        requirements: {
-          accessibilityRequired: true,
-          accessibilityGranted: false,
-          systemEventsRequired: true,
-          systemEventsAvailable: false,
-          cliInstalled: false,
-          notes: 'Provides window title workspace observation and active editor context',
-        },
-        capabilities: {
-          discoverProjects: true,
-          discoverSessions: false,
-          createSession: false,
-          dispatchInstruction: false,
-          captureTransportBoundary: false,
-          reconcileExactSession: false,
-          observeCompletion: false,
-          extractResponse: false,
-        },
-      };
-    }
+  private mapConfigToProviderIntegration(config: AppIntegrationConfig): ProviderIntegration {
+    return {
+      providerType: config.id as ProviderType,
+      id: config.id,
+      name: config.name,
+      description: config.description,
+      role: config.role,
+      isEnabled: config.isEnabled,
+      isDefaultPlanner: config.isDefaultPlanner,
+      isDefaultWorker: config.isDefaultWorker,
+      isBuiltin: config.isBuiltin,
+      appType: config.appType,
+      appPath: config.appPath,
+      bundleId: config.bundleId,
+      serviceUrl: config.serviceUrl,
+      cliCommand: config.cliCommand,
+      cliArguments: config.cliArguments,
+      launchBehavior: config.launchBehavior,
+      scripts: config.scripts,
+      status: config.status,
+      identity: {
+        kind: config.appType === 'editor' ? 'editor' : config.appType === 'cli_service' ? 'cli_service' : 'app_bundle',
+        bundleId: config.bundleId,
+        executable: config.cliCommand,
+        serviceUrl: config.serviceUrl,
+        processName: config.processName,
+        windowTitlePattern: config.windowTitlePattern,
+      },
+      requirements: {
+        accessibilityRequired: config.requirements.accessibilityRequired,
+        accessibilityGranted: config.requirements.accessibilityGranted ?? false,
+        systemEventsRequired: config.requirements.systemEventsRequired,
+        systemEventsAvailable: config.requirements.systemEventsAvailable ?? false,
+        serviceRunning: config.requirements.serviceRunning,
+        cliInstalled: config.requirements.cliInstalled,
+        notes: config.requirements.notes,
+      },
+      capabilities: config.capabilities,
+      lastVerifiedAt: config.lastVerifiedAt,
+      lastVerificationResult: config.lastVerificationResult,
+      metadata: config.metadata,
+      capabilitiesList: Object.entries(config.capabilities || {})
+        .filter(([_, v]) => Boolean(v))
+        .map(([k]) => k.replace(/([A-Z])/g, ' $1').toLowerCase()),
+      readinessChecklist: (config.lastVerificationResult?.details as any)?.checklist || {
+        applicationFound: Boolean(config.status === 'verified'),
+        accessibilityPermission: Boolean(config.requirements?.accessibilityGranted ?? true),
+        automationPermission: Boolean(config.requirements?.systemEventsAvailable ?? true),
+        sessionCreation: Boolean(config.capabilities?.createSession),
+        sessionIdentity: Boolean(config.bundleId || config.processName || config.isBuiltin),
+        messageSubmission: Boolean(config.capabilities?.dispatchInstruction),
+        observation: Boolean(config.capabilities?.observeCompletion),
+      },
+      supportedModels: config.id === 'claude_desktop' ? ['anthropic/claude-3-7-sonnet', 'anthropic/claude-3-5-sonnet', 'anthropic/claude-3-opus'] : config.id === 'chatgpt' ? ['openai/gpt-4o', 'openai/o3-mini', 'openai/o1'] : config.id === 'opencode' ? ['anthropic/claude-3-7-sonnet', 'openai/o3-mini', 'google/gemini-2.5-pro'] : [],
+      automationBreakdown: {
+        'Launch application': config.scripts?.launchScript ? 'Script' : config.launchBehavior === 'open_bundle' ? 'Native App Bundle' : config.launchBehavior === 'service_call' ? 'Shared Daemon Service' : 'CLI Executable',
+        'Create session': config.scripts?.createSessionScript ? 'Configured Script' : config.id === 'chatgpt' ? 'Desktop App / Chrome Tab' : config.id === 'opencode' ? 'opencode CLI runner' : config.id === 'claude_desktop' ? 'AppleScript (Cmd+N)' : 'Editor Workspace',
+        'Send message': config.scripts?.sendMessageScript ? 'Configured Script' : config.id === 'chatgpt' ? 'Composer Automation' : config.id === 'opencode' ? 'Local REST API / HTTP' : config.id === 'claude_desktop' ? 'System Events Keystrokes' : 'Editor Terminal',
+        'Observe session': config.scripts?.inspectSessionScript ? 'Configured Script' : config.id === 'chatgpt' ? 'Window Observer' : config.id === 'opencode' ? 'Service State (~/.local/state)' : 'Window Title Pattern',
+      },
+    };
   }
 
   public async listIntegrations(): Promise<ProviderIntegration[]> {
-    const types: ProviderType[] = ['chatgpt', 'opencode', 'vscode'];
-    const results: ProviderIntegration[] = [];
-    for (const t of types) {
-      if (this.integrationsCache.has(t)) {
-        results.push(this.integrationsCache.get(t)!);
-      } else {
-        const verified = await this.verifyIntegration(t);
-        results.push(verified);
-      }
-    }
-    return results;
+    await this.integrationManager.initialize();
+    const configs = this.integrationManager.listConfigs();
+    return configs.map((c) => this.mapConfigToProviderIntegration(c));
   }
 
   public async verifyIntegration(providerType: ProviderType): Promise<ProviderIntegration> {
-    const integration = this.getInitialIntegration(providerType);
-    const appStatus = await this.getAppStatus();
-    const isNode = typeof process !== 'undefined';
-    const isDarwin = isNode && process.platform === 'darwin';
-
-    integration.requirements.accessibilityGranted = !!appStatus.permissions?.accessibilityGranted;
-    integration.requirements.systemEventsAvailable = !!appStatus.permissions?.systemEventsAvailable;
-
-    if (!isNode) {
-      // Browser preview simulated verification
-      integration.status = 'verified';
-      integration.lastVerifiedAt = Date.now();
-      integration.lastVerificationResult = {
-        ok: true,
-        message: 'Simulated web preview provider integration active',
-      };
-      if (providerType === 'opencode') {
-        integration.requirements.cliInstalled = true;
-        integration.requirements.serviceRunning = true;
-      }
-      this.integrationsCache.set(providerType, integration);
-      return integration;
-    }
-
-    // Node / Electron environment
-    try {
-      const { execSync } = require('child_process');
-      const fs = require('fs');
-      const os = require('os');
-      const pathModule = require('path');
-
-      if (providerType === 'chatgpt') {
-        let isAppRunning = false;
-        let isChromeRunning = false;
-        let pid: number | undefined;
-
-        if (isDarwin) {
-          try {
-            const pgrepOut = execSync('pgrep -x ChatGPT || pgrep -f "com.openai.chat"', {
-              timeout: 1000,
-              stdio: 'pipe',
-            }).toString().trim();
-            if (pgrepOut) {
-              isAppRunning = true;
-              pid = parseInt(pgrepOut.split('\n')[0], 10);
-            }
-          } catch {
-            isAppRunning = false;
-          }
-
-          try {
-            const chromeOut = execSync('pgrep -x "Google Chrome"', {
-              timeout: 1000,
-              stdio: 'pipe',
-            }).toString().trim();
-            if (chromeOut) isChromeRunning = true;
-          } catch {
-            isChromeRunning = false;
-          }
-        }
-
-        integration.identity.detectedPid = pid;
-        if (integration.requirements.accessibilityGranted && (isAppRunning || isChromeRunning)) {
-          integration.status = 'verified';
-          integration.lastVerificationResult = {
-            ok: true,
-            message: isAppRunning
-              ? `ChatGPT Desktop running (PID: ${pid ?? 'active'}). Accessibility verified.`
-              : 'Google Chrome running with web planner access. Accessibility verified.',
-          };
-        } else if (!integration.requirements.accessibilityGranted && (isAppRunning || isChromeRunning)) {
-          integration.status = 'degraded';
-          integration.lastVerificationResult = {
-            ok: false,
-            message: 'Application detected running, but macOS Accessibility / Apple Events permission is denied.',
-          };
-        } else {
-          integration.status = 'not_detected';
-          integration.lastVerificationResult = {
-            ok: false,
-            message: 'ChatGPT Desktop or Google Chrome process not currently detected.',
-          };
-        }
-      } else if (providerType === 'opencode') {
-        let cliFound = false;
-        let serviceRunning = false;
-        let servicePort: number | undefined;
-
-        try {
-          execSync('which opencode', { timeout: 1000, stdio: 'pipe' });
-          cliFound = true;
-        } catch {
-          cliFound = false;
-        }
-
-        const servicePath = pathModule.join(os.homedir(), '.local', 'state', 'opencode', 'service.json');
-        if (fs.existsSync(servicePath)) {
-          try {
-            const content = JSON.parse(fs.readFileSync(servicePath, 'utf8'));
-            if (content.port || content.url) {
-              serviceRunning = true;
-              servicePort = content.port;
-              integration.identity.serviceUrl = content.url || `http://127.0.0.1:${content.port}`;
-            }
-          } catch {
-            // parse error
-          }
-        }
-
-        integration.requirements.cliInstalled = cliFound;
-        integration.requirements.serviceRunning = serviceRunning;
-
-        if (serviceRunning || cliFound) {
-          integration.status = 'verified';
-          integration.lastVerificationResult = {
-            ok: true,
-            message: serviceRunning
-              ? `OpenCode Shared Service active on port ${servicePort ?? 4096}`
-              : 'OpenCode CLI detected in PATH with process transport support',
-          };
-        } else {
-          integration.status = 'not_detected';
-          integration.lastVerificationResult = {
-            ok: false,
-            message: 'Neither OpenCode CLI executable nor service socket (~/.local/state/opencode/service.json) found',
-          };
-        }
-      } else if (providerType === 'vscode') {
-        let isRunning = false;
-        let cliFound = false;
-
-        try {
-          execSync('which code', { timeout: 1000, stdio: 'pipe' });
-          cliFound = true;
-        } catch {
-          cliFound = false;
-        }
-
-        if (isDarwin) {
-          try {
-            execSync('pgrep -f "Visual Studio Code" || pgrep -f "Code Helper"', {
-              timeout: 1000,
-              stdio: 'pipe',
-            });
-            isRunning = true;
-          } catch {
-            isRunning = false;
-          }
-        }
-
-        integration.requirements.cliInstalled = cliFound;
-        if (isRunning && integration.requirements.accessibilityGranted) {
-          integration.status = 'verified';
-          integration.lastVerificationResult = {
-            ok: true,
-            message: 'Visual Studio Code running with active workspace window accessibility',
-          };
-        } else if (isRunning && !integration.requirements.accessibilityGranted) {
-          integration.status = 'degraded';
-          integration.lastVerificationResult = {
-            ok: false,
-            message: 'VS Code running, but macOS Accessibility permission is required for workspace window inspection',
-          };
-        } else {
-          integration.status = 'not_detected';
-          integration.lastVerificationResult = {
-            ok: false,
-            message: 'Visual Studio Code process not currently running',
-          };
-        }
-      }
-    } catch (err: any) {
-      integration.status = 'degraded';
-      integration.lastVerificationResult = {
-        ok: false,
-        message: `Verification check error: ${err.message || String(err)}`,
-      };
-    }
-
-    integration.lastVerifiedAt = Date.now();
-    this.integrationsCache.set(providerType, integration);
-    return integration;
+    await this.integrationManager.initialize();
+    const id = providerType as string;
+    const config = await this.integrationManager.verifyApp(id);
+    return this.mapConfigToProviderIntegration(config);
   }
 
   public async recheckAllIntegrations(): Promise<ProviderIntegration[]> {
-    const types: ProviderType[] = ['chatgpt', 'opencode', 'vscode'];
+    await this.integrationManager.initialize();
+    const configs = this.integrationManager.listConfigs();
     const results: ProviderIntegration[] = [];
-    for (const t of types) {
-      results.push(await this.verifyIntegration(t));
+    for (const c of configs) {
+      const updated = await this.integrationManager.verifyApp(c.id);
+      results.push(this.mapConfigToProviderIntegration(updated));
     }
     return results;
+  }
+
+  public async addIntegration(config: Partial<ProviderIntegration>): Promise<ProviderIntegration> {
+    await this.integrationManager.initialize();
+    const created = await this.integrationManager.addApp(config as Partial<AppIntegrationConfig>);
+    return this.mapConfigToProviderIntegration(created);
+  }
+
+  public async updateIntegration(id: string, updates: Partial<ProviderIntegration>): Promise<ProviderIntegration> {
+    await this.integrationManager.initialize();
+    const updated = await this.integrationManager.updateApp(id, updates as Partial<AppIntegrationConfig>);
+    return this.mapConfigToProviderIntegration(updated);
+  }
+
+  public async deleteIntegration(id: string): Promise<{ success: boolean; error?: string }> {
+    await this.integrationManager.initialize();
+    return this.integrationManager.deleteApp(id);
+  }
+
+  public async toggleIntegrationEnabled(id: string, enabled: boolean): Promise<ProviderIntegration> {
+    await this.integrationManager.initialize();
+    const updated = await this.integrationManager.toggleEnabled(id, enabled);
+    return this.mapConfigToProviderIntegration(updated);
+  }
+
+  public async setDefaultIntegration(id: string, role: 'planner' | 'worker'): Promise<{ success: boolean; error?: string }> {
+    await this.integrationManager.initialize();
+    return this.integrationManager.setDefault(id, role);
+  }
+
+  public async getDefaultPlannerIntegration(): Promise<ProviderIntegration> {
+    const handler = await this.integrationManager.getDefaultPlanner();
+    return this.mapConfigToProviderIntegration(handler.config);
+  }
+
+  public async getDefaultWorkerIntegration(): Promise<ProviderIntegration> {
+    const handler = await this.integrationManager.getDefaultWorker();
+    return this.mapConfigToProviderIntegration(handler.config);
+  }
+
+  public async testIntegration(id: string): Promise<IntegrationTestResult> {
+    await this.integrationManager.initialize();
+    return this.integrationManager.testIntegration(id);
+  }
+
+  public async setProjectIntegrationOverride(
+    projectId: string,
+    override: { plannerIntegrationId?: string | null; workerIntegrationId?: string | null },
+  ): Promise<ProjectIntegrationOverride> {
+    await this.integrationManager.initialize();
+    return this.integrationManager.setProjectOverride(projectId, override);
+  }
+
+  public async getProjectIntegrationOverride(projectId: string): Promise<ProjectIntegrationOverride | null> {
+    await this.integrationManager.initialize();
+    return this.integrationManager.getProjectOverride(projectId) || null;
+  }
+
+  public async listProjectIntegrationOverrides(): Promise<ProjectIntegrationOverride[]> {
+    await this.integrationManager.initialize();
+    return this.integrationManager.listProjectOverrides();
   }
 
   /* --- Worker AI Model Configuration & Application --- */

@@ -168,6 +168,27 @@ export function registerRelayIpcHandlers(service: RelayApiService): void {
   ipcMain.handle(RELAY_IPC_CHANNELS.RECHECK_ALL_INTEGRATIONS, () =>
     service.recheckAllIntegrations(),
   );
+  ipcMain.handle(RELAY_IPC_CHANNELS.ADD_INTEGRATION, (_event, config) =>
+    service.addIntegration(config),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.UPDATE_INTEGRATION, (_event, id, updates) =>
+    service.updateIntegration(id, updates),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.DELETE_INTEGRATION, (_event, id) =>
+    service.deleteIntegration(id),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.TOGGLE_INTEGRATION_ENABLED, (_event, id, enabled) =>
+    service.toggleIntegrationEnabled(id, enabled),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.SET_DEFAULT_INTEGRATION, (_event, id, role) =>
+    service.setDefaultIntegration(id, role),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.GET_DEFAULT_PLANNER_INTEGRATION, () =>
+    service.getDefaultPlannerIntegration(),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.GET_DEFAULT_WORKER_INTEGRATION, () =>
+    service.getDefaultWorkerIntegration(),
+  );
 
   // Worker AI Model Configuration & Application
   ipcMain.handle(RELAY_IPC_CHANNELS.GET_SUPPORTED_MODELS, (_event, providerType) =>

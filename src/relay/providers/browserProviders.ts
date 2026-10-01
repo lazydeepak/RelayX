@@ -208,6 +208,30 @@ export class BrowserOpenCodeProvider extends BaseBrowserProvider {
       },
     };
   }
+
+  async createWorkerSession(workspaceDir: string, name?: string): Promise<{
+    sessionId: string;
+    workspaceDir: string;
+    error?: string;
+  }> {
+    const sessionId = `ses_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    return {
+      sessionId,
+      workspaceDir,
+    };
+  }
+
+  async confirmSessionForProject(sessionId: string, projectPath: string): Promise<{
+    confirmed: boolean;
+    externalSessionId: string;
+    projectPath: string;
+  }> {
+    return {
+      confirmed: true,
+      externalSessionId: sessionId,
+      projectPath,
+    };
+  }
 }
 
 export class BrowserVSCodeProvider extends BaseBrowserProvider {

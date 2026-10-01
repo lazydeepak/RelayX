@@ -75,6 +75,10 @@ import {
   RuntimeInspectionResult,
 } from '../providers/interfaces.ts';
 import {
+  IntegrationRegistry,
+  CapabilityResolver,
+} from '../integrations/index.ts';
+import {
   reconcileTransportOutcome,
   reconstructWatermarkFromIntentTime,
   type ExactSessionWatermark,
@@ -279,7 +283,8 @@ function summariseSide(side: PairSideIdentity): Record<string, unknown> {
 }
 
 export class RelayEngine {
-  private readonly providers: Map<ProviderType, IRuntimeProvider> = new Map();
+  private readonly providers: Map<string, IRuntimeProvider> = new Map();
+  private registry?: IntegrationRegistry;
   private isSupervising = false;
   /**
    * Deterministic verification seam (PLAN_FIRST_DOMAIN_FREEZE.md §G step 10). Defaults to
@@ -292,15 +297,30 @@ export class RelayEngine {
   constructor(
     public readonly repos: IRelayRepositories,
     planFirstVerification?: PlanFirstVerificationEvaluator,
+    registry?: IntegrationRegistry,
   ) {
+    this.registry = registry;
     this.planFirstVerification = planFirstVerification ?? new MilestoneVerification();
+  }
+
+  public setRegistry(registry: IntegrationRegistry): void {
+    this.registry = registry;
   }
 
   public registerProvider(provider: IRuntimeProvider): void {
     this.providers.set(provider.providerType, provider);
   }
 
-  public getProvider(type: ProviderType): IRuntimeProvider {
+  public getProvider(type: string): IRuntimeProvider {
+    // 1. Check registry first (Integration subsystem)
+    if (this.registry) {
+      const integration = this.registry.get(type);
+      if (integration) {
+        return integration.asRuntimeProvider();
+      }
+    }
+
+    // 2. Fallback to manual providers map (Engine core/backwards compat)
     const p = this.providers.get(type);
     if (!p) {
       throw new RelayDomainError(`Provider for type '${type}' not registered`, 'PROVIDER_NOT_REGISTERED');
@@ -698,6 +718,30 @@ export class RelayEngine {
     }
   }
 
+  public isPlannerProvider(providerType: string): boolean {
+    if (this.registry) {
+      const integration = this.registry.get(providerType);
+      if (integration) {
+        return integration.roles.includes('planner') || integration.roles.includes('both');
+      }
+    }
+    // Fallback for untracked providers
+    if (providerType === 'opencode' || providerType === 'vscode') return false;
+    return true;
+  }
+
+  public isWorkerProvider(providerType: string): boolean {
+    if (this.registry) {
+      const integration = this.registry.get(providerType);
+      if (integration) {
+        return integration.roles.includes('worker') || integration.roles.includes('both');
+      }
+    }
+    // Fallback for untracked providers
+    if (providerType === 'chatgpt') return false;
+    return true;
+  }
+
   public async createPair(
     projectId: ProjectId,
     name: string,
@@ -710,7 +754,7 @@ export class RelayEngine {
     if (plannerSessionId) {
       const planner = await this.repos.runtimes.findById(plannerSessionId);
       if (!planner) throw new RelayDomainError('Planner runtime not found', 'RUNTIME_NOT_FOUND');
-      if (planner.providerType !== 'chatgpt') throw new RelayDomainError('Planner session must be ChatGPT', 'INVALID_PLANNER_PROVIDER');
+      if (!this.isPlannerProvider(planner.providerType)) throw new RelayDomainError('Planner session must be ChatGPT', 'INVALID_PLANNER_PROVIDER');
       const existingPairs = await this.repos.pairs.findAll();
       const alreadyPaired = existingPairs.find(
         (p) => p.status !== 'archived' && (p.plannerSessionId === plannerSessionId || p.workerSessionId === plannerSessionId),
@@ -724,7 +768,7 @@ export class RelayEngine {
     if (workerSessionId) {
       const worker = await this.repos.runtimes.findById(workerSessionId);
       if (!worker) throw new RelayDomainError('Worker runtime not found', 'RUNTIME_NOT_FOUND');
-      if (worker.providerType !== 'opencode' && worker.providerType !== 'vscode') throw new RelayDomainError('Worker session must be OpenCode or VS Code', 'INVALID_WORKER_PROVIDER');
+      if (!this.isWorkerProvider(worker.providerType)) throw new RelayDomainError('Worker session must be OpenCode or VS Code', 'INVALID_WORKER_PROVIDER');
       const existingPairs = await this.repos.pairs.findAll();
       const alreadyPaired = existingPairs.find(
         (p) => p.status !== 'archived' && (p.plannerSessionId === workerSessionId || p.workerSessionId === workerSessionId),
@@ -763,7 +807,7 @@ export class RelayEngine {
     if (updates.plannerSessionId) {
       const planner = await this.repos.runtimes.findById(updates.plannerSessionId);
       if (!planner) throw new RelayDomainError('New planner runtime not found', 'RUNTIME_NOT_FOUND');
-      if (planner.providerType !== 'chatgpt') throw new RelayDomainError('Planner session must be ChatGPT', 'INVALID_PLANNER_PROVIDER');
+      if (!this.isPlannerProvider(planner.providerType)) throw new RelayDomainError('Planner session must be ChatGPT', 'INVALID_PLANNER_PROVIDER');
       // Rebinding selects a new session, so it is subject to the same
       // authoritative-evidence gate as initial pairing.
       await this.assertPrePairAuthoritativeAssociation('planner', planner, pair.projectId);
@@ -771,7 +815,7 @@ export class RelayEngine {
     if (updates.workerSessionId) {
       const worker = await this.repos.runtimes.findById(updates.workerSessionId);
       if (!worker) throw new RelayDomainError('New worker runtime not found', 'RUNTIME_NOT_FOUND');
-      if (worker.providerType !== 'opencode' && worker.providerType !== 'vscode') throw new RelayDomainError('Worker session must be OpenCode or VS Code', 'INVALID_WORKER_PROVIDER');
+      if (!this.isWorkerProvider(worker.providerType)) throw new RelayDomainError('Worker session must be OpenCode or VS Code', 'INVALID_WORKER_PROVIDER');
       await this.assertPrePairAuthoritativeAssociation('worker', worker, pair.projectId);
     }
 

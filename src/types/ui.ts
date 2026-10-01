@@ -32,6 +32,7 @@ export type NavTab =
   | 'timeline'
   | 'attention'
   | 'diagnostics'
+  | 'integrations'
   | 'settings';
 
 export interface UIProject {

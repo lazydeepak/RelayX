@@ -649,6 +649,7 @@ describe('S6 closure group I — the provider-contact surface cannot grow silent
       'RelayEngine.ts:detectWorkingState': 'reconcileInFlightPlanFirstUnit via run.sessionPairId',
       'RelayEngine.ts:observeSide': 'S2: pair.isProviderContactPermitted() checked inside observeSide before getProvider is ever resolved',
       'RelayApiService.ts:inspectRuntime': 'engine.assertRuntimeProviderContactPermitted()',
+      'RelayApiService.ts:activateRuntime': 'engine.assertRuntimeProviderContactPermitted()',
     };
     // Exempt by documented classification, not by omission.
     const EXEMPT: Record<string, string> = {

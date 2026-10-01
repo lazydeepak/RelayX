@@ -167,8 +167,32 @@ export interface ProviderRequirementsInfo {
 
 export interface ProviderIntegration {
   providerType: ProviderType;
+  id?: string;
   name: string;
+  description?: string;
   role: 'planner' | 'worker' | 'both';
+  isEnabled?: boolean;
+  isDefaultPlanner?: boolean;
+  isDefaultWorker?: boolean;
+  isBuiltin?: boolean;
+  appType?: 'app_bundle' | 'cli_service' | 'editor' | 'script';
+  appPath?: string;
+  bundleId?: string;
+  processName?: string;
+  windowTitlePattern?: string;
+  serviceUrl?: string;
+  cliCommand?: string;
+  cliArguments?: string[];
+  launchBehavior?: 'open_bundle' | 'launch_url' | 'exec_cli' | 'applescript' | 'service_call';
+  scripts?: {
+    launchScript?: string;
+    createSessionScript?: string;
+    openSessionScript?: string;
+    sendMessageScript?: string;
+    inspectSessionScript?: string;
+    extractSessionScript?: string;
+    verificationScript?: string;
+  };
   status: IntegrationStatus;
   identity: ProviderIdentityInfo;
   requirements: ProviderRequirementsInfo;
@@ -179,6 +203,38 @@ export interface ProviderIntegration {
     message: string;
     details?: Record<string, unknown>;
   };
+  metadata?: Record<string, unknown>;
+  capabilitiesList?: string[];
+  readinessChecklist?: {
+    applicationFound: boolean;
+    accessibilityPermission: boolean;
+    automationPermission: boolean;
+    sessionCreation: boolean;
+    sessionIdentity: boolean;
+    messageSubmission: boolean;
+    observation: boolean;
+  };
+  supportedModels?: string[];
+  automationBreakdown?: Record<string, string>;
+}
+
+export interface IntegrationTestResult {
+  ok: boolean;
+  message: string;
+  durationMs: number;
+  steps: Array<{
+    name: string;
+    passed: boolean;
+    durationMs: number;
+    details?: string;
+  }>;
+}
+
+export interface ProjectIntegrationOverride {
+  projectId: string;
+  plannerIntegrationId?: string | null;
+  workerIntegrationId?: string | null;
+  updatedAt?: number;
 }
 
 export interface IRelayApi {
@@ -339,6 +395,17 @@ export interface IRelayApi {
   listIntegrations(): Promise<ProviderIntegration[]>;
   verifyIntegration(providerType: ProviderType): Promise<ProviderIntegration>;
   recheckAllIntegrations(): Promise<ProviderIntegration[]>;
+  addIntegration(config: Partial<ProviderIntegration>): Promise<ProviderIntegration>;
+  updateIntegration(id: string, updates: Partial<ProviderIntegration>): Promise<ProviderIntegration>;
+  deleteIntegration(id: string): Promise<{ success: boolean; error?: string }>;
+  toggleIntegrationEnabled(id: string, enabled: boolean): Promise<ProviderIntegration>;
+  setDefaultIntegration(id: string, role: 'planner' | 'worker'): Promise<{ success: boolean; error?: string }>;
+  getDefaultPlannerIntegration(): Promise<ProviderIntegration>;
+  getDefaultWorkerIntegration(): Promise<ProviderIntegration>;
+  testIntegration(id: string): Promise<IntegrationTestResult>;
+  setProjectIntegrationOverride(projectId: string, override: { plannerIntegrationId?: string | null; workerIntegrationId?: string | null }): Promise<ProjectIntegrationOverride>;
+  getProjectIntegrationOverride(projectId: string): Promise<ProjectIntegrationOverride | null>;
+  listProjectIntegrationOverrides(): Promise<ProjectIntegrationOverride[]>;
 
   // Worker AI Model Configuration & Application
   getSupportedModels(providerType: ProviderType): Promise<string[]>;

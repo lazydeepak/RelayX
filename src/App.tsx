@@ -8,6 +8,7 @@ import { EventsTimelineView } from './components/EventsTimelineView.tsx';
 import { AttentionRecoveryView } from './components/AttentionRecoveryView.tsx';
 import { SettingsView } from './components/SettingsView.tsx';
 import { DiagnosticsView } from './components/DiagnosticsView.tsx';
+import { IntegrationsView } from './components/IntegrationsView.tsx';
 import { EvidenceModal } from './components/EvidenceModal.tsx';
 import { CreateAssignmentModal } from './components/CreateAssignmentModal.tsx';
 import { ProjectModal, ProjectModalMode } from './components/ProjectModal.tsx';
@@ -622,6 +623,10 @@ export default function App() {
 
             {activeTab === 'diagnostics' && (
               <DiagnosticsView onNotify={notify} />
+            )}
+
+            {activeTab === 'integrations' && (
+              <IntegrationsView onNotify={notify} />
             )}
 
             {activeTab === 'settings' && (

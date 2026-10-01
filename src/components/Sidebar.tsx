@@ -9,6 +9,7 @@ import {
   Stethoscope,
   Settings,
   ShieldCheck,
+  Layers,
 } from 'lucide-react';
 import { NavTab } from '../types/ui.ts';
 
@@ -30,6 +31,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'assignments', label: 'Assignments', icon: ListTodo },
     { id: 'timeline', label: 'Activity Timeline', icon: Activity },
     { id: 'attention', label: 'Attention & Recovery', icon: AlertTriangle, badge: openAttentionCount },
+    { id: 'integrations', label: 'App Integrations', icon: Layers },
     { id: 'diagnostics', label: 'Diagnostics', icon: Stethoscope },
     { id: 'settings', label: 'Engine Settings', icon: Settings },
   ];

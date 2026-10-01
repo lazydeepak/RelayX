@@ -67,6 +67,13 @@ export const RELAY_IPC_CHANNELS = {
   LIST_INTEGRATIONS: 'relay:list-integrations',
   VERIFY_INTEGRATION: 'relay:verify-integration',
   RECHECK_ALL_INTEGRATIONS: 'relay:recheck-all-integrations',
+  ADD_INTEGRATION: 'relay:add-integration',
+  UPDATE_INTEGRATION: 'relay:update-integration',
+  DELETE_INTEGRATION: 'relay:delete-integration',
+  TOGGLE_INTEGRATION_ENABLED: 'relay:toggle-integration-enabled',
+  SET_DEFAULT_INTEGRATION: 'relay:set-default-integration',
+  GET_DEFAULT_PLANNER_INTEGRATION: 'relay:get-default-planner-integration',
+  GET_DEFAULT_WORKER_INTEGRATION: 'relay:get-default-worker-integration',
 
   // Worker AI Model Configuration & Application
   GET_SUPPORTED_MODELS: 'relay:get-supported-models',

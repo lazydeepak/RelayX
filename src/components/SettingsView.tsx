@@ -346,22 +346,35 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </p>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 pt-1">
-              {(['chatgpt', 'opencode', 'vscode'] as ProviderType[]).map((type) => {
-                const integ = integrations.find((i) => i.providerType === type);
+              {integrations.map((integ) => {
+                const type = integ.providerType;
+                const id = integ.id || (type as string);
                 const isVerifyingThis = verifyingType === type;
                 const isVerified = integ?.status === 'verified';
                 const isDegraded = integ?.status === 'degraded';
 
                 return (
                   <div
-                    key={type}
+                    key={id}
                     className="p-4 rounded-xl bg-slate-950 border border-slate-800 flex flex-col justify-between space-y-3"
                   >
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
-                        <span className="font-bold text-slate-200 uppercase text-xs">
-                          {integ?.name || type}
-                        </span>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-bold text-slate-200 uppercase text-xs">
+                            {integ?.name || type}
+                          </span>
+                          {integ?.isDefaultPlanner && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded font-bold bg-blue-600 text-white">
+                              Def Planner
+                            </span>
+                          )}
+                          {integ?.isDefaultWorker && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded font-bold bg-emerald-600 text-white">
+                              Def Worker
+                            </span>
+                          )}
+                        </div>
                         <span
                           className={`text-[9px] px-2 py-0.5 rounded font-bold uppercase border ${
                             isVerified
@@ -386,19 +399,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                           <span className="text-slate-500">Role:</span>
                           <span className="font-mono text-slate-300 capitalize">{integ?.role}</span>
                         </div>
-                        {integ?.identity.bundleId && (
+                        {integ?.identity?.bundleId && (
                           <div className="flex justify-between">
                             <span className="text-slate-500">Bundle ID:</span>
                             <span className="font-mono text-slate-300 truncate max-w-[130px]">{integ.identity.bundleId}</span>
                           </div>
                         )}
-                        {integ?.identity.executable && (
+                        {integ?.identity?.executable && (
                           <div className="flex justify-between">
                             <span className="text-slate-500">Executable:</span>
                             <span className="font-mono text-emerald-400">{integ.identity.executable}</span>
                           </div>
                         )}
-                        {integ?.identity.serviceUrl && (
+                        {integ?.identity?.serviceUrl && (
                           <div className="flex justify-between">
                             <span className="text-slate-500">Socket URL:</span>
                             <span className="font-mono text-blue-400 truncate max-w-[130px]">{integ.identity.serviceUrl}</span>
@@ -410,7 +423,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       <div className="space-y-1">
                         <div className="text-slate-400 font-semibold uppercase text-[9px]">Capabilities</div>
                         <div className="grid grid-cols-2 gap-1 text-[10px]">
-                          {integ && Object.entries(integ.capabilities).map(([capName, isSupported]) => (
+                          {integ && Object.entries(integ.capabilities || {}).map(([capName, isSupported]) => (
                             <div
                               key={capName}
                               className={`px-1.5 py-0.5 rounded text-[10px] flex items-center gap-1 ${

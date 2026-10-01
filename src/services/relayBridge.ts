@@ -530,6 +530,55 @@ export const relayBridge: IRelayApi = {
     return getLocalFallbackService().recheckAllIntegrations();
   },
 
+  addIntegration: async (config) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.addIntegration(config);
+    }
+    return getLocalFallbackService().addIntegration(config);
+  },
+
+  updateIntegration: async (id, updates) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.updateIntegration(id, updates);
+    }
+    return getLocalFallbackService().updateIntegration(id, updates);
+  },
+
+  deleteIntegration: async (id) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.deleteIntegration(id);
+    }
+    return getLocalFallbackService().deleteIntegration(id);
+  },
+
+  toggleIntegrationEnabled: async (id, enabled) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.toggleIntegrationEnabled(id, enabled);
+    }
+    return getLocalFallbackService().toggleIntegrationEnabled(id, enabled);
+  },
+
+  setDefaultIntegration: async (id, role) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.setDefaultIntegration(id, role);
+    }
+    return getLocalFallbackService().setDefaultIntegration(id, role);
+  },
+
+  getDefaultPlannerIntegration: async () => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.getDefaultPlannerIntegration();
+    }
+    return getLocalFallbackService().getDefaultPlannerIntegration();
+  },
+
+  getDefaultWorkerIntegration: async () => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.getDefaultWorkerIntegration();
+    }
+    return getLocalFallbackService().getDefaultWorkerIntegration();
+  },
+
   getSupportedModels: async (providerType) => {
     if (typeof window !== 'undefined' && window.relayApi) {
       return window.relayApi.getSupportedModels(providerType);

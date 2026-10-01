@@ -722,7 +722,7 @@ export type AttentionStatus = 'open' | 'acknowledged' | 'resolved';
 export type RecoveryTier = 'tier_1_deterministic' | 'tier_2_planner_assisted' | 'tier_3_ai_agent';
 
 /** Target provider implementations supported by the Relay architecture. */
-export type ProviderType = 'chatgpt' | 'opencode' | 'vscode' | 'generic_ui';
+export type ProviderType = 'chatgpt' | 'opencode' | 'vscode' | 'generic_ui' | (string & {});
 
 /** Integration capability level of a provider adapter in the current runtime environment. */
 export type ProviderIntegrationStatus = 'real' | 'partial' | 'unsupported';

@@ -183,12 +183,37 @@ export const RuntimeModal: React.FC<RuntimeModalProps> = ({
     setIsSubmitting(true);
     setErrorMessage(null);
     try {
-      const runtime = await relayBridge.adoptOpenCodeSession(discoveryProjectId, sessionId, undefined);
-      onSuccess(`External OpenCode session "${sessionId}" registered and bound to project`);
+      await relayBridge.adoptOpenCodeSession(discoveryProjectId, sessionId, undefined);
+      onSuccess(`External OpenCode session "${sessionId}" adopted and bound to project`);
       if (onRefresh) onRefresh();
       onClose();
     } catch (err: any) {
       setErrorMessage(err.message || 'Adoption failed');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleAdoptChatGPTConversation = async (conv: ChatGPTConversationChoice) => {
+    if (!discoveryProjectId) {
+      setErrorMessage('Select a project before adopting an external conversation');
+      return;
+    }
+    setIsSubmitting(true);
+    setErrorMessage(null);
+    try {
+      const sessionName = `ChatGPT Conversation ${conv.conversationId.slice(0, 8)}`;
+      await relayBridge.registerRuntimeSession(
+        'chatgpt',
+        sessionName,
+        conv.conversationId,
+        discoveryProjectId,
+      );
+      onSuccess(`ChatGPT conversation "${conv.conversationId.slice(0, 8)}…" adopted and bound to project`);
+      if (onRefresh) onRefresh();
+      onClose();
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to adopt conversation');
     } finally {
       setIsSubmitting(false);
     }
@@ -706,9 +731,20 @@ export const RuntimeModal: React.FC<RuntimeModalProps> = ({
                               {conv.url}
                             </p>
                           </div>
-                          <span className="text-[10px] font-semibold text-slate-400 px-2 py-1 bg-slate-900 rounded">
-                            {conv.boundRuntimeId ? 'Bound' : 'Available'}
-                          </span>
+                          {!conv.boundRuntimeId ? (
+                            <button
+                              type="button"
+                              onClick={() => handleAdoptChatGPTConversation(conv)}
+                              disabled={isSubmitting}
+                              className="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-medium text-xs transition-colors shrink-0"
+                            >
+                              Adopt Conversation
+                            </button>
+                          ) : (
+                            <span className="text-[10px] font-semibold text-slate-400 px-2 py-1 bg-slate-900 rounded">
+                              Bound
+                            </span>
+                          )}
                         </div>
                       ))}
                     </div>

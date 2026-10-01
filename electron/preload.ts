@@ -137,6 +137,20 @@ const relayApi: IRelayApi = {
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.VERIFY_INTEGRATION, providerType),
   recheckAllIntegrations: () =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.RECHECK_ALL_INTEGRATIONS),
+  addIntegration: (config: any) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.ADD_INTEGRATION, config),
+  updateIntegration: (id: string, updates: any) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.UPDATE_INTEGRATION, id, updates),
+  deleteIntegration: (id: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.DELETE_INTEGRATION, id),
+  toggleIntegrationEnabled: (id: string, enabled: boolean) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.TOGGLE_INTEGRATION_ENABLED, id, enabled),
+  setDefaultIntegration: (id: string, role: 'planner' | 'worker') =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.SET_DEFAULT_INTEGRATION, id, role),
+  getDefaultPlannerIntegration: () =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_DEFAULT_PLANNER_INTEGRATION),
+  getDefaultWorkerIntegration: () =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_DEFAULT_WORKER_INTEGRATION),
   getSupportedModels: (providerType: ProviderType) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_SUPPORTED_MODELS, providerType),
   getEffectiveModelConfig: (providerType: ProviderType, projectId?: string) =>
