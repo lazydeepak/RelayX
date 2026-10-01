@@ -38,6 +38,9 @@ export function registerRelayIpcHandlers(service: RelayApiService): void {
     service.detachPairRuntime(pairId, role),
   );
   ipcMain.handle(RELAY_IPC_CHANNELS.START_PAIR, (_event, pairId) => service.startPair(pairId));
+  ipcMain.handle(RELAY_IPC_CHANNELS.LOAD_AND_ACTIVATE_PAIR, (_event, pairId) =>
+    service.loadAndActivatePair(pairId),
+  );
   ipcMain.handle(RELAY_IPC_CHANNELS.PAUSE_PAIR, (_event, pairId) => service.pausePair(pairId));
   ipcMain.handle(RELAY_IPC_CHANNELS.RESUME_PAIR, (_event, pairId) => service.resumePair(pairId));
   ipcMain.handle(RELAY_IPC_CHANNELS.STOP_PAIR, (_event, pairId) => service.stopPair(pairId));

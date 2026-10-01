@@ -579,6 +579,34 @@ export const relayBridge: IRelayApi = {
     return getLocalFallbackService().getDefaultWorkerIntegration();
   },
 
+  testIntegration: async (id) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.testIntegration(id);
+    }
+    return getLocalFallbackService().testIntegration(id);
+  },
+
+  setProjectIntegrationOverride: async (projectId, override) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.setProjectIntegrationOverride(projectId, override);
+    }
+    return getLocalFallbackService().setProjectIntegrationOverride(projectId, override);
+  },
+
+  getProjectIntegrationOverride: async (projectId) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.getProjectIntegrationOverride(projectId);
+    }
+    return getLocalFallbackService().getProjectIntegrationOverride(projectId);
+  },
+
+  listProjectIntegrationOverrides: async () => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.listProjectIntegrationOverrides();
+    }
+    return getLocalFallbackService().listProjectIntegrationOverrides();
+  },
+
   getSupportedModels: async (providerType) => {
     if (typeof window !== 'undefined' && window.relayApi) {
       return window.relayApi.getSupportedModels(providerType);

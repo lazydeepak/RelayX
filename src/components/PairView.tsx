@@ -23,6 +23,7 @@ import {
   ChevronDown,
   ChevronUp,
   ExternalLink,
+  Zap,
 } from 'lucide-react';
 import { UIPair, UIProject, UIRuntimeSession, ObservableEvidence } from '../types/ui.ts';
 
@@ -47,6 +48,7 @@ interface PairViewProps {
   onViewEvidence: (ev: ObservableEvidence) => void;
   onOpenSessionDetail: (sessionId: string) => void;
   onActivateRuntime: (sessionId: string) => void;
+  onActivatePair?: (pairId: string) => void;
   onStartPair?: (pairId: string) => void;
   onPausePair?: (pairId: string) => void;
 }
@@ -72,6 +74,7 @@ export const PairView: React.FC<PairViewProps> = ({
   onViewEvidence,
   onOpenSessionDetail,
   onActivateRuntime,
+  onActivatePair,
   onStartPair,
   onPausePair,
 }) => {
@@ -335,6 +338,35 @@ export const PairView: React.FC<PairViewProps> = ({
                       Pair: {pair.status}
                     </span>
 
+                    {/* Operational State Pill */}
+                    <span
+                      className={`px-2 py-0.5 rounded text-[11px] font-mono font-medium flex items-center gap-1.5 ${
+                        pair.operationalState === 'ACTIVE'
+                          ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-800'
+                          : 'bg-amber-950/80 text-amber-300 border border-amber-800'
+                      }`}
+                      title={
+                        pair.operationalState === 'ACTIVE'
+                          ? 'Pair is ACTIVE: provider contact permitted'
+                          : 'Pair is IDLE: provider contact forbidden until activated'
+                      }
+                    >
+                      <span className={`w-1.5 h-1.5 rounded-full ${pair.operationalState === 'ACTIVE' ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+                      {pair.operationalState || 'IDLE'}
+                    </span>
+
+                    {/* Manual Load & Activate Button (Available if pair is IDLE) */}
+                    {pair.operationalState !== 'ACTIVE' && onActivatePair && (
+                      <button
+                        onClick={() => onActivatePair(pair.id)}
+                        className="px-2 py-1 rounded-lg bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-600/40 transition-colors flex items-center gap-1 text-xs font-medium"
+                        title="Load & Activate: verify both runtime sessions and switch operational state to ACTIVE"
+                      >
+                        <Zap className="w-3 h-3 text-amber-400" />
+                        <span className="hidden sm:inline">Activate</span>
+                      </button>
+                    )}
+
                     {/* Pause / Resume buttons */}
                     {pair.status === 'active' && onPausePair && (
                       <button
@@ -350,7 +382,7 @@ export const PairView: React.FC<PairViewProps> = ({
                       <button
                         onClick={() => onStartPair(pair.id)}
                         className="p-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition-colors"
-                        title="Start / Resume Pair"
+                        title="Start / Resume Pair (Auto-activates if IDLE)"
                       >
                         <Play className="w-3.5 h-3.5" />
                       </button>

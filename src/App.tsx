@@ -352,6 +352,12 @@ export default function App() {
     const pair = pairs.find((p) => p.id === pairId);
     if (!pair) return;
     try {
+      // Auto-activate pair if it is IDLE before dispatching work
+      if (pair.operationalState !== 'ACTIVE') {
+        notify('Auto-activating pair (verifying sessions)...');
+        await relayBridge.loadAndActivatePair(pairId);
+      }
+
       // If the pair already has an active assignment, retry/continue through its
       // legal lifecycle rather than silently creating a new one.
       if (pair.activeAssignmentId) {
@@ -368,16 +374,23 @@ export default function App() {
       }
       await loadData();
     } catch (err: any) {
-      notify(`Dispatch error: ${err.message}`);
+      notify(`Dispatch error: ${formatFriendlyError(err)}`);
     }
   };
 
   const formatFriendlyError = (err: any): string => {
     const msg = err?.message || String(err);
-    if (msg.includes('IDLE') || msg.includes('ACTIVE') || msg.includes('DESIGN_FREEZE')) {
-      return 'Pair is currently idle or requires activation. Please click Start/Play to activate the pair before starting execution.';
+    if (
+      msg.includes('PAIR_OPERATIONAL_STATE_IDLE') ||
+      (msg.includes('is IDLE') && msg.includes('Start Pair is execution authority only'))
+    ) {
+      return 'Pair is IDLE and requires both Planner and Worker sessions bound with valid external session IDs before activation.';
     }
-    return msg.replace(/\s*\(freeze\s*§[^)]+\)/gi, '').replace(/RelayDomainError:\s*/gi, '');
+    return msg
+      .replace(/\s*\(freeze\s*§[^)]+\)/gi, '')
+      .replace(/\s*\(DESIGN_FREEZE\s*[^)]+\)/gi, '')
+      .replace(/RelayDomainError:\s*/gi, '')
+      .trim();
   };
 
   const handleActivateRuntime = async (sessionId: string) => {
@@ -393,10 +406,22 @@ export default function App() {
     }
   };
 
+  const handleActivatePair = async (pairId: string) => {
+    try {
+      await relayBridge.loadAndActivatePair(pairId);
+      notify('Pair verified and operational state set to ACTIVE');
+      await loadData();
+    } catch (err: any) {
+      notify(`Activation error: ${formatFriendlyError(err)}`);
+    }
+  };
+
   const handleStartPair = async (pairId: string) => {
     try {
       const pair = pairs.find((p) => p.id === pairId);
-      if (pair && pair.status === 'idle') {
+      // Auto-activate pair if it is not already in ACTIVE operational state
+      if (!pair || pair.operationalState !== 'ACTIVE') {
+        notify('Auto-activating pair (verifying sessions)...');
         await relayBridge.loadAndActivatePair(pairId);
       }
       await relayBridge.startPair(pairId);
@@ -579,6 +604,7 @@ export default function App() {
                 onViewEvidence={(ev) => setSelectedEvidence(ev)}
                 onOpenSessionDetail={handleOpenSessionDetail}
                 onActivateRuntime={handleActivateRuntime}
+                onActivatePair={handleActivatePair}
               />
             )}
 

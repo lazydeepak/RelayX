@@ -17,6 +17,7 @@ export const RELAY_IPC_CHANNELS = {
   REBIND_PAIR_WORKER: 'relay:rebind-pair-worker',
   DETACH_PAIR_RUNTIME: 'relay:detach-pair-runtime',
   START_PAIR: 'relay:start-pair',
+  LOAD_AND_ACTIVATE_PAIR: 'relay:load-and-activate-pair',
   PAUSE_PAIR: 'relay:pause-pair',
   RESUME_PAIR: 'relay:resume-pair',
   STOP_PAIR: 'relay:stop-pair',

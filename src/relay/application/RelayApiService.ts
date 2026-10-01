@@ -403,6 +403,7 @@ export class RelayApiService implements IRelayApi {
         handoffStatus,
         handoffSummary,
         status: pair.status,
+        operationalState: pair.operationalState,
         lastSupervisedAt: pair.lastSupervisedAt,
       });
     }
@@ -644,7 +645,10 @@ export class RelayApiService implements IRelayApi {
   }
 
   public async loadAndActivatePair(pairId: string): Promise<UIPair> {
-    await this.engine.loadAndActivate(pairId as PairId);
+    const result = await this.engine.loadAndActivate(pairId as PairId);
+    if (result.outcome === 'rejected') {
+      throw new Error(`Pair activation rejected: ${result.reason || 'Verification preconditions not met'}`);
+    }
     const p = await this.getPair(pairId);
     if (!p) throw new Error(`Pair ${pairId} not found`);
     return p;

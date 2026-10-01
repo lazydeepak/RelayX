@@ -71,6 +71,7 @@ export interface UIPair {
   handoffStatus?: HandoffStatus;
   handoffSummary?: string;
   status: 'idle' | 'active' | 'paused' | 'recovering' | 'blocked' | 'archived';
+  operationalState?: 'IDLE' | 'ACTIVE';
   lastSupervisedAt?: number;
 }
 
