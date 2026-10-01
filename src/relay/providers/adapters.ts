@@ -3742,27 +3742,35 @@ export class OpenCodeProvider extends BaseMacOSProvider {
       // `spawnSync` is used precisely because it does not throw on a non-zero exit. The
       // exit code is captured as evidence and is never consulted to classify. Instruction
       // text is passed as a single argv element, so it is never shell-interpreted.
-      const runArgs = ['run', '--session', externalId, '--continue', request.instructionText];
-      // The model override is an explicit RelayX provider setting applied to THIS dispatch
-      // only. It is never written to any global config file, and it is recorded in the
-      // evidence so the model that served a delivery is always auditable.
-      const modelOverride = typeof request.modelOverride === 'string' && request.modelOverride.length > 0
-        ? request.modelOverride
-        : null;
-      if (modelOverride) runArgs.splice(1, 0, '--model', modelOverride);
+      // ---- Step 3: the transport via AppleScript GUI injection (activate -> paste instruction -> delay 2s -> Return key) ----
+      const sessionTitle = request.externalSessionId; // or resolved title
+      const procName = this.probeMacOSProcess(this.defaultProcessName).details?.matchedProcessName as string || this.defaultProcessName;
+      const escapedInstruction = escapeAppleScriptStringLiteral(request.instructionText);
 
-      const { spawnSync } = await import('child_process');
-      const run = spawnSync(cliPath, runArgs, {
-        encoding: 'utf8',
-        timeout: 120000,
-        maxBuffer: 8 * 1024 * 1024,
-        cwd: sessionDirFromRecord || process.cwd(),
-      }) as { error?: Error; status?: number | null; stdout?: string; stderr?: string };
+      const guiScript = `
+        tell application "${procName}" to activate
+        delay 0.5
+        tell application "System Events"
+          tell process "${procName}"
+            -- Ensure we are in the session (open session via Cmd+K if needed or assume already active)
+            -- Type or paste instruction into composer
+            set the clipboard to "${escapedInstruction}"
+            keystroke "v" using command down
+            delay 0.8
+            
+            -- Wait 2 sec as requested before pressing return/enter key
+            delay 2.0
+            
+            -- Press Return key to submit
+            key code 36
+          end tell
+        end tell
+        return "ok"
+      `;
 
-      const transportExitCode = typeof run.status === 'number' ? run.status : null;
-      const transportError = run.error
-        ? (run.error.message || String(run.error))
-        : (run.status === null ? 'transport process did not report an exit status' : null);
+      const scriptRes = this.runAppleScript(guiScript, 10000);
+      const transportExitCode = scriptRes.success ? 0 : 1;
+      const transportError = scriptRes.success ? null : (scriptRes.error || 'AppleScript GUI injection failed');
 
       // ---- Step 4: reconcile against the EXACT session, on EVERY exit path ----
       //
