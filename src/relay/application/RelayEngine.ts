@@ -462,9 +462,14 @@ export class RelayEngine {
     }
 
     // 2. Check for active pair state
-    const activePairs = pairs.filter((p) => p.status === 'active' || p.activeAssignmentId);
-    if (activePairs.length > 0) {
-      reasons.push(`Project has ${activePairs.length} pair(s) with active work in progress`);
+    let genuineActivePairsCount = 0;
+    for (const p of pairs) {
+      if (p.status === 'active' || (await this.hasActiveWork(p))) {
+        genuineActivePairsCount++;
+      }
+    }
+    if (genuineActivePairsCount > 0) {
+      reasons.push(`Project has ${genuineActivePairsCount} pair(s) with active work in progress`);
     }
 
     // 3. Check for in-flight attempts, deliveries, handoffs for each project assignment
@@ -796,11 +801,19 @@ export class RelayEngine {
     const pair = await this.repos.pairs.findById(id);
     if (!pair) throw new RelayDomainError(`Pair ${id} not found`, 'NOT_FOUND');
 
-    if (pair.activeAssignmentId && (updates.plannerSessionId !== undefined || updates.workerSessionId !== undefined)) {
-      throw new RelayDomainError(
-        'Cannot rebind runtimes while pair has an active assignment in flight. Pause or complete work first.',
-        'ACTIVE_WORK_GUARD',
-      );
+    if (pair.activeAssignmentId) {
+      const assignment = await this.repos.assignments.findById(pair.activeAssignmentId);
+      if (assignment && ['pending', 'active', 'waiting_for_handoff'].includes(assignment.status)) {
+        if (updates.plannerSessionId !== undefined || updates.workerSessionId !== undefined) {
+          throw new RelayDomainError(
+            'Cannot rebind runtimes while pair has an active assignment in flight. Pause or complete work first.',
+            'ACTIVE_WORK_GUARD',
+          );
+        }
+      } else {
+        pair.clearWork();
+        await this.repos.pairs.save(pair);
+      }
     }
 
     const previousPlanner = pair.plannerSessionId;
@@ -879,7 +892,13 @@ export class RelayEngine {
     const pair = await this.repos.pairs.findById(id);
     if (!pair) throw new RelayDomainError(`Pair ${id} not found`, 'NOT_FOUND');
     if (pair.activeAssignmentId) {
-      throw new RelayDomainError('Cannot archive pair with active assignment in flight. Pause or complete work first.', 'ACTIVE_WORK_GUARD');
+      const assignment = await this.repos.assignments.findById(pair.activeAssignmentId);
+      if (assignment && ['pending', 'active', 'waiting_for_handoff'].includes(assignment.status)) {
+        throw new RelayDomainError('Cannot archive pair with active assignment in flight. Pause or complete work first.', 'ACTIVE_WORK_GUARD');
+      } else {
+        pair.clearWork();
+        await this.repos.pairs.save(pair);
+      }
     }
     // Transactional enough: establish final checkpoint before archive
     await this.createPairCheckpoint(id, 'pair_archive', { summary: 'Final checkpoint prior to pair archive' });
@@ -1317,7 +1336,12 @@ export class RelayEngine {
       (p) => p.plannerSessionId === sessionId || p.workerSessionId === sessionId,
     );
     if (pairsUsingRuntime.length > 0) {
-      const activePairs = pairsUsingRuntime.filter((p) => p.status === 'active' || p.activeAssignmentId);
+      const activePairs: Pair[] = [];
+      for (const p of pairsUsingRuntime) {
+        if (p.status === 'active' || (await this.hasActiveWork(p))) {
+          activePairs.push(p);
+        }
+      }
       if (activePairs.length > 0) {
         reasons.push(`Runtime is currently attached to active pair '${activePairs[0].name}'`);
       } else {
@@ -1346,7 +1370,12 @@ export class RelayEngine {
     const pairs = await this.repos.pairs.findAll();
     const affected = pairs.filter((p) => p.plannerSessionId === sessionId || p.workerSessionId === sessionId);
 
-    const activePairs = affected.filter((p) => p.status === 'active' || p.activeAssignmentId);
+    const activePairs: Pair[] = [];
+    for (const p of affected) {
+      if (p.status === 'active' || (await this.hasActiveWork(p))) {
+        activePairs.push(p);
+      }
+    }
     if (activePairs.length > 0) {
       throw new RelayDomainError(
         `Cannot detach runtime: Pair '${activePairs[0].name}' has active work in progress. Pause or complete work first.`,
@@ -1506,6 +1535,17 @@ export class RelayEngine {
     'failed',
     'cancelled',
   ]);
+
+  private async hasActiveWork(pair: Pair): Promise<boolean> {
+    if (!pair.activeAssignmentId) return false;
+    const assignment = await this.repos.assignments.findById(pair.activeAssignmentId);
+    if (assignment && !RelayEngine.TERMINAL_ASSIGNMENT_STATES.has(assignment.status)) {
+      return true;
+    }
+    pair.clearWork();
+    await this.repos.pairs.save(pair);
+    return false;
+  }
 
   /**
    * Create a new Assignment for a Pair.
@@ -2742,10 +2782,14 @@ export class RelayEngine {
         if (!pair.workerSessionId) continue;
         const worker = await this.repos.runtimes.findById(pair.workerSessionId);
         if (!worker) continue;
+        if (worker.status === 'terminated') continue;
+        if (worker.status === 'suspended' && worker.lastObservedAt && Date.now() - worker.lastObservedAt < 30000) {
+          continue; // Bounded backoff: skip probing recently failed suspended runtimes
+        }
 
         const provider = this.getProvider(worker.providerType);
 
-        // Probe worker runtime state
+        // Probe worker runtime state with fault isolation
         try {
           const inspection = await provider.inspectRuntime(worker.id);
           if (!inspection.found) {

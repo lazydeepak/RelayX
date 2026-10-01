@@ -15,6 +15,19 @@ import {
   describeDiscoveredWorkerChoice,
 } from './pairModalConversation.ts';
 
+const getNextUniqueName = (base: string, existingList: UIRuntimeSession[]): string => {
+  const trimmed = base.trim() || 'Development Session';
+  const existingNames = new Set(existingList.map(r => r.name.toLowerCase()));
+  if (!existingNames.has(trimmed.toLowerCase())) {
+    return trimmed;
+  }
+  let i = 2;
+  while (existingNames.has(`${trimmed} ${i}`.toLowerCase())) {
+    i++;
+  }
+  return `${trimmed} ${i}`;
+};
+
 export type PairModalMode = 'create' | 'edit';
 
 interface PairModalProps {
@@ -44,6 +57,8 @@ export const PairModal: React.FC<PairModalProps> = ({
   const [name, setName] = useState<string>('');
   const [creationMode, setCreationMode] = useState<'automatic' | 'manual'>('automatic');
   const [showAdvancedNaming, setShowAdvancedNaming] = useState<boolean>(false);
+  const [plannerAction, setPlannerAction] = useState<'keep' | 'bind' | 'new'>('new');
+  const [workerAction, setWorkerAction] = useState<'keep' | 'bind' | 'new'>('new');
 
   const [plannerSessionId, setPlannerSessionId] = useState<string>('');
   const [workerSessionId, setWorkerSessionId] = useState<string>('');
@@ -192,9 +207,12 @@ export const PairModal: React.FC<PairModalProps> = ({
       if (mode === 'edit' && pair) {
         setName(pair.name);
         setProjectId(pair.projectId);
+        setPlannerAction('keep');
+        setWorkerAction('keep');
         setPlannerSessionId(pair.plannerSessionId || '');
         setWorkerSessionId(pair.workerSessionId || '');
-        setNewWorkerSessionName(`${pair.name} worker`);
+        setNewPlannerSessionName(getNextUniqueName(pair.name, runtimePool));
+        setNewWorkerSessionName(getNextUniqueName(`${pair.name} worker`, runtimePool));
         setWorkerCreationMessage(null);
         const plannerRuntime = runtimes.find((r) => r.id === pair.plannerSessionId);
         setConversationUrl(plannerRuntime?.externalSessionId || '');
@@ -202,6 +220,8 @@ export const PairModal: React.FC<PairModalProps> = ({
         setName('');
         setCreationMode('automatic');
         setShowAdvancedNaming(false);
+        setPlannerAction('new');
+        setWorkerAction('new');
         setConversationUrl('');
         setConversationConfirmed(false);
         setConversationChoices([]);
@@ -214,8 +234,8 @@ export const PairModal: React.FC<PairModalProps> = ({
         const projectName = activeProjects.find((p) => p.id === defaultProj)?.name;
         const defaultName = projectName ? `${projectName} Development` : 'Development Pair';
         setName(defaultName);
-        setNewPlannerSessionName(defaultName);
-        setNewWorkerSessionName(defaultName);
+        setNewPlannerSessionName(getNextUniqueName(defaultName, runtimePool));
+        setNewWorkerSessionName(getNextUniqueName(defaultName, runtimePool));
         setPlannerSourceMode('new');
         setWorkerSourceMode('new');
         setCreatedPlannerInfo(null);
@@ -310,83 +330,70 @@ export const PairModal: React.FC<PairModalProps> = ({
     setErrorMessage(null);
 
     try {
-      if (mode === 'create') {
-        if (creationMode === 'automatic') {
-          setProvisioningStage('creating_planner');
-          const plannerSessionName = newPlannerSessionName.trim() || name.trim();
-          const workerSessionName = newWorkerSessionName.trim() || name.trim();
+      let finalPlannerId = pair?.plannerSessionId;
+      let finalWorkerId = pair?.workerSessionId;
+      let finalConvUrl = conversationUrl;
 
-          await relayBridge.provisionPairWithNewSessions(
-            projectId,
-            name.trim(),
-            {
-              plannerName: plannerSessionName,
-              workerName: workerSessionName,
-              conversationUrl: conversationUrl.trim() || undefined,
-            },
-          );
-          setProvisioningStage('ready');
-
-          onSuccess(`Session Pair & Sessions "${name.trim()}" created successfully in Automatic mode`);
-          if (onRefresh) onRefresh();
-          onClose();
-          return;
+      if (plannerAction === 'new') {
+        if (createdPlannerInfo) {
+          finalPlannerId = createdPlannerInfo.id;
+          finalConvUrl = createdPlannerInfo.url;
         } else {
-          // Manual mode
-          let finalPlannerId = plannerSessionId;
-          let finalWorkerId = workerSessionId;
-          let finalConvUrl = conversationUrl;
-
-          if (plannerSourceMode === 'new' && !createdPlannerInfo) {
-            const sessionName = newPlannerSessionName.trim() || `${name} Planner`;
-            const plannerRes = await relayBridge.createChatGPTPlannerSession(projectId, sessionName);
-            if (!plannerRes.adopted || !plannerRes.runtime || !plannerRes.conversationId) {
-              throw new Error(plannerRes.error || 'Failed to create authoritative ChatGPT planner session');
-            }
-            finalPlannerId = plannerRes.runtime.id;
-            finalConvUrl = plannerRes.conversationUrl;
-          } else if (plannerSourceMode === 'new' && createdPlannerInfo) {
-            finalPlannerId = createdPlannerInfo.id;
-            finalConvUrl = createdPlannerInfo.url;
+          const sessionName = newPlannerSessionName.trim() || name.trim() || 'Planner';
+          const plannerRes = await relayBridge.createChatGPTPlannerSession(projectId, sessionName);
+          if (!plannerRes.adopted || !plannerRes.runtime || !plannerRes.conversationId) {
+            throw new Error(plannerRes.error || 'Failed to create ChatGPT planner session');
           }
-
-          if (workerSourceMode === 'new' && !createdWorkerInfo) {
-            const sessionName = newWorkerSessionName.trim() || `${name} worker`;
-            const workerRes = await relayBridge.createOpenCodeWorkerSession(projectId, sessionName);
-            if (!workerRes.adopted || !workerRes.runtime || !workerRes.sessionId) {
-              throw new Error(`Failed to create OpenCode worker session: ${workerRes.error || 'unknown error'}`);
-            }
-            finalWorkerId = workerRes.runtime.id;
-          } else if (workerSourceMode === 'new' && createdWorkerInfo) {
-            finalWorkerId = createdWorkerInfo.id;
-          }
-
-          if (!finalPlannerId || !finalWorkerId) {
-            throw new Error('Both planner and worker sessions must be selected or created');
-          }
-          if (finalPlannerId === finalWorkerId) {
-            throw new Error('Planner and worker must be different sessions');
-          }
-
-          await relayBridge.createPair(
-            projectId,
-            name.trim(),
-            finalPlannerId,
-            finalWorkerId,
-            finalConvUrl || undefined,
-          );
-
-          onSuccess(`Pair "${name.trim()}" created successfully in Manual mode`);
+          finalPlannerId = plannerRes.runtime.id;
+          finalConvUrl = plannerRes.conversationUrl;
         }
+      } else if (plannerAction === 'bind') {
+        if (!plannerSessionId) throw new Error('Select an existing planner session');
+        finalPlannerId = plannerSessionId;
+      }
+
+      if (workerAction === 'new') {
+        if (createdWorkerInfo) {
+          finalWorkerId = createdWorkerInfo.id;
+        } else {
+          const sessionName = newWorkerSessionName.trim() || `${name} worker` || 'Worker';
+          const workerRes = await relayBridge.createOpenCodeWorkerSession(projectId, sessionName);
+          if (!workerRes.adopted || !workerRes.runtime || !workerRes.sessionId) {
+            throw new Error(`Failed to create worker session: ${workerRes.error || 'unknown error'}`);
+          }
+          finalWorkerId = workerRes.runtime.id;
+        }
+      } else if (workerAction === 'bind') {
+        if (!workerSessionId) throw new Error('Select an existing worker session');
+        finalWorkerId = workerSessionId;
+      }
+
+      if (!finalPlannerId || !finalWorkerId) {
+        throw new Error('Both planner and worker sessions must be selected or created');
+      }
+      if (finalPlannerId === finalWorkerId) {
+        throw new Error('Planner and worker must be different sessions');
+      }
+
+      if (mode === 'create') {
+        await relayBridge.createPair(
+          projectId,
+          name.trim(),
+          finalPlannerId,
+          finalWorkerId,
+          finalConvUrl || undefined,
+        );
+        onSuccess(`Pair "${name.trim()}" created successfully`);
       } else if (mode === 'edit' && pair) {
         await relayBridge.updatePair(pair.id, {
           name: name.trim(),
-          plannerSessionId: plannerSessionId ? plannerSessionId : null,
-          workerSessionId: workerSessionId ? workerSessionId : null,
+          plannerSessionId: plannerAction === 'keep' ? undefined : finalPlannerId,
+          workerSessionId: workerAction === 'keep' ? undefined : finalWorkerId,
         });
-        if (conversationUrl.trim()) {
+
+        if (finalConvUrl.trim() && plannerAction !== 'keep') {
           try {
-            await relayBridge.updatePlannerConversationUrl(pair.id, conversationUrl.trim());
+            await relayBridge.updatePlannerConversationUrl(pair.id, finalConvUrl.trim());
           } catch (urlErr: any) {
             console.warn('Failed to update planner conversation URL:', urlErr);
           }

@@ -369,7 +369,7 @@ export class RelayApiService implements IRelayApi {
 
       if (pair.activeAssignmentId) {
         const assignment = await this.db.assignments.findById(pair.activeAssignmentId);
-        if (assignment) {
+        if (assignment && ['pending', 'active', 'waiting_for_handoff'].includes(assignment.status)) {
           activeAssignmentTitle = assignment.title;
           activeAssignmentStatus = assignment.status;
 
@@ -384,6 +384,9 @@ export class RelayApiService implements IRelayApi {
             handoffStatus = handoff?.status;
             handoffSummary = handoff?.resultSummary;
           }
+        } else {
+          activeAssignmentTitle = undefined;
+          activeAssignmentStatus = undefined;
         }
       }
 
@@ -1428,7 +1431,7 @@ export class RelayApiService implements IRelayApi {
   }
 
   public async listAttentionItems(): Promise<UIAttentionItem[]> {
-    const items = await this.db.attention.findAll();
+    const items = await this.db.attention.findOpen();
     const result: UIAttentionItem[] = [];
     for (const i of items) {
       let deliveryId: string | undefined;
