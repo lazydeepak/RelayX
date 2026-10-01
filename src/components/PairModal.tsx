@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, GitMerge, Edit3, Trash2, Archive, AlertTriangle, CheckCircle2, Check, Cpu, Unlink, FolderPlus, Plus, MessageSquare, Sliders, Loader2 } from 'lucide-react';
+import { X, GitMerge, Edit3, Trash2, Archive, AlertTriangle, CheckCircle2, Check, Cpu, Unlink, FolderPlus, Plus, MessageSquare, Sliders, Loader2, ExternalLink } from 'lucide-react';
 import { UIPair, UIProject, UIRuntimeSession } from '../types/ui.ts';
 import type { ChatGPTConversationChoice, WorkerChoice } from '../types/relayApi.ts';
 import { relayBridge } from '../services/relayBridge.ts';
@@ -196,6 +196,8 @@ export const PairModal: React.FC<PairModalProps> = ({
         setWorkerSessionId(pair.workerSessionId || '');
         setNewWorkerSessionName(`${pair.name} worker`);
         setWorkerCreationMessage(null);
+        const plannerRuntime = runtimes.find((r) => r.id === pair.plannerSessionId);
+        setConversationUrl(plannerRuntime?.externalSessionId || '');
       } else if (mode === 'create') {
         setName('');
         setCreationMode('automatic');
@@ -320,6 +322,7 @@ export const PairModal: React.FC<PairModalProps> = ({
             {
               plannerName: plannerSessionName,
               workerName: workerSessionName,
+              conversationUrl: conversationUrl.trim() || undefined,
             },
           );
           setProvisioningStage('ready');
@@ -381,6 +384,13 @@ export const PairModal: React.FC<PairModalProps> = ({
           plannerSessionId: plannerSessionId ? plannerSessionId : null,
           workerSessionId: workerSessionId ? workerSessionId : null,
         });
+        if (conversationUrl.trim()) {
+          try {
+            await relayBridge.updatePlannerConversationUrl(pair.id, conversationUrl.trim());
+          } catch (urlErr: any) {
+            console.warn('Failed to update planner conversation URL:', urlErr);
+          }
+        }
         onSuccess(`Pair "${name.trim()}" updated successfully`);
       }
       onClose();
@@ -638,6 +648,36 @@ export const PairModal: React.FC<PairModalProps> = ({
                     <div className="text-[10px] text-emerald-400 font-medium animate-pulse">{getWorkerCardStatus()}</div>
                   </div>
                 </div>
+
+                {/* Optional ChatGPT conversation URL for Automatic Mode */}
+                <div className="pt-2 border-t border-slate-800 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs text-slate-300 font-medium">
+                      Exact ChatGPT Conversation URL (Optional)
+                    </label>
+                    {activeProjects.find((p) => p.id === projectId)?.plannerProjectUrl && (
+                      <a
+                        href={activeProjects.find((p) => p.id === projectId)?.plannerProjectUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[11px] text-blue-400 hover:text-blue-300 flex items-center gap-1 font-medium"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                        <span>Open ChatGPT Project</span>
+                      </a>
+                    )}
+                  </div>
+                  <input
+                    type="text"
+                    value={conversationUrl}
+                    onChange={(e) => setConversationUrl(e.target.value)}
+                    placeholder="https://chatgpt.com/g/g-p-.../c/... or https://chatgpt.com/c/..."
+                    className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-slate-200 text-xs font-mono focus:outline-none focus:border-blue-500"
+                  />
+                  <p className="text-[11px] text-slate-400">
+                    Paste your exact chat URL from your ChatGPT account to bind this pair directly to your real conversation.
+                  </p>
+                </div>
               </div>
             ) : (
               <>
@@ -732,11 +772,24 @@ export const PairModal: React.FC<PairModalProps> = ({
                         ))}
                       </select>
 
-                      {mode === 'create' && (
+                      {(mode === 'create' || mode === 'edit') && (
                         <div className="space-y-2 pt-1 border-t border-slate-800/60">
-                          <label className="block text-[11px] text-slate-300 font-medium">
-                            ChatGPT Conversation URL (Optional if using bound runtime)
-                          </label>
+                          <div className="flex items-center justify-between">
+                            <label className="block text-[11px] text-slate-300 font-medium">
+                              ChatGPT Conversation URL (Exact chat URL in your ChatGPT account)
+                            </label>
+                            {activeProjects.find((p) => p.id === projectId)?.plannerProjectUrl && (
+                              <a
+                                href={activeProjects.find((p) => p.id === projectId)?.plannerProjectUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-[10px] text-blue-400 hover:text-blue-300 flex items-center gap-1 font-medium"
+                              >
+                                <ExternalLink className="w-3 h-3" />
+                                <span>Open Project</span>
+                              </a>
+                            )}
+                          </div>
 
                           {conversationChoices.length > 0 && (
                             <div className="space-y-1">

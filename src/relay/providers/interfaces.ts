@@ -17,6 +17,8 @@ export interface RuntimeTargetDescriptor {
   bundleIdentifier?: string;
   windowTitlePattern?: string;
   processName?: string;
+  externalSessionId?: string | null;
+  runtimeSessionId?: RuntimeSessionId;
 }
 
 export interface RuntimeInspectionResult {
@@ -41,6 +43,7 @@ export interface DeliveryInstructionRequest {
   /** Authoritative provider external session identity (`ses_*` for OpenCode). */
   externalSessionId?: string | null;
   instructionText: string;
+  deliveryId?: string;
   idempotencyKey: string;
   /**
    * The durable dispatch-intent boundary captured from the EXACT target session immediately
@@ -93,6 +96,7 @@ export interface TransportBoundaryResult {
 export interface DeliveryInstructionResult {
   outcome: 'delivered' | 'ambiguous' | 'failed';
   reason?: string;
+  deliveryId?: string;
   evidence: ObservableEvidence;
   /**
    * The post-transport exact-session reconciliation, when the provider was able to read the
@@ -168,7 +172,7 @@ export interface IRuntimeProvider {
   findRuntime(descriptor: RuntimeTargetDescriptor): Promise<RuntimeInspectionResult>;
   findAllRuntimes(): Promise<RuntimeInspectionResult[]>;
   inspectRuntime(sessionId: RuntimeSessionId): Promise<RuntimeInspectionResult>;
-  activateRuntime(sessionId: RuntimeSessionId): Promise<boolean>;
+  activateRuntime(sessionId: RuntimeSessionId, windowTitle?: string): Promise<boolean>;
   deliverInstruction(request: DeliveryInstructionRequest): Promise<DeliveryInstructionResult>;
   /**
    * Optional: read the pre-dispatch boundary of the exact target session.

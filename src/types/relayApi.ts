@@ -10,6 +10,11 @@ import {
   RuntimeSessionStatus,
 } from './ui.ts';
 
+import {
+  IntegrationTestResult,
+  ProjectIntegrationOverride,
+} from '../relay/integrations/types.ts';
+
 export interface DashboardState {
   metrics: {
     totalProjects: number;
@@ -218,25 +223,6 @@ export interface ProviderIntegration {
   automationBreakdown?: Record<string, string>;
 }
 
-export interface IntegrationTestResult {
-  ok: boolean;
-  message: string;
-  durationMs: number;
-  steps: Array<{
-    name: string;
-    passed: boolean;
-    durationMs: number;
-    details?: string;
-  }>;
-}
-
-export interface ProjectIntegrationOverride {
-  projectId: string;
-  plannerIntegrationId?: string | null;
-  workerIntegrationId?: string | null;
-  updatedAt?: number;
-}
-
 export interface IRelayApi {
   getAppStatus(): Promise<AppStatus>;
   getDashboardState(): Promise<DashboardState>;
@@ -275,6 +261,7 @@ export interface IRelayApi {
   rebindPairPlanner(pairId: string, plannerSessionId: string): Promise<UIPair>;
   rebindPairWorker(pairId: string, workerSessionId: string): Promise<UIPair>;
   detachPairRuntime(pairId: string, role: 'planner' | 'worker'): Promise<UIPair>;
+  updatePlannerConversationUrl(pairId: string, conversationUrl: string): Promise<UIPair>;
   startPair(pairId: string): Promise<UIPair>;
   loadAndActivatePair(pairId: string): Promise<UIPair>;
   pausePair(pairId: string): Promise<UIPair>;
@@ -294,6 +281,7 @@ export interface IRelayApi {
   discoverRuntime(providerType: ProviderType): Promise<{ success: boolean; runtime?: UIRuntimeSession; isNew?: boolean; error?: string }>;
   inspectRuntime(sessionId: string): Promise<{ success: boolean; evidence?: ObservableEvidence; error?: string }>;
   activateRuntime(sessionId: string): Promise<boolean>;
+  openRuntimeSession(sessionId: string): Promise<{ success: boolean; url?: string; error?: string }>;
   /**
    * S6 CLOSURE — `error` is populated ONLY when the attempt was refused by the I-2
    * runtime->Pair governance guard (the owning Pair is IDLE, or its ownership is
@@ -376,7 +364,7 @@ export interface IRelayApi {
   provisionPairWithNewSessions(
     projectId: string,
     pairName: string,
-    options?: { plannerName?: string; workerName?: string },
+    options?: { plannerName?: string; workerName?: string; conversationUrl?: string },
   ): Promise<ProvisionPairWithNewSessionsResult>;
   finalizeProjectSetup(setup: {
     name: string;

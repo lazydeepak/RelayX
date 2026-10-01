@@ -206,6 +206,7 @@ export class SqliteRuntimeSessionRepository implements IRuntimeSessionRepository
       archiveReason: row.archive_reason as string | undefined,
       externalSessionId: (row.external_session_id as string | null | undefined) ?? null,
       externalProjectRef: (row.external_project_ref as string | null | undefined) ?? null,
+      sessionUrl: (row.session_url as string | null | undefined) ?? null,
     });
   }
 
@@ -241,8 +242,8 @@ export class SqliteRuntimeSessionRepository implements IRuntimeSessionRepository
       INSERT INTO runtime_sessions (
         id, provider_type, name, bundle_identifier, window_title, application_pid,
         status, consecutive_observation_failures, last_heartbeat_at, last_observed_at,
-        last_evidence_json, archived_at, archive_reason, external_session_id, external_project_ref, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        last_evidence_json, archived_at, archive_reason, external_session_id, external_project_ref, session_url, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         provider_type = excluded.provider_type,
         name = excluded.name,
@@ -258,6 +259,7 @@ export class SqliteRuntimeSessionRepository implements IRuntimeSessionRepository
         archive_reason = excluded.archive_reason,
         external_session_id = excluded.external_session_id,
         external_project_ref = excluded.external_project_ref,
+        session_url = excluded.session_url,
         updated_at = excluded.updated_at
     `);
     stmt.run(
@@ -276,6 +278,7 @@ export class SqliteRuntimeSessionRepository implements IRuntimeSessionRepository
       session.archiveReason ?? null,
       session.externalSessionId ?? null,
       session.externalProjectRef ?? null,
+      session.sessionUrl ?? null,
       session.createdAt,
       session.updatedAt,
     );

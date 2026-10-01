@@ -60,6 +60,7 @@ export interface UIPair {
   plannerName?: string;
   plannerProvider?: ProviderType;
   plannerStatus?: RuntimeSessionStatus;
+  plannerUrl?: string;
   workerName?: string;
   workerProvider?: ProviderType;
   workerStatus?: RuntimeSessionStatus;
@@ -94,6 +95,7 @@ export interface UIRuntimeSession {
   updatedAt?: number;
   externalSessionId?: string | null;
   externalProjectRef?: string | null;
+  sessionUrl?: string | null;
 }
 
 export interface UIAssignment {

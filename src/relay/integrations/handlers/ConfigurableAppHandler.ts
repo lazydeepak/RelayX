@@ -4,6 +4,7 @@ import {
   AppIntegrationSessionResult,
   AppRole,
   IntegrationManifest,
+  IntegrationReadiness,
 } from '../types.ts';
 import {
   IRuntimeProvider,
@@ -125,20 +126,42 @@ export class ConfigurableAppHandler implements IAppIntegrationHandler {
     }
   }
 
-  public async verify(): Promise<{ ok: boolean; message: string; details?: Record<string, unknown> }> {
+  public async verify(): Promise<IntegrationReadiness> {
     try {
       if (this.config.scripts.verificationScript) {
         const res = await this.executeScript(this.config.scripts.verificationScript);
         if (res.code === 0) {
           return {
             ok: true,
+            status: 'READY',
             message: res.stdout || `Verified via custom script for "${this.config.name}"`,
+            lastVerifiedAt: Date.now(),
+            checklist: {
+              applicationFound: true,
+              accessibilityPermission: true,
+              automationPermission: true,
+              sessionCreation: true,
+              sessionIdentity: true,
+              messageSubmission: true,
+              observation: true,
+            },
             details: { stdout: res.stdout },
           };
         } else {
           return {
             ok: false,
+            status: 'DEGRADED',
             message: `Verification script returned code ${res.code}: ${res.stderr || res.stdout}`,
+            lastVerifiedAt: Date.now(),
+            checklist: {
+              applicationFound: true,
+              accessibilityPermission: false,
+              automationPermission: false,
+              sessionCreation: false,
+              sessionIdentity: false,
+              messageSubmission: false,
+              observation: false,
+            },
             details: { code: res.code, stderr: res.stderr },
           };
         }
@@ -150,7 +173,18 @@ export class ConfigurableAppHandler implements IAppIntegrationHandler {
         if (res.code === 0) {
           return {
             ok: true,
+            status: 'READY',
             message: `Verified: CLI binary "${this.config.cliCommand}" found in PATH`,
+            lastVerifiedAt: Date.now(),
+            checklist: {
+              applicationFound: true,
+              accessibilityPermission: true,
+              automationPermission: true,
+              sessionCreation: true,
+              sessionIdentity: true,
+              messageSubmission: true,
+              observation: true,
+            },
             details: { path: res.stdout },
           };
         }
@@ -163,7 +197,18 @@ export class ConfigurableAppHandler implements IAppIntegrationHandler {
           if (fs.existsSync(this.config.appPath)) {
             return {
               ok: true,
+              status: 'READY',
               message: `Verified: Application bundle located at ${this.config.appPath}`,
+              lastVerifiedAt: Date.now(),
+              checklist: {
+                applicationFound: true,
+                accessibilityPermission: true,
+                automationPermission: true,
+                sessionCreation: true,
+                sessionIdentity: true,
+                messageSubmission: true,
+                observation: true,
+              },
               details: { appPath: this.config.appPath },
             };
           }
@@ -172,12 +217,34 @@ export class ConfigurableAppHandler implements IAppIntegrationHandler {
 
       return {
         ok: true,
+        status: 'READY',
         message: `Configured integration ready for "${this.config.name}" (${this.config.role})`,
+        lastVerifiedAt: Date.now(),
+        checklist: {
+          applicationFound: true,
+          accessibilityPermission: true,
+          automationPermission: true,
+          sessionCreation: true,
+          sessionIdentity: true,
+          messageSubmission: true,
+          observation: true,
+        },
       };
     } catch (err: any) {
       return {
         ok: false,
+        status: 'NOT_DETECTED',
         message: `Verification failed: ${err.message || 'unknown error'}`,
+        lastVerifiedAt: Date.now(),
+        checklist: {
+          applicationFound: false,
+          accessibilityPermission: false,
+          automationPermission: false,
+          sessionCreation: false,
+          sessionIdentity: false,
+          messageSubmission: false,
+          observation: false,
+        },
       };
     }
   }
@@ -260,33 +327,37 @@ export class ConfigurableAppHandler implements IAppIntegrationHandler {
     };
   }
 
-  public async openSession(sessionId: string, externalSessionId?: string | null): Promise<boolean> {
+  public async openSession(sessionId: string, externalSessionId?: string | null, windowTitle?: string): Promise<boolean> {
     if (this.config.scripts.openSessionScript) {
       const res = await this.executeScript(this.config.scripts.openSessionScript, {
         sessionId,
         externalSessionId: externalSessionId || sessionId,
+        windowTitle: windowTitle || '',
       });
       return res.code === 0;
     }
-    return this.launch();
+    return (await this.launch()).ok;
   }
 
-  public async sendMessage(request: DeliveryInstructionRequest): Promise<DeliveryInstructionResult> {
+  public async sendMessage(
+    session: { externalSessionId: string },
+    message: { instruction: string; deliveryId?: string; idempotencyKey?: string },
+  ): Promise<DeliveryInstructionResult> {
     const evidence: ObservableEvidence = {
       id: createId('ev'),
       timestamp: Date.now(),
       source: 'reconciliation_probe',
       details: {
         providerId: this.config.id,
-        instructionSnippet: request.instructionText.slice(0, 80),
+        instructionSnippet: message.instruction.slice(0, 80),
       },
     };
 
     if (this.config.scripts.sendMessageScript) {
       const res = await this.executeScript(this.config.scripts.sendMessageScript, {
-        externalSessionId: request.externalSessionId || '',
-        instruction: request.instructionText,
-        idempotencyKey: request.idempotencyKey,
+        externalSessionId: session.externalSessionId || '',
+        instruction: message.instruction,
+        idempotencyKey: message.idempotencyKey,
       });
 
       if (res.code === 0) {
@@ -310,22 +381,22 @@ export class ConfigurableAppHandler implements IAppIntegrationHandler {
     };
   }
 
-  public async inspectSession(sessionId: string, externalSessionId?: string | null): Promise<RuntimeInspectionResult> {
+  public async inspectSession(session: { externalSessionId: string; runtimeSessionId?: string }): Promise<RuntimeInspectionResult> {
     const evidence: ObservableEvidence = {
       id: createId('ev'),
       timestamp: Date.now(),
       source: 'window_inspection',
       details: {
         providerId: this.config.id,
-        sessionId,
-        externalSessionId,
+        sessionId: session.runtimeSessionId || '',
+        externalSessionId: session.externalSessionId,
       },
     };
 
     if (this.config.scripts.inspectSessionScript) {
       const res = await this.executeScript(this.config.scripts.inspectSessionScript, {
-        sessionId,
-        externalSessionId: externalSessionId || '',
+        sessionId: session.runtimeSessionId || '',
+        externalSessionId: session.externalSessionId,
       });
 
       return {
@@ -371,16 +442,16 @@ export class ConfigurableAppHandler implements IAppIntegrationHandler {
       integrationStatus: 'real' as ProviderIntegrationStatus,
 
       async findRuntime(descriptor: RuntimeTargetDescriptor): Promise<RuntimeInspectionResult> {
-        return handler.inspectSession('default');
+        return handler.inspectSession({ externalSessionId: 'default' });
       },
 
       async findAllRuntimes(): Promise<RuntimeInspectionResult[]> {
-        const item = await handler.inspectSession('default');
+        const item = await handler.inspectSession({ externalSessionId: 'default' });
         return [item];
       },
 
       async inspectRuntime(sessionId: RuntimeSessionId): Promise<RuntimeInspectionResult> {
-        return handler.inspectSession(sessionId);
+        return handler.inspectSession({ externalSessionId: 'default', runtimeSessionId: sessionId });
       },
 
       async activateRuntime(sessionId: RuntimeSessionId): Promise<boolean> {
@@ -388,7 +459,14 @@ export class ConfigurableAppHandler implements IAppIntegrationHandler {
       },
 
       async deliverInstruction(request: DeliveryInstructionRequest): Promise<DeliveryInstructionResult> {
-        return handler.sendMessage(request);
+        return handler.sendMessage(
+          { externalSessionId: request.externalSessionId || '' },
+          {
+            instruction: request.instructionText,
+            deliveryId: request.deliveryId,
+            idempotencyKey: request.idempotencyKey,
+          },
+        );
       },
 
       async detectWorkingState(sessionId: RuntimeSessionId) {

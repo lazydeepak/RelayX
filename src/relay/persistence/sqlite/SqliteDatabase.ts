@@ -142,6 +142,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
         archive_reason TEXT,
         external_session_id TEXT,
         external_project_ref TEXT,
+        session_url TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -358,6 +359,7 @@ CREATE TABLE IF NOT EXISTS handoffs (
     addColumnIfNeeded(this.db, 'runtime_sessions', 'archive_reason', 'TEXT');
     addColumnIfNeeded(this.db, 'runtime_sessions', 'external_session_id', 'TEXT');
     addColumnIfNeeded(this.db, 'runtime_sessions', 'external_project_ref', 'TEXT');
+    addColumnIfNeeded(this.db, 'runtime_sessions', 'session_url', 'TEXT');
 
     this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_extern ON runtime_sessions(provider_type, external_session_id) WHERE external_session_id IS NOT NULL;`);
 

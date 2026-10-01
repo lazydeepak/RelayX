@@ -529,17 +529,14 @@ export abstract class BaseMacOSProvider implements IRuntimeProvider {
     };
   }
 
-  async activateRuntime(sessionId: RuntimeSessionId): Promise<boolean> {
+  async activateRuntime(sessionId: RuntimeSessionId, windowTitle?: string): Promise<boolean> {
     if (typeof process === 'undefined' || process.platform !== 'darwin') {
       return false;
     }
 
     try {
-      const { execSync } = require('child_process');
-      execSync(`osascript -e 'tell application "${this.defaultProcessName}" to activate'`, {
-        timeout: 1500,
-      });
-      return true;
+      const res = this.runAppleScript(`tell application "${this.defaultProcessName}" to activate`, 2000);
+      return res.success;
     } catch {
       return false;
     }
@@ -4860,6 +4857,51 @@ export class OpenCodeProvider extends BaseMacOSProvider {
     } catch (err: any) {
       return { submitted: false, error: err?.message ?? String(err) };
     }
+  }
+
+  /**
+   * Overrides BaseMacOSProvider.activateRuntime to implement the specific
+   * Cmd+K session switcher navigation required for opening an existing
+   * OpenCode worker session.
+   */
+  override async activateRuntime(sessionId: RuntimeSessionId, windowTitle?: string): Promise<boolean> {
+    if (typeof process === 'undefined' || process.platform !== 'darwin') {
+      return false;
+    }
+
+    // Phase 10: Targeted session opening via Cmd+K.
+    // Requirement: 1. Activate App. 2. Cmd+K. 3. Type Title. 4. Return.
+    if (windowTitle) {
+      const escapedTitle = escapeAppleScriptStringLiteral(windowTitle);
+      // Try candidate process names to ensure we target the correct one in System Events
+      const procName = this.probeMacOSProcess(this.defaultProcessName).details?.matchedProcessName as string || this.defaultProcessName;
+      
+      const script = `
+        tell application "${procName}" to activate
+        delay 0.5
+        tell application "System Events"
+          tell process "${procName}"
+            -- 1. Command + K for session switcher
+            keystroke "k" using command down
+            delay 0.5
+            
+            -- 2. Type target worker session name
+            keystroke "${escapedTitle}"
+            delay 0.6
+            
+            -- 3. Return to confirm selection and open
+            key code 36
+            delay 0.5
+          end tell
+        end tell
+        return "ok"
+      `;
+      const res = this.runAppleScript(script, 6000);
+      return res.success;
+    }
+
+    // Fallback to simple activation if no title provided (freeze §4.4)
+    return super.activateRuntime(sessionId);
   }
 
   /** CLI-backed confirmation (uses service-authenticated CLI instead of manual Basic). */

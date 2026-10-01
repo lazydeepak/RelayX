@@ -42,7 +42,7 @@ describe('Provider / App Integration & Capability Model', () => {
     const { service } = createTestService();
 
     const integrations = await service.listIntegrations();
-    assert.strictEqual(integrations.length, 3);
+    assert.strictEqual(integrations.length, 4);
 
     const chatgpt = integrations.find((i) => i.providerType === 'chatgpt');
     assert.ok(chatgpt);
@@ -93,7 +93,7 @@ describe('Provider / App Integration & Capability Model', () => {
     assert.ok(initial.status);
 
     const recheckedAll = await service.recheckAllIntegrations();
-    assert.strictEqual(recheckedAll.length, 3);
+    assert.strictEqual(recheckedAll.length, 4);
     for (const integ of recheckedAll) {
       assert.ok(integ.lastVerifiedAt);
       assert.ok(integ.lastVerificationResult);

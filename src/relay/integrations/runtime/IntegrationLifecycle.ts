@@ -1,20 +1,11 @@
 import {
   RelayIntegration,
   IntegrationReadiness,
+  IntegrationTestResult,
 } from '../types.ts';
-import { PermissionManager } from './PermissionManager.ts';
 
-export interface IntegrationTestResult {
-  ok: boolean;
-  message: string;
-  durationMs: number;
-  steps: Array<{
-    name: string;
-    passed: boolean;
-    durationMs: number;
-    details?: string;
-  }>;
-}
+export type { IntegrationTestResult };
+import { PermissionManager } from './PermissionManager.ts';
 
 export class IntegrationLifecycle {
   /**
@@ -106,7 +97,7 @@ export class IntegrationLifecycle {
         });
         steps.push({
           name: 'Session Observation & Status',
-          passed: inspectRes.status !== 'unsupported',
+          passed: inspectRes.found,
           durationMs: Date.now() - step4Start,
           details: `Observed status: ${inspectRes.status}, PID: ${inspectRes.applicationPid ?? 'Running'}`,
         });

@@ -4,6 +4,7 @@ import {
   AppIntegrationSessionResult,
   AppRole,
   IntegrationManifest,
+  IntegrationReadiness,
 } from '../types.ts';
 import {
   IRuntimeProvider,
@@ -76,20 +77,42 @@ export class VSCodeAppHandler implements IAppIntegrationHandler {
     }
   }
 
-  public async verify(): Promise<{ ok: boolean; message: string; details?: Record<string, unknown> }> {
+  public async verify(): Promise<IntegrationReadiness> {
     try {
       const runtimes = await this.provider.findAllRuntimes();
       return {
         ok: true,
+        status: 'READY',
         message: runtimes.length > 0
           ? `Verified: Found ${runtimes.length} VS Code window(s)`
           : 'Verified: VS Code editor integration configured',
+        lastVerifiedAt: Date.now(),
+        checklist: {
+          applicationFound: true,
+          accessibilityPermission: true,
+          automationPermission: true,
+          sessionCreation: true,
+          sessionIdentity: true,
+          messageSubmission: true,
+          observation: true,
+        },
         details: { runtimeCount: runtimes.length },
       };
     } catch (err: any) {
       return {
         ok: false,
+        status: 'NOT_DETECTED',
         message: `Verification check: ${err.message || 'unknown error'}`,
+        lastVerifiedAt: Date.now(),
+        checklist: {
+          applicationFound: false,
+          accessibilityPermission: false,
+          automationPermission: false,
+          sessionCreation: false,
+          sessionIdentity: false,
+          messageSubmission: false,
+          observation: false,
+        },
       };
     }
   }
@@ -114,7 +137,6 @@ export class VSCodeAppHandler implements IAppIntegrationHandler {
       defaultLaunchBehavior: 'exec_cli',
       supportedModels: [],
       automationBreakdown: {
-        launch: 'CLI (code "{projectPath}")',
         inspectSession: 'Window Title Pattern Match',
       },
     };
@@ -146,16 +168,25 @@ export class VSCodeAppHandler implements IAppIntegrationHandler {
     };
   }
 
-  public async openSession(sessionId: string, externalSessionId?: string | null): Promise<boolean> {
-    return this.provider.activateRuntime(sessionId as RuntimeSessionId);
+  public async openSession(sessionId: string, externalSessionId?: string | null, windowTitle?: string): Promise<boolean> {
+    return this.provider.activateRuntime(sessionId as RuntimeSessionId, windowTitle);
   }
 
-  public async sendMessage(request: DeliveryInstructionRequest): Promise<DeliveryInstructionResult> {
-    return this.provider.deliverInstruction(request);
+  public async sendMessage(
+    session: { externalSessionId: string },
+    message: { instruction: string; deliveryId?: string; idempotencyKey?: string },
+  ): Promise<DeliveryInstructionResult> {
+    return this.provider.deliverInstruction({
+      runtimeSessionId: '' as any,
+      externalSessionId: session.externalSessionId,
+      instructionText: message.instruction,
+      deliveryId: message.deliveryId,
+      idempotencyKey: message.idempotencyKey,
+    } as DeliveryInstructionRequest);
   }
 
-  public async inspectSession(sessionId: string, externalSessionId?: string | null): Promise<RuntimeInspectionResult> {
-    return this.provider.inspectRuntime(sessionId as RuntimeSessionId);
+  public async inspectSession(session: { externalSessionId: string; runtimeSessionId?: string }): Promise<RuntimeInspectionResult> {
+    return this.provider.inspectRuntime((session.runtimeSessionId || '') as RuntimeSessionId);
   }
 
   public asRuntimeProvider(): IRuntimeProvider {

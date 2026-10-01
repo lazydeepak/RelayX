@@ -19,7 +19,7 @@ test('Integration Architecture & App Handlers Suite', async (t) => {
     await mgr.initialize();
 
     const configs = mgr.listConfigs();
-    assert.equal(configs.length, 3);
+    assert.equal(configs.length, 4);
 
     const chatgpt = configs.find((c) => c.id === 'chatgpt');
     assert.ok(chatgpt);

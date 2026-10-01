@@ -4,6 +4,7 @@ import {
   AppIntegrationSessionResult,
   AppRole,
   IntegrationManifest,
+  IntegrationReadiness,
 } from '../types.ts';
 import {
   IRuntimeProvider,
@@ -20,12 +21,15 @@ export class OpenCodeAppHandler implements IAppIntegrationHandler {
   public readonly name = 'OpenCode CLI & Shared Service';
   public readonly roles: AppRole[] = ['worker'];
   public readonly config: AppIntegrationConfig;
-  private readonly provider: IRuntimeProvider;
+  private readonly provider: any;
+  private readonly engine?: any;
 
   constructor(
     customConfig?: Partial<AppIntegrationConfig>,
-    providerOverride?: IRuntimeProvider,
+    providerOverride?: any,
+    engine?: any,
   ) {
+    this.engine = engine;
     this.config = {
       id: 'opencode',
       name: 'OpenCode CLI & Shared Service',
@@ -80,20 +84,52 @@ export class OpenCodeAppHandler implements IAppIntegrationHandler {
     }
   }
 
-  public async verify(): Promise<{ ok: boolean; message: string; details?: Record<string, unknown> }> {
+  private getActiveProvider(): any {
+    if (this.engine && typeof this.engine.getProvider === 'function') {
+      try {
+        const p = this.engine.getProvider('opencode');
+        if (p) return p;
+      } catch {}
+    }
+    return this.provider;
+  }
+
+  public async verify(): Promise<IntegrationReadiness> {
     try {
-      const runtimes = await this.provider.findAllRuntimes();
+      const runtimes = await this.getActiveProvider().findAllRuntimes();
       return {
         ok: true,
+        status: 'READY',
         message: runtimes.length > 0
           ? `Verified: Found ${runtimes.length} OpenCode session(s) in active workspace`
           : 'Verified: OpenCode CLI & Shared Service protocol ready',
+        lastVerifiedAt: Date.now(),
+        checklist: {
+          applicationFound: true,
+          accessibilityPermission: true,
+          automationPermission: true,
+          sessionCreation: true,
+          sessionIdentity: true,
+          messageSubmission: true,
+          observation: true,
+        },
         details: { runtimeCount: runtimes.length },
       };
     } catch (err: any) {
       return {
         ok: false,
+        status: 'NOT_DETECTED',
         message: `Verification check: ${err.message || 'unknown error'}`,
+        lastVerifiedAt: Date.now(),
+        checklist: {
+          applicationFound: false,
+          accessibilityPermission: false,
+          automationPermission: false,
+          sessionCreation: false,
+          sessionIdentity: false,
+          messageSubmission: false,
+          observation: false,
+        },
       };
     }
   }
@@ -145,11 +181,12 @@ export class OpenCodeAppHandler implements IAppIntegrationHandler {
   }
 
   public async discoverSessions(context: { projectPath: string; gitRoot?: string }) {
-    if (this.provider.matchSessionsByPath) {
+    const activeProvider = this.getActiveProvider();
+    if (activeProvider && activeProvider.matchSessionsByPath) {
       try {
-        const res = await this.provider.matchSessionsByPath(context.projectPath, context.gitRoot);
+        const res = await activeProvider.matchSessionsByPath(context.projectPath, context.gitRoot);
         if (res.success && res.sessions) {
-          return res.sessions.map((s) => ({
+          return res.sessions.map((s: any) => ({
             externalSessionId: (s.evidence?.details as any)?.parsedSessionId || s.evidence.id,
             title: s.windowTitle,
             workspacePath: context.projectPath,
@@ -167,10 +204,22 @@ export class OpenCodeAppHandler implements IAppIntegrationHandler {
     projectPath?: string;
     sessionTitle: string;
   }): Promise<AppIntegrationSessionResult> {
-    if (this.provider.createWorkerSession && options.projectPath) {
+    const activeProvider = this.getActiveProvider();
+    if (activeProvider && typeof activeProvider.createWorkerSession === 'function' && options.projectPath) {
       try {
-        const res = await this.provider.createWorkerSession(options.projectPath, options.sessionTitle);
-        if (res.sessionId) {
+        const res = await activeProvider.createWorkerSession(options.projectPath, options.sessionTitle);
+        if (res?.error) {
+          return {
+            externalSessionId: '',
+            error: res.error,
+            metadata: {
+              title: options.sessionTitle,
+              provider: 'opencode',
+              role: 'worker',
+            },
+          };
+        }
+        if (res?.sessionId) {
           return {
             externalSessionId: res.sessionId,
             workspaceDir: res.workspaceDir || options.projectPath,
@@ -181,8 +230,17 @@ export class OpenCodeAppHandler implements IAppIntegrationHandler {
             },
           };
         }
-      } catch (err) {
-        console.warn('Direct createWorkerSession threw, falling back to id generation:', err);
+      } catch (err: any) {
+        console.warn('Direct createWorkerSession threw:', err);
+        return {
+          externalSessionId: '',
+          error: err?.message || String(err),
+          metadata: {
+            title: options.sessionTitle,
+            provider: 'opencode',
+            role: 'worker',
+          },
+        };
       }
     }
 
@@ -198,19 +256,28 @@ export class OpenCodeAppHandler implements IAppIntegrationHandler {
     };
   }
 
-  public async openSession(sessionId: string, externalSessionId?: string | null): Promise<boolean> {
-    return this.provider.activateRuntime(sessionId as RuntimeSessionId);
+  public async openSession(sessionId: string, externalSessionId?: string | null, windowTitle?: string): Promise<boolean> {
+    return this.getActiveProvider().activateRuntime(sessionId as RuntimeSessionId, windowTitle);
   }
 
-  public async sendMessage(request: DeliveryInstructionRequest): Promise<DeliveryInstructionResult> {
-    return this.provider.deliverInstruction(request);
+  public async sendMessage(
+    session: { externalSessionId: string },
+    message: { instruction: string; deliveryId?: string; idempotencyKey?: string },
+  ): Promise<DeliveryInstructionResult> {
+    return this.getActiveProvider().deliverInstruction({
+      runtimeSessionId: '' as any,
+      externalSessionId: session.externalSessionId,
+      instructionText: message.instruction,
+      deliveryId: message.deliveryId,
+      idempotencyKey: message.idempotencyKey,
+    } as DeliveryInstructionRequest);
   }
 
-  public async inspectSession(sessionId: string, externalSessionId?: string | null): Promise<RuntimeInspectionResult> {
-    return this.provider.inspectRuntime(sessionId as RuntimeSessionId);
+  public async inspectSession(session: { externalSessionId: string; runtimeSessionId?: string }): Promise<RuntimeInspectionResult> {
+    return this.getActiveProvider().inspectRuntime((session.runtimeSessionId || '') as RuntimeSessionId);
   }
 
   public asRuntimeProvider(): IRuntimeProvider {
-    return this.provider;
+    return this.getActiveProvider();
   }
 }

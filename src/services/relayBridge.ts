@@ -185,6 +185,15 @@ export const relayBridge: IRelayApi = {
     return getLocalFallbackService().detachPairRuntime(pairId, role);
   },
 
+  updatePlannerConversationUrl: async (pairId: string, conversationUrl: string) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return (window.relayApi as any).updatePlannerConversationUrl
+        ? (window.relayApi as any).updatePlannerConversationUrl(pairId, conversationUrl)
+        : getLocalFallbackService().updatePlannerConversationUrl(pairId, conversationUrl);
+    }
+    return getLocalFallbackService().updatePlannerConversationUrl(pairId, conversationUrl);
+  },
+
   startPair: async (pairId: string) => {
     if (typeof window !== 'undefined' && window.relayApi) {
       return window.relayApi.startPair(pairId);
@@ -286,6 +295,13 @@ export const relayBridge: IRelayApi = {
       return window.relayApi.activateRuntime(sessionId);
     }
     return getLocalFallbackService().activateRuntime(sessionId);
+  },
+
+  openRuntimeSession: async (sessionId: string) => {
+    if (typeof window !== 'undefined' && (window.relayApi as any)?.openRuntimeSession) {
+      return (window.relayApi as any).openRuntimeSession(sessionId);
+    }
+    return getLocalFallbackService().openRuntimeSession(sessionId);
   },
 
   recoverRuntime: async (sessionId: string) => {
@@ -459,7 +475,7 @@ export const relayBridge: IRelayApi = {
   provisionPairWithNewSessions: async (
     projectId: string,
     pairName: string,
-    options?: { plannerName?: string; workerName?: string },
+    options?: { plannerName?: string; workerName?: string; conversationUrl?: string },
   ) => {
     if (typeof window !== 'undefined' && window.relayApi) {
       return window.relayApi.provisionPairWithNewSessions(projectId, pairName, options);

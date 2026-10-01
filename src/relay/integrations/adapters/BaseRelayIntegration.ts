@@ -14,7 +14,7 @@ import {
   RuntimeTargetDescriptor,
 } from '../../providers/interfaces.ts';
 import { PermissionManager } from '../runtime/PermissionManager.ts';
-import { RuntimeSessionId } from '../../domain/types.ts';
+import { RuntimeSessionId, ProviderType, ProviderIntegrationStatus } from '../../domain/types.ts';
 
 export abstract class BaseRelayIntegration implements RelayIntegration {
   public abstract readonly id: string;
@@ -79,13 +79,10 @@ export abstract class BaseRelayIntegration implements RelayIntegration {
    */
   public asRuntimeProvider(): IRuntimeProvider {
     const self = this;
-    const providerType = (self.config.providerType || self.id) as any;
+    const providerType = (self.id) as ProviderType;
     return {
       providerType,
-      integrationStatus: (self.config.status === 'verified' ? 'verified' : self.config.status === 'degraded' ? 'partial' : 'unsupported') as any,
-      defaultBundleId: self.config.bundleId,
-      defaultProcessName: self.config.processName,
-      defaultWindowTitle: self.config.windowTitlePattern,
+      integrationStatus: (self.config.status === 'verified' ? 'verified' : self.config.status === 'degraded' ? 'partial' : 'not_detected') as any,
 
       async findRuntime(target: RuntimeTargetDescriptor): Promise<RuntimeInspectionResult> {
         return self.inspectSession({
@@ -96,19 +93,27 @@ export abstract class BaseRelayIntegration implements RelayIntegration {
 
       async findAllRuntimes(): Promise<RuntimeInspectionResult[]> {
         const inspected = await self.inspectSession({ externalSessionId: '' });
-        return inspected.status !== 'unsupported' ? [inspected] : [];
+        return inspected.status !== 'unknown' ? [inspected] : [];
+      },
+
+      async inspectRuntime(sessionId: RuntimeSessionId): Promise<RuntimeInspectionResult> {
+        return self.inspectSession({ externalSessionId: '', runtimeSessionId: sessionId });
+      },
+
+      async activateRuntime(sessionId: RuntimeSessionId): Promise<boolean> {
+        return self.openSession(sessionId);
       },
 
       async deliverInstruction(request: DeliveryInstructionRequest): Promise<DeliveryInstructionResult> {
         return self.sendMessage(
           { externalSessionId: request.externalSessionId ?? '' },
-          { instruction: request.instruction, deliveryId: request.deliveryId, idempotencyKey: request.idempotencyKey },
+          { instruction: request.instructionText, deliveryId: request.deliveryId, idempotencyKey: request.idempotencyKey },
         );
       },
 
       async detectWorkingState(sessionId: RuntimeSessionId) {
         const obs = await self.inspectSession({ externalSessionId: '', runtimeSessionId: sessionId });
-        return { isWorking: obs.status === 'busy', evidence: obs.evidence };
+        return { isWorking: obs.status === 'working', evidence: obs.evidence };
       },
 
       async detectCompletionState(sessionId: RuntimeSessionId) {

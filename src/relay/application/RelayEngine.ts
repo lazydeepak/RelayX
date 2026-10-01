@@ -312,7 +312,13 @@ export class RelayEngine {
   }
 
   public getProvider(type: string): IRuntimeProvider {
-    // 1. Check registry first (Integration subsystem)
+    // 1. Check explicit engine providers map first (e.g. test harness or custom registered providers)
+    const p = this.providers.get(type);
+    if (p) {
+      return p;
+    }
+
+    // 2. Fallback to integration registry
     if (this.registry) {
       const integration = this.registry.get(type);
       if (integration) {
@@ -320,12 +326,7 @@ export class RelayEngine {
       }
     }
 
-    // 2. Fallback to manual providers map (Engine core/backwards compat)
-    const p = this.providers.get(type);
-    if (!p) {
-      throw new RelayDomainError(`Provider for type '${type}' not registered`, 'PROVIDER_NOT_REGISTERED');
-    }
-    return p;
+    throw new RelayDomainError(`Provider for type '${type}' not registered`, 'PROVIDER_NOT_REGISTERED');
   }
 
   /* --- Event Helper --- */
@@ -542,16 +543,17 @@ export class RelayEngine {
     bundleIdentifier?: string,
     externalSessionId?: string,
     externalProjectRef?: string,
+    sessionUrl?: string,
   ): Promise<RuntimeSession> {
     const runtime = RuntimeSession.create(providerType, name, bundleIdentifier);
-    if (externalSessionId || externalProjectRef) {
-      runtime.updateExternalIdentity(externalSessionId, externalProjectRef);
+    if (externalSessionId || externalProjectRef || sessionUrl) {
+      runtime.updateExternalIdentity(externalSessionId, externalProjectRef, sessionUrl);
     }
     await this.repos.runtimes.save(runtime);
     await this.emitEvent('runtime', runtime.id, 'runtime.registered', {
       actor: 'engine',
       newState: runtime.status,
-      details: { name, providerType, bundleIdentifier, externalSessionId, externalProjectRef },
+      details: { name, providerType, bundleIdentifier, externalSessionId, externalProjectRef, sessionUrl },
     });
     return runtime;
   }
@@ -2646,7 +2648,7 @@ export class RelayEngine {
         await this.emitEvent('pair', pair.id, 'pair.assignment_slot_adopted', {
           actor: 'recovery',
           previousState: 'idle',
-          newState: 'active',
+          newState: pair.status,
           details: {
             adoptedAssignmentId: remaining[0].id,
             reason: 'Exactly one unresolved Assignment remained, so it was adopted unambiguously.',
@@ -2914,12 +2916,13 @@ export class RelayEngine {
     const pair = await this.repos.pairs.findById(assignment.pairId);
     if (pair && pair.plannerSessionId) {
       const plannerSession = await this.repos.runtimes.findById(pair.plannerSessionId);
-      if (plannerSession && plannerSession.externalSessionId) {
+      const effectiveSessionId = plannerSession?.externalSessionId || plannerSession?.sessionUrl;
+      if (plannerSession && effectiveSessionId) {
         try {
           const provider = this.getProvider(plannerSession.providerType);
           const deliveryResult = await provider.deliverInstruction({
             runtimeSessionId: plannerSession.id,
-            externalSessionId: plannerSession.externalSessionId,
+            externalSessionId: effectiveSessionId,
             instructionText: `Handoff result for assignment: ${handoff.resultSummary}`,
             idempotencyKey: `planner_delivery_${handoff.id}_${Date.now()}`,
           });
@@ -2983,7 +2986,7 @@ export class RelayEngine {
       handoff,
       outcome: 'unverified',
       reason:
-        'Exact Planner conversation transport requires a bound Planner RuntimeSession with an authoritative external session ID (`externalSessionId`). None found for this handoff pair.',
+        'Exact Planner conversation transport requires a bound Planner RuntimeSession with an authoritative external session ID (`externalSessionId`) or exact session URL. None found for this handoff pair.',
       externalContactAttempted: false,
     };
 

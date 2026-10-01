@@ -36,7 +36,12 @@ import { RuntimeSession, Project, RuntimeProjectAssociation } from '../domain/en
 import { IRelayRepositories } from '../persistence/interfaces.ts';
 import { RelayEngine } from './RelayEngine.ts';
 import { relayDiagnostics } from './RelayDiagnostics.ts';
-import { IntegrationManager, AppIntegrationConfig } from '../integrations/index.ts';
+import {
+  IntegrationManager,
+  AppIntegrationConfig,
+  IntegrationTestResult,
+  ProjectIntegrationOverride,
+} from '../integrations/index.ts';
 import {
   IRelayApi,
   DashboardState,
@@ -382,6 +387,22 @@ export class RelayApiService implements IRelayApi {
         }
       }
 
+      let plannerUrl: string | undefined;
+      if (planner) {
+        if (planner.sessionUrl) {
+          plannerUrl = planner.sessionUrl;
+        } else if (planner.externalSessionId?.startsWith('http')) {
+          plannerUrl = planner.externalSessionId;
+        } else if (planner.externalSessionId && planner.providerType === 'chatgpt') {
+          const projectRef = planner.externalProjectRef || project?.plannerProjectUrl || '';
+          const match = projectRef.match(/(?:^|\/g\/)(g-p-[^/?#]+)/i);
+          const slug = match ? match[1] : null;
+          plannerUrl = slug
+            ? `https://chatgpt.com/g/${slug}/c/${planner.externalSessionId}`
+            : `https://chatgpt.com/c/${planner.externalSessionId}`;
+        }
+      }
+
       result.push({
         id: pair.id,
         projectId: pair.projectId,
@@ -392,6 +413,7 @@ export class RelayApiService implements IRelayApi {
         plannerName: planner?.name ?? (pair.plannerSessionId ? 'Planner' : 'Unassigned'),
         plannerProvider: planner?.providerType ?? 'chatgpt',
         plannerStatus: planner?.status ?? (pair.plannerSessionId ? 'unknown' : 'unavailable'),
+        plannerUrl,
         workerName: worker?.name ?? (pair.workerSessionId ? 'Worker' : 'Unassigned'),
         workerProvider: worker?.providerType ?? 'opencode',
         workerStatus: worker?.status ?? (pair.workerSessionId ? 'unknown' : 'unavailable'),
@@ -508,7 +530,19 @@ export class RelayApiService implements IRelayApi {
         throw new Error('plannerConversationUrl requires a selected ChatGPT planner runtime');
       }
       if (!proj) throw new Error('Project not found');
-      const parsed = parseChatGPTConversationUrl(plannerConversationUrl);
+      let parsed = parseChatGPTConversationUrl(plannerConversationUrl);
+      if (!parsed) {
+        try {
+          const u = new URL(plannerConversationUrl.trim());
+          if (u.hostname === 'chatgpt.com' || u.hostname.endsWith('.chatgpt.com')) {
+            const cMatch = u.pathname.match(/^\/c\/([^/?#]+)\/?$/);
+            const projSlug = normalizeChatRef(proj.plannerProjectUrl ?? null);
+            if (cMatch && cMatch[1] && projSlug) {
+              parsed = { projectId: projSlug, conversationId: cMatch[1] };
+            }
+          }
+        } catch {}
+      }
       if (!parsed) {
         throw new Error(
           `Invalid ChatGPT conversation URL '${plannerConversationUrl}': expected chatgpt.com/g/<g-p-project>/c/<conversationId>`,
@@ -572,6 +606,7 @@ export class RelayApiService implements IRelayApi {
         planner.updateExternalIdentity(
           conversationBinding.conversationId,
           `https://chatgpt.com/g/${conversationBinding.projectId}/project`,
+          plannerConversationUrl,
         );
         await this.db.runtimes.save(planner);
 
@@ -632,6 +667,52 @@ export class RelayApiService implements IRelayApi {
 
   public async detachPairRuntime(pairId: string, role: 'planner' | 'worker'): Promise<UIPair> {
     const pair = await this.engine.detachPairRuntime(pairId as PairId, role);
+    const populated = await this.getPair(pair.id);
+    if (!populated) throw new Error(`Pair ${pairId} not found`);
+    return populated;
+  }
+
+  public async updatePlannerConversationUrl(
+    pairId: string,
+    conversationUrl: string,
+  ): Promise<UIPair> {
+    const pair = await this.db.pairs.findById(pairId as PairId);
+    if (!pair) throw new Error(`Pair ${pairId} not found`);
+    if (!pair.plannerSessionId) throw new Error(`Pair ${pairId} has no planner session bound`);
+
+    const planner = await this.db.runtimes.findById(pair.plannerSessionId);
+    if (!planner) throw new Error(`Planner runtime ${pair.plannerSessionId} not found`);
+
+    const trimmedUrl = conversationUrl.trim();
+    if (!trimmedUrl) throw new Error('Conversation URL cannot be empty');
+
+    const proj = await this.db.projects.findById(pair.projectId);
+    const projectRef = proj?.plannerProjectUrl || undefined;
+
+    // Extract conversationId if it is a URL or accept direct ID
+    let conversationId = trimmedUrl;
+    const cMatch = trimmedUrl.match(/\/c\/([^/?#]+)/i);
+    if (cMatch) {
+      conversationId = cMatch[1];
+    }
+
+    const exactSessionUrl = trimmedUrl.startsWith('http')
+      ? trimmedUrl
+      : projectRef?.match(/(?:^|\/g\/)(g-p-[^/?#]+)/i)
+        ? `https://chatgpt.com/g/${projectRef.match(/(?:^|\/g\/)(g-p-[^/?#]+)/i)![1]}/c/${conversationId}`
+        : `https://chatgpt.com/c/${conversationId}`;
+    planner.updateExternalIdentity(conversationId, projectRef, exactSessionUrl);
+    await this.db.runtimes.save(planner);
+
+    // Record verified association evidence
+    await this.recordAssociationEvidence(
+      planner.id,
+      pair.projectId,
+      conversationId,
+      planner.providerType,
+      'adoption',
+    );
+
     const populated = await this.getPair(pair.id);
     if (!populated) throw new Error(`Pair ${pairId} not found`);
     return populated;
@@ -809,6 +890,7 @@ export class RelayApiService implements IRelayApi {
         lastEvidence: r.lastEvidence,
         externalSessionId: r.externalSessionId,
         externalProjectRef: r.externalProjectRef,
+        sessionUrl: r.sessionUrl ?? (r.externalSessionId?.startsWith('http') ? r.externalSessionId : undefined),
         createdAt: r.createdAt,
         updatedAt: r.updatedAt,
       };
@@ -820,6 +902,7 @@ export class RelayApiService implements IRelayApi {
     name: string,
     identityOrBundleId?: string,
     projectId?: string,
+    sessionUrl?: string,
   ): Promise<UIRuntimeSession> {
     let bundleId: string | undefined;
     let externalSessionId: string | undefined;
@@ -845,12 +928,15 @@ export class RelayApiService implements IRelayApi {
       }
     }
 
+    const resolvedSessionUrl = sessionUrl ?? (externalSessionId?.startsWith('http') ? externalSessionId : undefined);
+
     const runtime = await this.engine.registerRuntimeSession(
       providerType,
       name,
       bundleId,
       externalSessionId,
       projectRef,
+      resolvedSessionUrl,
     );
 
     if (projectId) {
@@ -1046,12 +1132,63 @@ export class RelayApiService implements IRelayApi {
     }
 
     try {
+      const handler = await this.integrationManager.getHandler(runtime.providerType);
+      if (handler && typeof handler.openSession === 'function') {
+        const targetUrl = runtime.sessionUrl || runtime.externalSessionId;
+        // Phase 10: pass runtime.name as windowTitle for targeted Cmd+K opening
+        await handler.openSession(runtime.id, targetUrl, runtime.name);
+      }
+    } catch {}
+
+    try {
       const provider = this.engine.getProvider(runtime.providerType);
       if (provider && typeof provider.activateRuntime === 'function') {
-        return await provider.activateRuntime(runtime.id as RuntimeSessionId);
+        return await provider.activateRuntime(runtime.id as RuntimeSessionId, runtime.name);
       }
     } catch {}
     return false;
+  }
+
+  public async openRuntimeSession(sessionId: string): Promise<{ success: boolean; url?: string; error?: string }> {
+    const runtime = await this.db.runtimes.findById(sessionId as RuntimeSessionId);
+    if (!runtime) return { success: false, error: 'Session not found' };
+
+    let exactUrl = runtime.sessionUrl;
+    if (!exactUrl && runtime.externalSessionId?.startsWith('http')) {
+      exactUrl = runtime.externalSessionId;
+    }
+    if (!exactUrl && runtime.providerType === 'chatgpt') {
+      const ext = runtime.externalSessionId?.trim();
+      const projRef = runtime.externalProjectRef;
+      const match = projRef?.match(/(?:^|\/g\/)(g-p-[^/?#]+)/i);
+      const slug = match ? match[1] : null;
+      if (ext && slug) {
+        exactUrl = `https://chatgpt.com/g/${slug}/c/${ext}`;
+      } else if (ext) {
+        exactUrl = `https://chatgpt.com/c/${ext}`;
+      }
+    }
+
+    if (!exactUrl && runtime.providerType === 'chatgpt') {
+      return {
+        success: false,
+        error: 'Opening planner session is not supported: exact session URL is not supplied',
+      };
+    }
+
+    try {
+      const handler = await this.integrationManager.getHandler(runtime.providerType);
+      if (handler && typeof handler.openSession === 'function') {
+        await handler.openSession(runtime.id, exactUrl || runtime.externalSessionId);
+      }
+      const provider = this.engine.getProvider(runtime.providerType);
+      if (provider && typeof provider.activateRuntime === 'function') {
+        await provider.activateRuntime(runtime.id as RuntimeSessionId);
+      }
+      return { success: true, url: exactUrl || undefined };
+    } catch (err: any) {
+      return { success: false, url: exactUrl || undefined, error: err.message || String(err) };
+    }
   }
 
   /**
@@ -2015,7 +2152,7 @@ export class RelayApiService implements IRelayApi {
           ? provider.canonicalizeChatGPTProjectUrl(creationRes.conversationUrl)
           : null) ?? `https://chatgpt.com/g/${parsed.projectId}/project`;
 
-      runtime.updateExternalIdentity(creationRes.conversationId, canonicalProjectUrl);
+      runtime.updateExternalIdentity(creationRes.conversationId, canonicalProjectUrl, creationRes.conversationUrl);
       await this.db.runtimes.save(runtime);
 
       // Record authoritative adoption evidence
@@ -2051,7 +2188,7 @@ export class RelayApiService implements IRelayApi {
   public async provisionPairWithNewSessions(
     projectId: string,
     pairName: string,
-    options?: { plannerName?: string; workerName?: string },
+    options?: { plannerName?: string; workerName?: string; conversationUrl?: string },
   ): Promise<ProvisionPairWithNewSessionsResult> {
     const title = pairName.trim();
     if (!title) {
@@ -2080,17 +2217,25 @@ export class RelayApiService implements IRelayApi {
       projectPath: proj.canonicalPath,
       projectUrl: proj.plannerProjectUrl,
       sessionTitle: plannerSessionName,
-    });
+      conversationUrl: options?.conversationUrl,
+    } as any);
     if (pRes.error || !pRes.externalSessionId) {
       throw new Error(pRes.error || `Failed to create session with default planner "${plannerHandler.config.name}"`);
     }
 
+    const plannerExternalIdentity = pRes.externalSessionId;
     const pRuntime = await this.registerRuntimeSession(
       plannerHandler.config.id as ProviderType,
       plannerSessionName,
-      pRes.externalSessionId,
+      plannerExternalIdentity,
       projectId,
+      pRes.sessionUrl,
     );
+    const pEntity = await this.db.runtimes.findById(pRuntime.id as RuntimeSessionId);
+    if (pEntity) {
+      pEntity.updateExternalIdentity(pRes.externalSessionId, pEntity.externalProjectRef, pRes.sessionUrl);
+      await this.db.runtimes.save(pEntity);
+    }
     await this.recordAssociationEvidence(
       pRuntime.id as RuntimeSessionId,
       projectId as ProjectId,
@@ -2098,7 +2243,10 @@ export class RelayApiService implements IRelayApi {
       plannerHandler.config.id as ProviderType,
       'adoption',
     );
-    plannerRuntime = pRuntime;
+    plannerRuntime = {
+      ...pRuntime,
+      sessionUrl: pRes.sessionUrl,
+    };
     conversationUrl = pRes.sessionUrl;
 
     // Create worker session using resolved default worker's handler

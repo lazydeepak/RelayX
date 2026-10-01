@@ -374,13 +374,20 @@ export class Pair {
 
   public assignWork(assignmentId: AssignmentId): void {
     this.activeAssignmentId = assignmentId;
-    this.status = 'active';
+    // Manual Pause and Archived states must be authoritative.
+    // Background assignment or reconciliation must not reactivate a manually paused or archived pair (I-10).
+    if (this.status !== 'paused' && this.status !== 'archived') {
+      this.status = 'active';
+    }
     this.updatedAt = Date.now();
   }
 
   public clearWork(): void {
     this.activeAssignmentId = undefined;
-    this.status = 'idle';
+    // Manual Pause and Archived states must be authoritative.
+    if (this.status !== 'paused' && this.status !== 'archived') {
+      this.status = 'idle';
+    }
     this.updatedAt = Date.now();
   }
 
@@ -418,6 +425,7 @@ export interface RuntimeSessionProps {
   archiveReason?: string;
   externalSessionId?: string | null;
   externalProjectRef?: string | null;
+  sessionUrl?: string | null;
 }
 
 export class RuntimeSession {
@@ -456,6 +464,7 @@ export class RuntimeSession {
   public archiveReason?: string;
   public externalSessionId?: string | null;
   public externalProjectRef?: string | null;
+  public sessionUrl?: string | null;
 
   constructor(props: RuntimeSessionProps) {
     this.id = props.id;
@@ -475,6 +484,7 @@ export class RuntimeSession {
     this.archiveReason = props.archiveReason;
     this.externalSessionId = props.externalSessionId ?? null;
     this.externalProjectRef = props.externalProjectRef ?? null;
+    this.sessionUrl = props.sessionUrl ?? (props.externalSessionId?.startsWith('http') ? props.externalSessionId : null);
   }
 
   public static create(
@@ -550,9 +560,15 @@ export class RuntimeSession {
   public updateExternalIdentity(
     externalSessionId?: string | null,
     externalProjectRef?: string | null,
+    sessionUrl?: string | null,
   ): void {
     if (externalSessionId !== undefined) this.externalSessionId = externalSessionId;
     if (externalProjectRef !== undefined) this.externalProjectRef = externalProjectRef;
+    if (sessionUrl !== undefined) {
+      this.sessionUrl = sessionUrl;
+    } else if (externalSessionId && (externalSessionId.startsWith('http://') || externalSessionId.startsWith('https://'))) {
+      this.sessionUrl = externalSessionId;
+    }
     this.updatedAt = Date.now();
   }
 

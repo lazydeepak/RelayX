@@ -52,8 +52,8 @@ export class IntegrationManager {
       }
     } else {
       // Seed default baseline integrations (ChatGPT, OpenCode, VSCode, Claude Desktop)
-      const chatgpt = new ChatGPTAppHandler();
-      const opencode = new OpenCodeAppHandler();
+      const chatgpt = new ChatGPTAppHandler(undefined, undefined, this.engine);
+      const opencode = new OpenCodeAppHandler(undefined, undefined, this.engine);
       const vscode = new VSCodeAppHandler();
       const claude = new ClaudeDesktopAdapter();
 
@@ -85,9 +85,9 @@ export class IntegrationManager {
   private instantiateAndRegister(cfg: AppIntegrationConfig): IAppIntegrationHandler {
     let handler: IAppIntegrationHandler;
     if (cfg.id === 'chatgpt') {
-      handler = new ChatGPTAppHandler(cfg);
+      handler = new ChatGPTAppHandler(cfg, undefined, this.engine);
     } else if (cfg.id === 'opencode') {
-      handler = new OpenCodeAppHandler(cfg);
+      handler = new OpenCodeAppHandler(cfg, undefined, this.engine);
     } else if (cfg.id === 'vscode') {
       handler = new VSCodeAppHandler(cfg);
     } else if (cfg.id === 'claude_desktop') {

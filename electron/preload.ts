@@ -73,6 +73,8 @@ const relayApi: IRelayApi = {
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.INSPECT_RUNTIME, sessionId),
   activateRuntime: (sessionId: string) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.ACTIVATE_RUNTIME, sessionId),
+  openRuntimeSession: (sessionId: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.OPEN_RUNTIME_SESSION, sessionId),
   recoverRuntime: (sessionId: string) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.RECOVER_RUNTIME, sessionId),
   detachRuntime: (sessionId: string) =>
@@ -152,6 +154,16 @@ const relayApi: IRelayApi = {
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_DEFAULT_PLANNER_INTEGRATION),
   getDefaultWorkerIntegration: () =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_DEFAULT_WORKER_INTEGRATION),
+  updatePlannerConversationUrl: (pairId: string, url: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.UPDATE_PLANNER_CONVERSATION_URL, pairId, url),
+  testIntegration: (id: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.TEST_INTEGRATION, id),
+  setProjectIntegrationOverride: (projectId: string, override: any) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.SET_PROJECT_INTEGRATION_OVERRIDE, projectId, override),
+  getProjectIntegrationOverride: (projectId: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_PROJECT_INTEGRATION_OVERRIDE, projectId),
+  listProjectIntegrationOverrides: () =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.LIST_PROJECT_INTEGRATION_OVERRIDES),
   getSupportedModels: (providerType: ProviderType) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_SUPPORTED_MODELS, providerType),
   getEffectiveModelConfig: (providerType: ProviderType, projectId?: string) =>

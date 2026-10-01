@@ -30,6 +30,7 @@ export const RELAY_IPC_CHANNELS = {
   DISCOVER_RUNTIME: 'relay:discover-runtime',
   INSPECT_RUNTIME: 'relay:inspect-runtime',
   ACTIVATE_RUNTIME: 'relay:activate-runtime',
+  OPEN_RUNTIME_SESSION: 'relay:open-runtime-session',
   RECOVER_RUNTIME: 'relay:recover-runtime',
   DETACH_RUNTIME: 'relay:detach-runtime',
   ARCHIVE_RUNTIME_SESSION: 'relay:archive-runtime-session',
@@ -75,6 +76,11 @@ export const RELAY_IPC_CHANNELS = {
   SET_DEFAULT_INTEGRATION: 'relay:set-default-integration',
   GET_DEFAULT_PLANNER_INTEGRATION: 'relay:get-default-planner-integration',
   GET_DEFAULT_WORKER_INTEGRATION: 'relay:get-default-worker-integration',
+  UPDATE_PLANNER_CONVERSATION_URL: 'relay:update-planner-conversation-url',
+  TEST_INTEGRATION: 'relay:test-integration',
+  SET_PROJECT_INTEGRATION_OVERRIDE: 'relay:set-project-integration-override',
+  GET_PROJECT_INTEGRATION_OVERRIDE: 'relay:get-project-integration-override',
+  LIST_PROJECT_INTEGRATION_OVERRIDES: 'relay:list-project-integration-overrides',
 
   // Worker AI Model Configuration & Application
   GET_SUPPORTED_MODELS: 'relay:get-supported-models',

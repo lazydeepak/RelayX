@@ -24,6 +24,7 @@ import {
   ChevronUp,
   ExternalLink,
   Zap,
+  Link2,
 } from 'lucide-react';
 import { UIPair, UIProject, UIRuntimeSession, ObservableEvidence } from '../types/ui.ts';
 
@@ -49,8 +50,48 @@ interface PairViewProps {
   onOpenSessionDetail: (sessionId: string) => void;
   onActivateRuntime: (sessionId: string) => void;
   onActivatePair?: (pairId: string) => void;
+  onUpdatePlannerUrl?: (pairId: string, url: string) => Promise<void>;
   onStartPair?: (pairId: string) => void;
   onPausePair?: (pairId: string) => void;
+}
+
+export function resolvePlannerSessionUrl(
+  session?: UIRuntimeSession | null,
+  project?: UIProject | null,
+): string | null {
+  if (!session) return null;
+  if (session.sessionUrl?.trim()) return session.sessionUrl.trim();
+  const extId = session.externalSessionId?.trim();
+
+  if (session.providerType === 'chatgpt') {
+    if (extId && (extId.startsWith('http://') || extId.startsWith('https://'))) {
+      return extId;
+    }
+    const projectRef = session.externalProjectRef || project?.plannerProjectUrl || '';
+    const match = projectRef.match(/(?:^|\/g\/)(g-p-[^/?#]+)/i);
+    const slug = match ? match[1] : null;
+
+    if (extId) {
+      if (slug) {
+        return `https://chatgpt.com/g/${slug}/c/${extId}`;
+      }
+      return `https://chatgpt.com/c/${extId}`;
+    }
+
+    if (slug) {
+      return `https://chatgpt.com/g/${slug}`;
+    }
+    if (projectRef && (projectRef.startsWith('http://') || projectRef.startsWith('https://'))) {
+      return projectRef;
+    }
+    return null;
+  }
+
+  if (extId && (extId.startsWith('http://') || extId.startsWith('https://'))) {
+    return extId;
+  }
+
+  return null;
 }
 
 export const PairView: React.FC<PairViewProps> = ({
@@ -75,6 +116,7 @@ export const PairView: React.FC<PairViewProps> = ({
   onOpenSessionDetail,
   onActivateRuntime,
   onActivatePair,
+  onUpdatePlannerUrl,
   onStartPair,
   onPausePair,
 }) => {
@@ -288,6 +330,8 @@ export const PairView: React.FC<PairViewProps> = ({
             const isExpanded = Boolean(expandedPairs[pair.id]);
             const plannerSession = sessions.find((s) => s.id === pair.plannerSessionId);
             const workerSession = sessions.find((s) => s.id === pair.workerSessionId);
+            const pairProject = projects.find((p) => p.id === pair.projectId);
+            const plannerUrl = resolvePlannerSessionUrl(plannerSession, pairProject);
 
             return (
               <div
@@ -479,22 +523,31 @@ export const PairView: React.FC<PairViewProps> = ({
                               {pair.plannerStatus || 'unassigned'}
                             </span>
                             {pair.plannerSessionId && (
-                              <button
-                                onClick={() => {
-                                  const extId = plannerSession?.externalSessionId;
-                                  if (extId) {
-                                    const chatUrl = extId.startsWith('http') ? extId : `https://chatgpt.com/c/${extId}`;
-                                    window.open(chatUrl, '_blank');
-                                  } else {
-                                    alert('No authoritative external conversation ID bound to this planner');
-                                  }
-                                }}
-                                className="px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-semibold flex items-center gap-1 transition-colors"
-                                title="Open exact attached ChatGPT conversation in browser"
-                              >
-                                <ExternalLink className="w-3 h-3" />
-                                <span>Open</span>
-                              </button>
+                              plannerUrl ? (
+                                <a
+                                  href={plannerUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={() => {
+                                    onActivateRuntime(pair.plannerSessionId!);
+                                  }}
+                                  className="px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-semibold flex items-center gap-1 transition-colors"
+                                  title={`Open exact attached ChatGPT conversation: ${plannerUrl}`}
+                                >
+                                  <ExternalLink className="w-3 h-3" />
+                                  <span>Open</span>
+                                </a>
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled
+                                  className="px-2 py-0.5 rounded bg-slate-800 text-slate-500 text-[10px] font-semibold flex items-center gap-1 cursor-not-allowed"
+                                  title="No exact session URL or conversation ID recorded for this planner"
+                                >
+                                  <ExternalLink className="w-3 h-3" />
+                                  <span>Open</span>
+                                </button>
+                              )
                             )}
                             {pair.plannerSessionId && (
                               <button
@@ -523,10 +576,22 @@ export const PairView: React.FC<PairViewProps> = ({
                         </div>
                         <div className="flex items-center justify-between text-xs text-slate-400">
                           <span>Provider: <span className="font-mono text-slate-300">{pair.plannerProvider || 'None'}</span></span>
-                          {plannerSession?.externalSessionId && (
+                          {plannerUrl ? (
+                            <a
+                              href={plannerUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="font-mono text-[10px] text-purple-300 hover:text-purple-200 underline truncate max-w-[200px]"
+                              title={`Exact conversation URL: ${plannerUrl}`}
+                            >
+                              {plannerUrl}
+                            </a>
+                          ) : plannerSession?.externalSessionId ? (
                             <span className="font-mono text-[10px] text-purple-300 truncate max-w-[180px]" title={plannerSession.externalSessionId}>
                               {plannerSession.externalSessionId}
                             </span>
+                          ) : (
+                            <span className="text-[10px] text-amber-400/80 italic">No exact URL</span>
                           )}
                         </div>
                       </div>
@@ -553,16 +618,23 @@ export const PairView: React.FC<PairViewProps> = ({
                             </span>
                             {pair.workerSessionId && (
                               <button
+                                type="button"
                                 onClick={() => {
-                                  const sesId = workerSession?.externalSessionId;
-                                  if (sesId) {
+                                  if (workerSession?.externalSessionId) {
                                     onActivateRuntime(pair.workerSessionId!);
-                                  } else {
-                                    alert('No authoritative OpenCode session ID bound to this worker');
                                   }
                                 }}
-                                className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-semibold flex items-center gap-1 transition-colors"
-                                title="Open / focus exact attached OpenCode ses_* session"
+                                disabled={!workerSession?.externalSessionId}
+                                className={`px-2 py-0.5 rounded text-white text-[10px] font-semibold flex items-center gap-1 transition-colors ${
+                                  workerSession?.externalSessionId
+                                    ? 'bg-emerald-600 hover:bg-emerald-500'
+                                    : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                                }`}
+                                title={
+                                  workerSession?.externalSessionId
+                                    ? `Open / focus exact attached OpenCode session (${workerSession.externalSessionId})`
+                                    : 'No authoritative OpenCode session ID bound to this worker'
+                                }
                               >
                                 <ExternalLink className="w-3 h-3" />
                                 <span>Open</span>

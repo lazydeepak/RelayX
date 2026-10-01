@@ -252,6 +252,7 @@ export interface RelayIntegration {
     projectUrl?: string;
     sessionTitle: string;
     bootstrapPrompt?: string;
+    conversationUrl?: string;
   }): Promise<AppIntegrationSessionResult>;
   renameSession?(session: { externalSessionId: string }, title: string): Promise<void>;
   sendMessage(
@@ -263,8 +264,20 @@ export interface RelayIntegration {
   asRuntimeProvider(): IRuntimeProvider;
 }
 
+export interface IntegrationTestResult {
+  ok: boolean;
+  message: string;
+  durationMs: number;
+  steps: Array<{
+    name: string;
+    passed: boolean;
+    durationMs: number;
+    details?: string;
+  }>;
+}
+
 export interface IAppIntegrationHandler extends RelayIntegration {
-  openSession(sessionId: string, externalSessionId?: string | null): Promise<boolean>;
+  openSession(sessionId: string, externalSessionId?: string | null, windowTitle?: string): Promise<boolean>;
 }
 
 /** Pre-configured templates for quick app onboarding via + Add App */
