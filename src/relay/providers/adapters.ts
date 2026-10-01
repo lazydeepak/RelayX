@@ -4869,8 +4869,8 @@ export class OpenCodeProvider extends BaseMacOSProvider {
       return false;
     }
 
-    // Phase 10: Targeted session opening via Cmd+K.
-    // Requirement: 1. Activate App. 2. Cmd+K. 3. Type Title. 4. Return.
+    // Phase 10: Targeted session opening via Cmd+B then Cmd+K.
+    // Requirement: 1. Activate App. 2. Cmd+B (normalize to Home). 3. Cmd+K (session switcher). 4. Type Title. 5. Return.
     if (windowTitle) {
       const escapedTitle = escapeAppleScriptStringLiteral(windowTitle);
       // Try candidate process names to ensure we target the correct one in System Events
@@ -4881,15 +4881,19 @@ export class OpenCodeProvider extends BaseMacOSProvider {
         delay 0.5
         tell application "System Events"
           tell process "${procName}"
-            -- 1. Command + K for session switcher
+            -- 1. Command + B to normalize to Home / sidebar view
+            keystroke "b" using command down
+            delay 0.3
+
+            -- 2. Command + K for session switcher
             keystroke "k" using command down
             delay 0.5
             
-            -- 2. Type target worker session name
+            -- 3. Type target worker session name
             keystroke "${escapedTitle}"
             delay 0.6
             
-            -- 3. Return to confirm selection and open
+            -- 4. Return to confirm selection and open
             key code 36
             delay 0.5
           end tell
