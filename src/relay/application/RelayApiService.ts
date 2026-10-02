@@ -69,6 +69,13 @@ import {
   UIRuntimeSession,
   UIAssignment,
   UIEvent,
+  UIFilteredEventsResult,
+  UIActivityRecord,
+  ArchivePolicy,
+  ClearLogsResult,
+  StorageAccounting,
+  AuditExportBundle,
+  AuxiliaryLogInfo,
   UIAttentionItem,
   ObservableEvidence,
   ProviderType,
@@ -85,6 +92,7 @@ import {
   createId,
   RUNTIME_PAIR_NOT_ACTIVE,
   RUNTIME_PAIR_OWNERSHIP_AMBIGUOUS,
+  EventFilterOptions,
 } from '../domain/types.ts';
 import path from 'node:path';
 
@@ -1410,12 +1418,8 @@ export class RelayApiService implements IRelayApi {
     return { success: true };
   }
 
-  public async listEvents(limit = 50, resourceId?: string): Promise<UIEvent[]> {
-    const events = resourceId
-      ? await this.db.events.findByResourceId(resourceId)
-      : await this.db.events.findRecent(limit);
-
-    return events.map((e) => ({
+  private mapEventToUI(e: any): UIEvent {
+    return {
       id: e.id,
       timestamp: e.timestamp,
       resourceType: e.resourceType,
@@ -1427,7 +1431,357 @@ export class RelayApiService implements IRelayApi {
       correlationId: e.correlationId,
       evidence: e.evidence,
       details: e.details,
+      severity: e.severity,
+      area: e.area,
+      outcome: e.outcome,
+      isArchived: e.isArchived,
+    };
+  }
+
+  public async listEvents(limit = 50, resourceId?: string): Promise<UIEvent[]> {
+    const events = resourceId
+      ? await this.db.events.findByResourceId(resourceId)
+      : await this.db.events.findRecent(limit);
+
+    return events.map((e) => this.mapEventToUI(e));
+  }
+
+  public async queryEvents(options: EventFilterOptions): Promise<UIFilteredEventsResult> {
+    const result = await this.db.events.findFiltered(options);
+    return {
+      events: result.events.map((e) => this.mapEventToUI(e)),
+      total: result.total,
+      offset: options.offset ?? 0,
+      limit: options.limit ?? result.events.length,
+    };
+  }
+
+  public async listActivities(limit = 100): Promise<UIActivityRecord[]> {
+    if (!this.db.activities) return [];
+    const records = await this.db.activities.findAll(limit);
+    return records.map((r) => ({
+      id: r.id,
+      timestamp: r.timestamp,
+      title: r.title,
+      summary: r.summary,
+      category: r.category,
+      status: r.status,
+      resourceType: r.resourceType,
+      resourceId: r.resourceId,
+      correlationId: r.correlationId,
+      evidence: r.evidence,
+      details: r.details,
     }));
+  }
+
+  public async runArchiveCycle(): Promise<{ archivedCount: number; cutoffTimestamp: number; interval: string }> {
+    return this.engine.runArchiveCycle();
+  }
+
+  public async getArchivePolicy(): Promise<ArchivePolicy> {
+    const setting = await this.engine.getProviderSetting('policy:archiveInterval');
+    const interval = setting?.value ?? '7d';
+    let days: number | null = 7;
+    if (interval === 'none') {
+      days = null;
+    } else if (interval.endsWith('d')) {
+      const parsed = parseInt(interval, 10);
+      days = !isNaN(parsed) && parsed > 0 ? parsed : 7;
+    } else if (interval.endsWith('h')) {
+      const parsed = parseInt(interval, 10);
+      days = !isNaN(parsed) && parsed > 0 ? parsed / 24 : 7;
+    }
+    return {
+      interval,
+      effectiveRetentionDays: days,
+      note: setting?.note ?? null,
+      updatedAt: setting?.updatedAt,
+    };
+  }
+
+  public async setArchivePolicy(interval: string, note?: string): Promise<ArchivePolicy> {
+    await this.engine.setProviderSetting('policy:archiveInterval', interval, {
+      note: note ?? 'Retention setting updated by operator',
+      setBy: 'operator',
+    });
+    return this.getArchivePolicy();
+  }
+
+  public async clearLogs(options: {
+    beforeTimestamp?: number;
+    severity?: string;
+    area?: string;
+    includeArchived?: boolean;
+    clearAuxiliaryLogs?: boolean;
+  } = {}): Promise<ClearLogsResult> {
+    const clearedCount = await this.db.events.clearEligible({
+      beforeTimestamp: options.beforeTimestamp,
+      severity: options.severity,
+      area: options.area,
+      includeArchived: options.includeArchived ?? false,
+    });
+
+    if (options.clearAuxiliaryLogs) {
+      await this.clearAuxiliaryLog('all');
+    }
+
+    const remaining = await this.db.events.findFiltered({ isArchived: undefined });
+    return {
+      clearedCount,
+      remainingCount: remaining.total,
+      cutoffTimestamp: options.beforeTimestamp,
+    };
+  }
+
+  private getTraceLogPaths(): Array<{ name: string; path: string }> {
+    try {
+      const os = require('os');
+      const p = require('path');
+      const dir = p.join(os.homedir(), 'Library', 'Logs', 'RelayX');
+      return [
+        { name: 'bootstrap-trace.log', path: p.join(dir, 'bootstrap-trace.log') },
+        { name: 'opencode-c2-trace.log', path: p.join(dir, 'opencode-c2-trace.log') },
+      ];
+    } catch {
+      return [
+        { name: 'bootstrap-trace.log', path: 'bootstrap-trace.log' },
+        { name: 'opencode-c2-trace.log', path: 'opencode-c2-trace.log' },
+      ];
+    }
+  }
+
+  public async getAuxiliaryLogsInfo(): Promise<AuxiliaryLogInfo[]> {
+    const logs = this.getTraceLogPaths();
+    const result: AuxiliaryLogInfo[] = [];
+
+    for (const log of logs) {
+      try {
+        const fs = await import('fs');
+        if (fs.existsSync(log.path)) {
+          const stat = fs.statSync(log.path);
+          let lineCount = 0;
+          try {
+            const content = fs.readFileSync(log.path, 'utf8');
+            lineCount = content.split('\n').filter(Boolean).length;
+          } catch {
+            lineCount = 0;
+          }
+          result.push({
+            name: log.name,
+            path: log.path,
+            sizeBytes: stat.size,
+            lineCount,
+            exists: true,
+            lastModified: stat.mtimeMs,
+          });
+        } else {
+          result.push({
+            name: log.name,
+            path: log.path,
+            sizeBytes: 0,
+            lineCount: 0,
+            exists: false,
+          });
+        }
+      } catch {
+        result.push({
+          name: log.name,
+          path: log.path,
+          sizeBytes: 0,
+          lineCount: 0,
+          exists: false,
+        });
+      }
+    }
+    return result;
+  }
+
+  public async readAuxiliaryLog(name: string, maxLines = 100): Promise<{ name: string; lines: string[]; totalLines: number }> {
+    const logs = this.getTraceLogPaths();
+    const match = logs.find((l) => l.name === name);
+    if (!match) {
+      return { name, lines: [], totalLines: 0 };
+    }
+
+    try {
+      const fs = await import('fs');
+      if (!fs.existsSync(match.path)) {
+        return { name, lines: [], totalLines: 0 };
+      }
+      const raw = fs.readFileSync(match.path, 'utf8');
+      const allLines = raw.split('\n').filter(Boolean);
+      const slice = allLines.slice(-maxLines);
+      return { name, lines: slice, totalLines: allLines.length };
+    } catch (err: any) {
+      return { name, lines: [`Error reading log: ${err.message}`], totalLines: 0 };
+    }
+  }
+
+  public async clearAuxiliaryLog(name: string): Promise<{ success: boolean; name: string }> {
+    const logs = this.getTraceLogPaths();
+    const targets = name === 'all' ? logs : logs.filter((l) => l.name === name);
+
+    try {
+      const fs = await import('fs');
+      for (const target of targets) {
+        if (fs.existsSync(target.path)) {
+          fs.writeFileSync(target.path, '');
+        }
+      }
+      return { success: true, name };
+    } catch {
+      return { success: false, name };
+    }
+  }
+
+  public async getStorageAccounting(): Promise<StorageAccounting> {
+    let databaseSizeBytes = 0;
+    if (this.databaseType !== 'memory' && this.databasePath && this.databasePath !== ':memory:') {
+      try {
+        const fs = await import('fs');
+        if (fs.existsSync(this.databasePath)) {
+          const stat = fs.statSync(this.databasePath);
+          databaseSizeBytes = stat.size;
+        }
+      } catch {
+        // non-fatal
+      }
+    }
+
+    const [
+      activeEventsRes,
+      archivedEventsRes,
+      activities,
+      attentionItems,
+      pairs,
+      traceLogs,
+    ] = await Promise.all([
+      this.db.events.findFiltered({ isArchived: false }),
+      this.db.events.findFiltered({ isArchived: true }),
+      this.db.activities?.findAll(1000) ?? Promise.resolve([]),
+      this.db.attention.findAll(),
+      this.db.pairs.findAll(),
+      this.getAuxiliaryLogsInfo(),
+    ]);
+
+    let totalCheckpoints = 0;
+    for (const p of pairs) {
+      try {
+        const cps = await this.db.checkpoints.findAll(p.id);
+        totalCheckpoints += cps.length;
+      } catch {
+        // non-fatal
+      }
+    }
+
+    const traceLogsTotalBytes = traceLogs.reduce((acc, l) => acc + l.sizeBytes, 0);
+    const totalStorageBytes = databaseSizeBytes + traceLogsTotalBytes;
+
+    return {
+      databaseSizeBytes,
+      databaseType: this.databaseType,
+      databasePath: this.databasePath,
+      totalEvents: activeEventsRes.total + archivedEventsRes.total,
+      activeEvents: activeEventsRes.total,
+      archivedEvents: archivedEventsRes.total,
+      totalActivities: activities.length,
+      totalCheckpoints,
+      totalAttentionItems: attentionItems.length,
+      traceLogs,
+      totalStorageBytes,
+    };
+  }
+
+  public async exportAuditData(options: { includeArchived?: boolean; includeTraces?: boolean } = {}): Promise<AuditExportBundle> {
+    const [
+      projects,
+      pairs,
+      runtimes,
+      assignments,
+      eventsRes,
+      activities,
+      attentionItems,
+      storageAccounting,
+    ] = await Promise.all([
+      this.db.projects.findAll(),
+      this.db.pairs.findAll(),
+      this.db.runtimes.findAll(),
+      this.db.assignments.findAll(),
+      this.db.events.findFiltered(options.includeArchived ? {} : { isArchived: false }),
+      this.db.activities?.findAll(500) ?? Promise.resolve([]),
+      this.db.attention.findAll(),
+      this.getStorageAccounting(),
+    ]);
+
+    const allCheckpoints: any[] = [];
+    for (const p of pairs) {
+      try {
+        const cps = await this.db.checkpoints.findAll(p.id);
+        allCheckpoints.push(...cps);
+      } catch {
+        // non-fatal
+      }
+    }
+
+    return {
+      exportedAt: Date.now(),
+      version: '1.0.0',
+      environment: {
+        isElectron: this.isElectron,
+        databaseType: this.databaseType,
+      },
+      counts: {
+        projects: projects.length,
+        pairs: pairs.length,
+        runtimeSessions: runtimes.length,
+        assignments: assignments.length,
+        deliveries: 0,
+        events: eventsRes.total,
+        activities: activities.length,
+        checkpoints: allCheckpoints.length,
+        attentionItems: attentionItems.length,
+      },
+      projects: projects.map((p) => ({
+        id: p.id,
+        name: p.name,
+        canonicalPath: p.canonicalPath,
+        status: p.status,
+        createdAt: p.createdAt,
+      })),
+      pairs: pairs.map((p) => ({
+        id: p.id,
+        name: p.name,
+        projectId: p.projectId,
+        status: p.status,
+        plannerSessionId: p.plannerSessionId,
+        workerSessionId: p.workerSessionId,
+      })),
+      runtimeSessions: runtimes.map((r) => ({
+        id: r.id,
+        name: r.name,
+        providerType: r.providerType,
+        status: r.status,
+        externalSessionId: r.externalSessionId,
+      })),
+      assignments: assignments.map((a) => ({
+        id: a.id,
+        pairId: a.pairId,
+        title: a.title,
+        status: a.status,
+      })),
+      events: eventsRes.events.map((e) => this.mapEventToUI(e)),
+      activities,
+      checkpoints: allCheckpoints,
+      attentionItems: attentionItems.map((i) => ({
+        id: i.id,
+        type: i.type,
+        severity: i.severity,
+        status: i.status,
+        title: i.title,
+        message: i.message,
+      })),
+      storageAccounting,
+    };
   }
 
   public async listAttentionItems(): Promise<UIAttentionItem[]> {
@@ -1436,6 +1790,7 @@ export class RelayApiService implements IRelayApi {
     for (const i of items) {
       let deliveryId: string | undefined;
       let ambiguousDeliveryCount: number | undefined;
+      let evidence: ObservableEvidence | undefined;
       if (i.type === 'ambiguous_delivery' && i.assignmentId) {
         const deliveries = await this.db.deliveries.findByAssignmentId(i.assignmentId);
         const ambiguous = deliveries.filter((d) => d.status === 'ambiguous');
@@ -1446,6 +1801,16 @@ export class RelayApiService implements IRelayApi {
         // the operator selects or reconciles a delivery explicitly.
         if (ambiguous.length === 1) {
           deliveryId = ambiguous[0].id;
+          evidence = ambiguous[0].evidence;
+        } else if (ambiguous.length > 1) {
+          evidence = ambiguous[0].evidence;
+        } else if (deliveries.length > 0) {
+          evidence = deliveries[deliveries.length - 1].evidence;
+        }
+      } else if (i.assignmentId) {
+        const deliveries = await this.db.deliveries.findByAssignmentId(i.assignmentId);
+        if (deliveries.length > 0) {
+          evidence = deliveries[deliveries.length - 1].evidence;
         }
       }
       result.push({
@@ -1462,6 +1827,7 @@ export class RelayApiService implements IRelayApi {
         suggestedAction: i.suggestedAction,
         suggestedTier: i.suggestedTier,
         createdAt: i.createdAt,
+        evidence,
       });
     }
     return result;

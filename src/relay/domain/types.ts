@@ -21,7 +21,38 @@ export type RecoveryActionId = Brand<string, 'RecoveryActionId'>;
 export type PairSideCheckpointId = Brand<string, 'PairSideCheckpointId'>;
 export type PairCheckpointId = Brand<string, 'PairCheckpointId'>;
 
-/* --- Plan-First identifiers (PLAN_FIRST_DOMAIN_FREEZE.md §A) --- */
+export type EventSeverity = 'info' | 'warn' | 'error' | 'critical';
+
+export interface EventFilterOptions {
+  search?: string;
+  severity?: string;
+  area?: string;
+  eventType?: string;
+  actor?: string;
+  resourceType?: string;
+  resourceId?: string;
+  correlationId?: string;
+  startTime?: number;
+  endTime?: number;
+  isArchived?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ActivityRecord {
+  id: string;
+  timestamp: number;
+  title: string;
+  summary: string;
+  category: string;
+  status: string;
+  resourceType: string;
+  resourceId: string;
+  correlationId?: string;
+  evidence?: ObservableEvidence;
+  details?: Record<string, unknown>;
+}
+
 export type ContractRevisionId = Brand<string, 'ContractRevisionId'>;
 export type PlanFirstRunId = Brand<string, 'PlanFirstRunId'>;
 export type WorkUnitId = Brand<string, 'WorkUnitId'>;

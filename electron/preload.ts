@@ -103,6 +103,28 @@ const relayApi: IRelayApi = {
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.RESOLVE_AMBIGUOUS_DELIVERY, deliveryId, resolution),
   listEvents: (limit?: number, resourceId?: string) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.LIST_EVENTS, limit, resourceId),
+  queryEvents: (options: any) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.QUERY_EVENTS, options),
+  listActivities: (limit?: number) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.LIST_ACTIVITIES, limit),
+  runArchiveCycle: () =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.RUN_ARCHIVE_CYCLE),
+  getArchivePolicy: () =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_ARCHIVE_POLICY),
+  setArchivePolicy: (interval: string, note?: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.SET_ARCHIVE_POLICY, interval, note),
+  clearLogs: (options?: any) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.CLEAR_LOGS, options),
+  getStorageAccounting: () =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_STORAGE_ACCOUNTING),
+  exportAuditData: (options?: any) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.EXPORT_AUDIT_DATA, options),
+  getAuxiliaryLogsInfo: () =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_AUXILIARY_LOGS_INFO),
+  readAuxiliaryLog: (name: string, maxLines?: number) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.READ_AUXILIARY_LOG, name, maxLines),
+  clearAuxiliaryLog: (name: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.CLEAR_AUXILIARY_LOG, name),
   listAttentionItems: () => ipcRenderer.invoke(RELAY_IPC_CHANNELS.LIST_ATTENTION_ITEMS),
   acknowledgeAttentionItem: (id: string) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.ACKNOWLEDGE_ATTENTION_ITEM, id),

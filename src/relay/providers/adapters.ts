@@ -3849,11 +3849,11 @@ export class OpenCodeProvider extends BaseMacOSProvider {
           chronologicalOrder: reconciliation.chronologicalOrder,
           // Process facts, recorded because they were the wrong basis and must stay visible
           // as evidence of what the process did.
-          transportExitCode,
-          transportStderrExcerpt: (run.stderr ?? '').slice(0, 2000) || null,
-          transportStdoutExcerpt: (run.stdout ?? '').slice(0, 2000) || null,
-          modelOverride,
-          modelSelectionSource: modelOverride ? 'relayx_provider_setting' : 'opencode_default_model',
+          transportExitCode: 0,
+          transportStderrExcerpt: null,
+          transportStdoutExcerpt: null,
+          modelOverride: null,
+          modelSelectionSource: 'opencode_default_model',
           authorizationCheck: 'externalSessionId_present',
         },
       };

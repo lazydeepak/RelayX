@@ -395,6 +395,83 @@ export const relayBridge: IRelayApi = {
     return getLocalFallbackService().listEvents(limit, resourceId);
   },
 
+  queryEvents: async (options) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.queryEvents(options);
+    }
+    return getLocalFallbackService().queryEvents(options);
+  },
+
+  listActivities: async (limit) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.listActivities(limit);
+    }
+    return getLocalFallbackService().listActivities(limit);
+  },
+
+  runArchiveCycle: async () => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.runArchiveCycle();
+    }
+    return getLocalFallbackService().runArchiveCycle();
+  },
+
+  getArchivePolicy: async () => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.getArchivePolicy();
+    }
+    return getLocalFallbackService().getArchivePolicy();
+  },
+
+  setArchivePolicy: async (interval, note) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.setArchivePolicy(interval, note);
+    }
+    return getLocalFallbackService().setArchivePolicy(interval, note);
+  },
+
+  clearLogs: async (options) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.clearLogs(options);
+    }
+    return getLocalFallbackService().clearLogs(options);
+  },
+
+  getStorageAccounting: async () => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.getStorageAccounting();
+    }
+    return getLocalFallbackService().getStorageAccounting();
+  },
+
+  exportAuditData: async (options) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.exportAuditData(options);
+    }
+    return getLocalFallbackService().exportAuditData(options);
+  },
+
+  getAuxiliaryLogsInfo: async () => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.getAuxiliaryLogsInfo();
+    }
+    return getLocalFallbackService().getAuxiliaryLogsInfo();
+  },
+
+  readAuxiliaryLog: async (name, maxLines) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.readAuxiliaryLog(name, maxLines);
+    }
+    return getLocalFallbackService().readAuxiliaryLog(name, maxLines);
+  },
+
+  clearAuxiliaryLog: async (name) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.clearAuxiliaryLog(name);
+    }
+    return getLocalFallbackService().clearAuxiliaryLog(name);
+  },
+
   listAttentionItems: async () => {
     if (typeof window !== 'undefined' && window.relayApi) {
       return window.relayApi.listAttentionItems();

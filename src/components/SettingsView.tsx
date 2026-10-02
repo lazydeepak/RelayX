@@ -17,9 +17,15 @@ import {
   Clock,
   Lock,
   Archive,
+  Download,
+  FileText,
+  Eye,
+  HardDrive,
+  Copy,
+  Check,
 } from 'lucide-react';
 import { AppStatus, ProviderIntegration } from '../types/relayApi.ts';
-import { ProviderType } from '../types/ui.ts';
+import { ProviderType, StorageAccounting, AuxiliaryLogInfo } from '../types/ui.ts';
 import { relayBridge } from '../services/relayBridge.ts';
 
 interface SettingsViewProps {
@@ -45,6 +51,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [archiveInterval, setArchiveInterval] = useState<string>('7d');
   const [archiveSavedMsg, setArchiveSavedMsg] = useState<string | null>(null);
 
+  // Observability & Storage state
+  const [storage, setStorage] = useState<StorageAccounting | null>(null);
+  const [auxLogs, setAuxLogs] = useState<AuxiliaryLogInfo[]>([]);
+  const [logPreview, setLogPreview] = useState<{ name: string; lines: string[] } | null>(null);
+  const [auditExportMsg, setAuditExportMsg] = useState<string | null>(null);
+  const [safeClearMsg, setSafeClearMsg] = useState<string | null>(null);
+  const [isClearingSafe, setIsClearingSafe] = useState(false);
+
   const loadIntegrations = async () => {
     try {
       const list = await relayBridge.listIntegrations();
@@ -65,9 +79,41 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
+  const loadArchivePolicy = async () => {
+    try {
+      const policy = await relayBridge.getArchivePolicy();
+      if (policy && policy.interval) {
+        setArchiveInterval(policy.interval);
+      }
+    } catch (err) {
+      console.error('Failed to load archive policy:', err);
+    }
+  };
+
+  const loadStorage = async () => {
+    try {
+      const data = await relayBridge.getStorageAccounting();
+      setStorage(data);
+    } catch (err) {
+      console.error('Failed to load storage accounting:', err);
+    }
+  };
+
+  const loadAuxLogs = async () => {
+    try {
+      const logs = await relayBridge.getAuxiliaryLogsInfo();
+      setAuxLogs(logs);
+    } catch (err) {
+      console.error('Failed to load auxiliary logs:', err);
+    }
+  };
+
   useEffect(() => {
     loadIntegrations();
     loadModelConfig();
+    loadArchivePolicy();
+    loadStorage();
+    loadAuxLogs();
   }, []);
 
   const handleSaveDefaultModel = async (newModel: string) => {
@@ -81,10 +127,80 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
-  const handleSaveArchiveInterval = (interval: string) => {
-    setArchiveInterval(interval);
-    setArchiveSavedMsg(`Archival policy updated: ${interval === 'none' ? 'Retain indefinitely' : `${interval} retention`}`);
-    setTimeout(() => setArchiveSavedMsg(null), 3000);
+  const handleSaveArchiveInterval = async (interval: string) => {
+    try {
+      const res = await relayBridge.setArchivePolicy(interval, 'Updated from Settings view');
+      setArchiveInterval(res.interval);
+      setArchiveSavedMsg(
+        `Archival policy persisted: ${res.interval === 'none' ? 'Retain indefinitely' : `${res.interval} retention`}`
+      );
+      setTimeout(() => setArchiveSavedMsg(null), 3000);
+      loadStorage();
+    } catch (err: any) {
+      console.error('Failed to persist archive policy:', err);
+    }
+  };
+
+  const handlePreviewLog = async (name: string) => {
+    try {
+      const res = await relayBridge.readAuxiliaryLog(name, 100);
+      setLogPreview({ name: res.name, lines: res.lines });
+    } catch (err: any) {
+      console.error('Failed to read log tail:', err);
+    }
+  };
+
+  const handleClearAuxLog = async (name: string) => {
+    try {
+      await relayBridge.clearAuxiliaryLog(name);
+      await loadAuxLogs();
+      await loadStorage();
+    } catch (err: any) {
+      console.error('Failed to clear auxiliary log:', err);
+    }
+  };
+
+  const handleExportAuditJson = async () => {
+    try {
+      const bundle = await relayBridge.exportAuditData({ includeArchived: true });
+      const json = JSON.stringify(bundle, null, 2);
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `relayx-audit-export-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setAuditExportMsg('Audit bundle exported successfully.');
+      setTimeout(() => setAuditExportMsg(null), 4000);
+    } catch (err: any) {
+      setAuditExportMsg(`Export failed: ${err.message}`);
+    }
+  };
+
+  const handleCopyAuditJson = async () => {
+    try {
+      const bundle = await relayBridge.exportAuditData({ includeArchived: true });
+      await navigator.clipboard.writeText(JSON.stringify(bundle, null, 2));
+      setAuditExportMsg('Audit bundle JSON copied to clipboard.');
+      setTimeout(() => setAuditExportMsg(null), 4000);
+    } catch (err: any) {
+      setAuditExportMsg(`Copy failed: ${err.message}`);
+    }
+  };
+
+  const handleSafeClearArchivedLogs = async () => {
+    setIsClearingSafe(true);
+    try {
+      const res = await relayBridge.clearLogs({ includeArchived: false });
+      setSafeClearMsg(`Safe clear purged ${res.clearedCount} archived logs. ${res.remainingCount} active events preserved.`);
+      await loadStorage();
+      setTimeout(() => setSafeClearMsg(null), 5000);
+    } catch (err: any) {
+      setSafeClearMsg(`Clear failed: ${err.message}`);
+    } finally {
+      setIsClearingSafe(false);
+    }
   };
 
   const handleVerifyOne = async (type: ProviderType) => {
@@ -566,11 +682,192 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       </div>
 
-      {/* 4. Danger Zone / Destructive Maintenance */}
+      {/* 4. Observability, Storage Accounting & Trace Logs */}
+      <div className="space-y-4">
+        <div className="flex items-center gap-2 text-cyan-400 font-semibold uppercase tracking-wider text-xs">
+          <HardDrive className="w-4 h-4" />
+          <span>4. Observability, Storage Accounting &amp; Trace Logs</span>
+        </div>
+
+        {/* Storage Accounting Metrics */}
+        <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2 text-cyan-300 font-semibold">
+                <Database className="w-4 h-4" />
+                <span>Storage Breakdown &amp; Accounting</span>
+              </div>
+              <p className="text-slate-400 mt-1">
+                Relational SQLite footprint, active vs. archived lineage counts, and auxiliary diagnostics.
+              </p>
+            </div>
+            <button
+              onClick={loadStorage}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors self-start sm:self-auto"
+            >
+              <RefreshCw className="w-3 h-3" />
+              <span>Refresh Accounting</span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-slate-800">
+            <div className="p-3 rounded-lg bg-slate-950 border border-slate-800/80">
+              <span className="text-[11px] text-slate-400 block">Database Size</span>
+              <span className="text-base font-bold text-slate-100 font-mono">
+                {storage?.databaseSizeBytes ? `${(storage.databaseSizeBytes / 1024).toFixed(1)} KB` : 'In-Memory'}
+              </span>
+            </div>
+
+            <div className="p-3 rounded-lg bg-slate-950 border border-slate-800/80">
+              <span className="text-[11px] text-slate-400 block">Active Events</span>
+              <span className="text-base font-bold text-blue-400 font-mono">{storage?.activeEvents ?? 0}</span>
+            </div>
+
+            <div className="p-3 rounded-lg bg-slate-950 border border-slate-800/80">
+              <span className="text-[11px] text-slate-400 block">Archived Events</span>
+              <span className="text-base font-bold text-indigo-400 font-mono">{storage?.archivedEvents ?? 0}</span>
+            </div>
+
+            <div className="p-3 rounded-lg bg-slate-950 border border-slate-800/80">
+              <span className="text-[11px] text-slate-400 block">Projected Activities</span>
+              <span className="text-base font-bold text-emerald-400 font-mono">{storage?.totalActivities ?? 0}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Auxiliary Trace Logs Management */}
+        <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-4">
+          <div>
+            <div className="flex items-center gap-2 text-indigo-300 font-semibold">
+              <FileText className="w-4 h-4" />
+              <span>Auxiliary Diagnostics &amp; Trace Logs</span>
+            </div>
+            <p className="text-slate-400 mt-1">
+              Low-level trace files on macOS host (`~/Library/Logs/RelayX`) recording provider bootstrap and CLI bridge telemetry.
+            </p>
+          </div>
+
+          <div className="space-y-3 pt-2 border-t border-slate-800">
+            {auxLogs.length === 0 ? (
+              <div className="text-slate-500 py-2">No auxiliary trace logs detected.</div>
+            ) : (
+              auxLogs.map((log) => (
+                <div
+                  key={log.name}
+                  className="p-3 rounded-lg bg-slate-950 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                >
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono font-bold text-slate-200">{log.name}</span>
+                      <span
+                        className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
+                          log.exists ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-slate-800 text-slate-400'
+                        }`}
+                      >
+                        {log.exists ? 'Active on Disk' : 'Not Generated Yet'}
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-slate-400 font-mono">
+                      <span>Size: {(log.sizeBytes / 1024).toFixed(1)} KB</span> • <span>Lines: {log.lineCount}</span>
+                      <span className="text-slate-500 block truncate max-w-md mt-0.5">{log.path}</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={() => handlePreviewLog(log.name)}
+                      disabled={!log.exists}
+                      className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 disabled:opacity-40 transition-colors flex items-center gap-1"
+                    >
+                      <Eye className="w-3.5 h-3.5 text-blue-400" />
+                      <span>Inspect Tail</span>
+                    </button>
+                    <button
+                      onClick={() => handleClearAuxLog(log.name)}
+                      disabled={!log.exists || log.sizeBytes === 0}
+                      className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-red-950/40 border border-slate-700 hover:border-red-800 text-slate-300 hover:text-red-300 disabled:opacity-40 transition-colors flex items-center gap-1"
+                      title="Safely clear file to 0 bytes"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Clear</span>
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Audit Backup & Export Section */}
+        <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2 text-emerald-300 font-semibold">
+                <Download className="w-4 h-4" />
+                <span>Audit Export &amp; Backup</span>
+              </div>
+              <p className="text-slate-400 mt-1">
+                Produce a structured JSON snapshot containing complete system provenance, projects, pairs, checkpoints, and lineage.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={handleCopyAuditJson}
+                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium transition-colors flex items-center gap-1.5"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>Copy JSON</span>
+              </button>
+              <button
+                onClick={handleExportAuditJson}
+                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold transition-colors flex items-center gap-1.5 shadow-sm"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Download Export (.json)</span>
+              </button>
+            </div>
+          </div>
+
+          {auditExportMsg && (
+            <div className="p-2.5 rounded-lg bg-emerald-950/40 border border-emerald-800/60 text-emerald-300 text-xs">
+              ✓ {auditExportMsg}
+            </div>
+          )}
+        </div>
+
+        {/* Safe Clear Archived Logs Section */}
+        <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2 text-slate-200 font-semibold">
+              <Archive className="w-4 h-4 text-amber-400" />
+              <span>Safe Purge: Archived Logs Only</span>
+            </div>
+            <p className="text-slate-400 mt-1">
+              Deletes only rotated historical events marked as archived. Active system lineage and checkpoints are untouched.
+            </p>
+            {safeClearMsg && (
+              <div className="text-emerald-400 text-[11px] font-semibold mt-1">
+                ✓ {safeClearMsg}
+              </div>
+            )}
+          </div>
+
+          <button
+            onClick={handleSafeClearArchivedLogs}
+            disabled={isClearingSafe}
+            className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-amber-950/50 border border-slate-700 hover:border-amber-800 text-amber-200 font-semibold transition-colors shrink-0"
+          >
+            {isClearingSafe ? 'Clearing...' : 'Purge Archived Events'}
+          </button>
+        </div>
+      </div>
+
+      {/* 5. Danger Zone / Destructive Maintenance */}
       <div className="space-y-4">
         <div className="flex items-center gap-2 text-red-400 font-semibold uppercase tracking-wider text-xs">
           <ShieldAlert className="w-4 h-4" />
-          <span>4. Danger Zone / Destructive Maintenance</span>
+          <span>5. Danger Zone / Destructive Maintenance</span>
         </div>
 
         <div className="p-5 rounded-xl bg-red-950/20 border border-red-900/40 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -590,6 +887,44 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           )}
         </div>
       </div>
+
+      {/* Log Preview Modal */}
+      {logPreview && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-2xl w-full p-6 space-y-4 shadow-xl text-xs">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 font-bold text-slate-100 text-sm">
+                <FileText className="w-4 h-4 text-blue-400" />
+                <span>Tail of {logPreview.name}</span>
+              </div>
+              <button onClick={() => setLogPreview(null)} className="text-slate-400 hover:text-slate-200 text-lg">
+                ×
+              </button>
+            </div>
+
+            <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 font-mono text-[11px] text-slate-300 max-h-96 overflow-y-auto space-y-1">
+              {logPreview.lines.length === 0 ? (
+                <div className="text-slate-500 py-4 text-center">Log file is empty.</div>
+              ) : (
+                logPreview.lines.map((line, idx) => (
+                  <div key={idx} className="whitespace-pre-wrap break-all">
+                    {line}
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                onClick={() => setLogPreview(null)}
+                className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

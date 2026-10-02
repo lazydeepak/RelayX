@@ -125,6 +125,96 @@ export interface UIEvent {
   correlationId?: string;
   evidence?: ObservableEvidence;
   details?: Record<string, unknown>;
+  severity?: 'info' | 'warn' | 'error' | 'critical';
+  area?: string;
+  outcome?: string;
+  isArchived?: boolean;
+}
+
+export interface UIFilteredEventsResult {
+  events: UIEvent[];
+  total: number;
+  offset?: number;
+  limit?: number;
+}
+
+export interface UIActivityRecord {
+  id: string;
+  timestamp: number;
+  title: string;
+  summary: string;
+  category: string;
+  status: string;
+  resourceType: string;
+  resourceId: string;
+  correlationId?: string;
+  evidence?: ObservableEvidence;
+  details?: Record<string, unknown>;
+}
+
+export interface ArchivePolicy {
+  interval: string;
+  effectiveRetentionDays: number | null;
+  note?: string | null;
+  updatedAt?: number;
+}
+
+export interface ClearLogsResult {
+  clearedCount: number;
+  remainingCount: number;
+  cutoffTimestamp?: number;
+}
+
+export interface AuxiliaryLogInfo {
+  name: string;
+  path: string;
+  sizeBytes: number;
+  lineCount: number;
+  exists: boolean;
+  lastModified?: number;
+}
+
+export interface StorageAccounting {
+  databaseSizeBytes: number;
+  databaseType: string;
+  databasePath: string;
+  totalEvents: number;
+  activeEvents: number;
+  archivedEvents: number;
+  totalActivities: number;
+  totalCheckpoints: number;
+  totalAttentionItems: number;
+  traceLogs: AuxiliaryLogInfo[];
+  totalStorageBytes: number;
+}
+
+export interface AuditExportBundle {
+  exportedAt: number;
+  version: string;
+  environment: {
+    isElectron: boolean;
+    databaseType: string;
+  };
+  counts: {
+    projects: number;
+    pairs: number;
+    runtimeSessions: number;
+    assignments: number;
+    deliveries: number;
+    events: number;
+    activities: number;
+    checkpoints: number;
+    attentionItems: number;
+  };
+  projects: any[];
+  pairs: any[];
+  runtimeSessions: any[];
+  assignments: any[];
+  events: UIEvent[];
+  activities: any[];
+  checkpoints: any[];
+  attentionItems: any[];
+  storageAccounting?: StorageAccounting;
 }
 
 export interface UIAttentionItem {
@@ -142,4 +232,5 @@ export interface UIAttentionItem {
   suggestedAction?: string;
   suggestedTier?: string;
   createdAt: number;
+  evidence?: ObservableEvidence;
 }

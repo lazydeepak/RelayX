@@ -153,5 +153,40 @@ describe('Electron IPC & RelayApiService Integration Tests', () => {
     assert.ok(channels.includes('relay:get-app-status'));
     assert.ok(channels.includes('relay:get-dashboard-state'));
     assert.ok(channels.includes('relay:run-supervision-tick'));
+    assert.ok(channels.includes('relay:query-events'));
+    assert.ok(channels.includes('relay:list-activities'));
+    assert.ok(channels.includes('relay:run-archive-cycle'));
+    assert.ok(channels.includes('relay:get-archive-policy'));
+    assert.ok(channels.includes('relay:set-archive-policy'));
+    assert.ok(channels.includes('relay:clear-logs'));
+    assert.ok(channels.includes('relay:get-storage-accounting'));
+    assert.ok(channels.includes('relay:export-audit-data'));
+    assert.ok(channels.includes('relay:get-auxiliary-logs-info'));
+    assert.ok(channels.includes('relay:read-auxiliary-log'));
+    assert.ok(channels.includes('relay:clear-auxiliary-log'));
+  });
+
+  test('relayBridge exposes all observability methods in fallback environment', async () => {
+    const { relayBridge } = await import('../src/services/relayBridge.ts');
+    assert.ok(typeof relayBridge.queryEvents === 'function');
+    assert.ok(typeof relayBridge.listActivities === 'function');
+    assert.ok(typeof relayBridge.runArchiveCycle === 'function');
+    assert.ok(typeof relayBridge.getArchivePolicy === 'function');
+    assert.ok(typeof relayBridge.setArchivePolicy === 'function');
+    assert.ok(typeof relayBridge.clearLogs === 'function');
+    assert.ok(typeof relayBridge.getStorageAccounting === 'function');
+    assert.ok(typeof relayBridge.exportAuditData === 'function');
+    assert.ok(typeof relayBridge.getAuxiliaryLogsInfo === 'function');
+    assert.ok(typeof relayBridge.readAuxiliaryLog === 'function');
+    assert.ok(typeof relayBridge.clearAuxiliaryLog === 'function');
+
+    const policy = await relayBridge.getArchivePolicy();
+    assert.ok(policy.interval);
+
+    const storage = await relayBridge.getStorageAccounting();
+    assert.ok(typeof storage.totalEvents === 'number');
+
+    const activities = await relayBridge.listActivities(10);
+    assert.ok(Array.isArray(activities));
   });
 });

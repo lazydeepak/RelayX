@@ -62,6 +62,7 @@ import {
   MilestoneVerification,
   PlanFirstVerificationEvaluator,
 } from '../domain/planFirstVerification.ts';
+import { projectEventToActivity } from '../domain/activityProjection.ts';
 import {
   DuplicateDeliveryAttemptError,
   AmbiguousDeliveryResendError,
@@ -345,6 +346,15 @@ export class RelayEngine {
   ): Promise<RelayEvent> {
     const event = RelayEvent.create(resourceType, resourceId, eventType, options);
     await this.repos.events.save(event);
+    if (this.repos.activities) {
+      try {
+        const activity = projectEventToActivity(event);
+        await this.repos.activities.save(activity);
+      } catch (err) {
+        // Activity projection is best-effort and non-fatal
+        console.error('Failed to project activity from event:', err);
+      }
+    }
     return event;
   }
 
@@ -1870,6 +1880,32 @@ export class RelayEngine {
       details: { key, note: setting.note, setBy, previouslySetAt: previous?.createdAt ?? null },
     });
     return setting;
+  }
+
+  /**
+   * Evaluates the archival retention policy and marks eligible historical events as archived.
+   * If 'none', no events are archived. Defaults to 7 days if unset.
+   */
+  public async runArchiveCycle(): Promise<{ archivedCount: number; cutoffTimestamp: number; interval: string }> {
+    const setting = await this.getProviderSetting('policy:archiveInterval');
+    const interval = setting?.value ?? '7d';
+
+    if (interval === 'none') {
+      return { archivedCount: 0, cutoffTimestamp: 0, interval: 'none' };
+    }
+
+    let days = 7;
+    if (interval.endsWith('d')) {
+      const parsed = parseInt(interval, 10);
+      if (!isNaN(parsed) && parsed > 0) days = parsed;
+    } else if (interval.endsWith('h')) {
+      const parsed = parseInt(interval, 10);
+      if (!isNaN(parsed) && parsed > 0) days = parsed / 24;
+    }
+
+    const cutoffTimestamp = Date.now() - (days * 24 * 60 * 60 * 1000);
+    const archivedCount = await this.repos.events.archiveOlderThan(cutoffTimestamp);
+    return { archivedCount, cutoffTimestamp, interval };
   }
 
   /**

@@ -69,12 +69,16 @@ describe('RelayX Architectural Scenarios & Recovery Invariants', () => {
     let runtime = await db.runtimes.findById(worker.id);
     assert.strictEqual(runtime?.status, 'suspended');
 
-    // Fail 2: still suspended
+    // Fail 2: still suspended (backoff elapsed)
+    runtime!.lastObservedAt = Date.now() - 31000;
+    await db.runtimes.save(runtime!);
     await engine.runSupervisionTick();
     runtime = await db.runtimes.findById(worker.id);
     assert.strictEqual(runtime?.status, 'suspended');
 
-    // Fail 3: now marked terminated
+    // Fail 3: now marked terminated (backoff elapsed)
+    runtime!.lastObservedAt = Date.now() - 31000;
+    await db.runtimes.save(runtime!);
     await engine.runSupervisionTick();
     runtime = await db.runtimes.findById(worker.id);
     assert.strictEqual(runtime?.status, 'terminated');

@@ -4,11 +4,19 @@ import {
   UIRuntimeSession,
   UIAssignment,
   UIEvent,
+  UIFilteredEventsResult,
+  UIActivityRecord,
+  ArchivePolicy,
+  ClearLogsResult,
+  StorageAccounting,
+  AuditExportBundle,
+  AuxiliaryLogInfo,
   UIAttentionItem,
   ObservableEvidence,
   ProviderType,
   RuntimeSessionStatus,
 } from './ui.ts';
+import { EventFilterOptions } from '../relay/domain/types.ts';
 
 import {
   IntegrationTestResult,
@@ -304,6 +312,23 @@ export interface IRelayApi {
   deliverHandoff(handoffId: string): Promise<{ success: boolean }>;
   resolveAmbiguousDelivery(deliveryId: string, resolution: 'confirmed_delivered' | 'retry_permitted'): Promise<{ success: boolean }>;
   listEvents(limit?: number, resourceId?: string): Promise<UIEvent[]>;
+  queryEvents(options: EventFilterOptions): Promise<UIFilteredEventsResult>;
+  listActivities(limit?: number): Promise<UIActivityRecord[]>;
+  runArchiveCycle(): Promise<{ archivedCount: number; cutoffTimestamp: number; interval: string }>;
+  getArchivePolicy(): Promise<ArchivePolicy>;
+  setArchivePolicy(interval: string, note?: string): Promise<ArchivePolicy>;
+  clearLogs(options?: {
+    beforeTimestamp?: number;
+    severity?: string;
+    area?: string;
+    includeArchived?: boolean;
+    clearAuxiliaryLogs?: boolean;
+  }): Promise<ClearLogsResult>;
+  getStorageAccounting(): Promise<StorageAccounting>;
+  exportAuditData(options?: { includeArchived?: boolean; includeTraces?: boolean }): Promise<AuditExportBundle>;
+  getAuxiliaryLogsInfo(): Promise<AuxiliaryLogInfo[]>;
+  readAuxiliaryLog(name: string, maxLines?: number): Promise<{ name: string; lines: string[]; totalLines: number }>;
+  clearAuxiliaryLog(name: string): Promise<{ success: boolean; name: string }>;
   listAttentionItems(): Promise<UIAttentionItem[]>;
   acknowledgeAttentionItem(id: string): Promise<{ success: boolean }>;
   runSupervisionTick(): Promise<SupervisionResult>;

@@ -199,4 +199,233 @@ describe('Logging, Activity & Archive System', () => {
     const unarchivedProject = await service.unarchiveProject(project.id);
     assert.strictEqual(unarchivedProject.status, 'active');
   });
+
+  it('6. Filtered event queries support search, severity, actor, area, and pagination', async () => {
+    const { service, engine, db } = createTestService();
+    const project = await engine.createProject('Query Test Project');
+    const { pair } = await createPairFixture(engine, db, project.id, 'Query Pair');
+
+    // Create an assignment to generate diverse events
+    const asg = await engine.createAssignment(pair.id, 'Test Query Assignment', 'echo test');
+
+    const resAll = await service.queryEvents({ limit: 10, offset: 0 });
+    assert.ok(resAll.events.length > 0);
+    assert.ok(resAll.total >= resAll.events.length);
+
+    // Search query
+    const searchRes = await service.queryEvents({ search: 'Query Pair' });
+    assert.ok(searchRes.events.length > 0);
+    assert.ok(searchRes.events.some((e) => JSON.stringify(e).includes('Query Pair') || e.resourceId === pair.id));
+
+    // ResourceType filter
+    const pairOnlyRes = await service.queryEvents({ resourceType: 'pair' });
+    assert.ok(pairOnlyRes.events.length > 0);
+    assert.ok(pairOnlyRes.events.every((e) => e.resourceType === 'pair'));
+
+    // Pagination limit & offset
+    const page1 = await service.queryEvents({ limit: 2, offset: 0 });
+    const page2 = await service.queryEvents({ limit: 2, offset: 2 });
+    assert.strictEqual(page1.events.length, 2);
+    assert.notStrictEqual(page1.events[0].id, page2.events[0]?.id);
+  });
+
+  it('7. Real Activity projection automatically projects domain events into human-readable ActivityRecords', async () => {
+    const { service, engine, db } = createTestService();
+    const project = await engine.createProject('Projection Project', 'Testing activity projection');
+    const { pair } = await createPairFixture(engine, db, project.id, 'Projection Pair');
+
+    const activities = await service.listActivities(50);
+    assert.ok(activities.length >= 2, 'Activities must be projected from events');
+
+    const projectAct = activities.find((a) => a.resourceType === 'project' && a.resourceId === project.id);
+    assert.ok(projectAct, 'Project creation activity must exist');
+    assert.strictEqual(projectAct.title, 'Project Created');
+    assert.strictEqual(projectAct.category, 'lifecycle');
+    assert.ok(projectAct.summary.includes('Projection Project'));
+
+    const pairAct = activities.find((a) => a.resourceType === 'pair' && a.resourceId === pair.id);
+    assert.ok(pairAct, 'Pair creation activity must exist');
+    assert.strictEqual(pairAct.title, 'Pair Formed');
+    assert.strictEqual(pairAct.category, 'execution');
+  });
+
+  it('8. Archive runner moves expired events to archive and preserves them for archived-event queries', async () => {
+    const { service, engine, db } = createTestService();
+    const project = await engine.createProject('Archive Runner Project');
+
+    // Set retention policy to 1d
+    await service.setArchivePolicy('1d', 'Test short retention');
+
+    // Create an old event with timestamp 2 days ago
+    const oldTimestamp = Date.now() - 2 * 24 * 60 * 60 * 1000;
+    const oldEvent = RelayEvent.create('project', project.id, 'project.old_diagnostic', {
+      details: { note: 'Historical record' },
+    });
+    // Mutate timestamp to simulate past event
+    (oldEvent as any).timestamp = oldTimestamp;
+    await db.events.save(oldEvent);
+
+    // Prior to archive cycle, it is not archived
+    const beforeActive = await service.queryEvents({ isArchived: false });
+    assert.ok(beforeActive.events.some((e) => e.id === oldEvent.id));
+
+    // Run archive cycle
+    const archiveResult = await service.runArchiveCycle();
+    assert.ok(archiveResult.archivedCount >= 1, 'At least 1 event older than 1d must be archived');
+
+    // Now, active query does NOT contain the old event
+    const afterActive = await service.queryEvents({ isArchived: false });
+    assert.ok(!afterActive.events.some((e) => e.id === oldEvent.id));
+
+    // But archived query DOES contain it
+    const afterArchived = await service.queryEvents({ isArchived: true });
+    const found = afterArchived.events.find((e) => e.id === oldEvent.id);
+    assert.ok(found, 'Archived event must be accessible via archived-event query');
+    assert.strictEqual(found.isArchived, true);
+  });
+
+  it('9. Retention policy persists across service reloads and correctly computes effective retention', async () => {
+    const { service, engine } = createTestService();
+
+    // Default policy
+    const policyDefault = await service.getArchivePolicy();
+    assert.strictEqual(policyDefault.interval, '7d');
+    assert.strictEqual(policyDefault.effectiveRetentionDays, 7);
+
+    // Update to 30d
+    await service.setArchivePolicy('30d', 'Compliance rule');
+    const policyUpdated = await service.getArchivePolicy();
+    assert.strictEqual(policyUpdated.interval, '30d');
+    assert.strictEqual(policyUpdated.effectiveRetentionDays, 30);
+    assert.strictEqual(policyUpdated.note, 'Compliance rule');
+
+    // Update to indefinite retention ('none')
+    await service.setArchivePolicy('none', 'Keep forever');
+    const policyIndefinite = await service.getArchivePolicy();
+    assert.strictEqual(policyIndefinite.interval, 'none');
+    assert.strictEqual(policyIndefinite.effectiveRetentionDays, null);
+  });
+
+  it('10. Safe Clear Logs purges only archived logs and strictly protects active lineage', async () => {
+    const { service, engine, db } = createTestService();
+    const project = await engine.createProject('Safe Clear Project');
+
+    // Set retention to 1d
+    await service.setArchivePolicy('1d');
+
+    // Save one past event and run archive cycle
+    const oldTimestamp = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    const oldEvent = RelayEvent.create('project', project.id, 'project.old_diagnostic');
+    (oldEvent as any).timestamp = oldTimestamp;
+    await db.events.save(oldEvent);
+
+    await service.runArchiveCycle();
+
+    // Now we have at least 1 active event (project.created) and 1 archived event (old_diagnostic)
+    const activeBefore = await service.queryEvents({ isArchived: false });
+    const archivedBefore = await service.queryEvents({ isArchived: true });
+    assert.ok(activeBefore.total >= 1);
+    assert.ok(archivedBefore.total >= 1);
+
+    // Execute safe clear logs (only archived)
+    const clearResult = await service.clearLogs({ includeArchived: false });
+    assert.ok(clearResult.clearedCount >= 1, 'Archived events should be purged');
+
+    // Verify: archived query is now empty
+    const archivedAfter = await service.queryEvents({ isArchived: true });
+    assert.strictEqual(archivedAfter.total, 0, 'Archived events should be gone');
+
+    // Verify: active events are completely intact
+    const activeAfter = await service.queryEvents({ isArchived: false });
+    assert.strictEqual(activeAfter.total, activeBefore.total, 'Active events must NOT be deleted by safe clear');
+  });
+
+  it('11. Storage accounting, export/backup, and auxiliary log management are complete and functional', async () => {
+    const { service, engine } = createTestService();
+    await engine.createProject('Storage Project');
+
+    // 1. Storage accounting
+    const storage = await service.getStorageAccounting();
+    assert.ok(storage.totalEvents >= 1);
+    assert.ok(storage.totalActivities >= 1);
+    assert.ok(Array.isArray(storage.traceLogs));
+
+    // 2. Audit export bundle
+    const bundle = await service.exportAuditData({ includeArchived: true });
+    assert.strictEqual(bundle.version, '1.0.0');
+    assert.ok(bundle.counts.projects >= 1);
+    assert.ok(bundle.counts.events >= 1);
+    assert.ok(bundle.counts.activities >= 1);
+    assert.ok(Array.isArray(bundle.projects));
+    assert.ok(Array.isArray(bundle.events));
+
+    // 3. Auxiliary log management
+    const auxInfo = await service.getAuxiliaryLogsInfo();
+    assert.ok(auxInfo.length >= 2);
+    assert.ok(auxInfo.some((l) => l.name === 'bootstrap-trace.log'));
+    assert.ok(auxInfo.some((l) => l.name === 'opencode-c2-trace.log'));
+
+    const readRes = await service.readAuxiliaryLog('bootstrap-trace.log', 10);
+    assert.strictEqual(readRes.name, 'bootstrap-trace.log');
+
+    const clearRes = await service.clearAuxiliaryLog('bootstrap-trace.log');
+    assert.strictEqual(clearRes.success, true);
+  });
+
+  it('12. Attention items correlate truthfully with events and evidence, enabling deterministic investigation', async () => {
+    const { service, engine, db } = createTestService();
+    const project = await engine.createProject('Attention Correlation Project');
+    const { pair } = await createPairFixture(engine, db, project.id, 'Attention Pair');
+
+    const asg = await engine.createAssignment(pair.id, 'Attention Assignment', 'execute task');
+
+    // Create a delivery with verifiable trace evidence
+    const { Delivery } = await import('../src/relay/domain/entities.ts');
+    const delivery = Delivery.create(
+      asg.id,
+      'att_1' as any,
+      pair.workerSessionId!,
+      'execute task',
+      'idem_key_1',
+    );
+    delivery.status = 'ambiguous';
+    delivery.evidence = {
+      id: 'ev_123',
+      source: 'reconciliation_probe',
+      windowTitle: 'Task Inspector Window',
+      details: { stdout: 'Task output with warning' },
+      timestamp: Date.now(),
+    };
+    await db.deliveries.save(delivery);
+
+    // Create Attention item referencing this delivery & assignment
+    const { AttentionItem } = await import('../src/relay/domain/entities.ts');
+    const attItem = AttentionItem.create(
+      'warning',
+      'ambiguous_delivery',
+      'Ambiguous Delivery Detected',
+      'Delivery status could not be verified automatically',
+      {
+        pairId: pair.id,
+        assignmentId: asg.id,
+        suggestedAction: 'Confirm delivered or mark as failed',
+      },
+    );
+    await db.attention.save(attItem);
+
+    // List attention items via API
+    const items = await service.listAttentionItems();
+    const matched = items.find((i) => i.id === attItem.id);
+    assert.ok(matched, 'Attention item must be listed');
+    assert.strictEqual(matched.assignmentId, asg.id);
+    assert.strictEqual(matched.pairId, pair.id);
+    assert.strictEqual(matched.deliveryId, delivery.id);
+    assert.ok(matched.evidence, 'Evidence from ambiguous delivery must be attached');
+    assert.strictEqual(matched.evidence?.id, 'ev_123');
+
+    // Query correlated events by assignment ID
+    const correlatedEvents = await service.queryEvents({ resourceId: asg.id });
+    assert.ok(correlatedEvents.total >= 1, 'Correlated events for assignment must exist');
+    assert.ok(correlatedEvents.events.some((e) => e.resourceId === asg.id));
+  });
 });

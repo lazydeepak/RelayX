@@ -48,6 +48,8 @@ import {
   IDeliveryRepository,
   IHandoffRepository,
   IEventRepository,
+  IActivityRepository,
+  ActivityRecord,
   IAttentionRepository,
   IAssociationRepository,
   IContractRevisionRepository,
@@ -57,6 +59,7 @@ import {
   IProviderSettingsRepository,
   ProviderSetting,
   AssociationEvidenceCriteria,
+  EventFilterOptions,
 } from '../interfaces.ts';
 
 /**
@@ -503,6 +506,108 @@ export class MemoryEventRepository implements IEventRepository {
   async save(event: RelayEvent): Promise<void> {
     this.items.set(event.id, event);
   }
+
+  async findFiltered(options: EventFilterOptions): Promise<{ events: RelayEvent[]; total: number }> {
+    let list = Array.from(this.items.values());
+    if (options.isArchived !== undefined) {
+      list = list.filter((e) => !!e.isArchived === options.isArchived);
+    } else {
+      list = list.filter((e) => !e.isArchived);
+    }
+    if (options.severity) list = list.filter((e) => e.severity === options.severity);
+    if (options.area) list = list.filter((e) => e.area === options.area);
+    if (options.eventType) list = list.filter((e) => e.eventType === options.eventType);
+    if (options.actor) list = list.filter((e) => e.actor === options.actor);
+    if (options.resourceType) list = list.filter((e) => e.resourceType === options.resourceType);
+    if (options.resourceId) list = list.filter((e) => e.resourceId === options.resourceId);
+    if (options.correlationId) list = list.filter((e) => e.correlationId === options.correlationId);
+    if (options.startTime) list = list.filter((e) => e.timestamp >= options.startTime!);
+    if (options.endTime) list = list.filter((e) => e.timestamp <= options.endTime!);
+    if (options.search) {
+      const q = options.search.toLowerCase();
+      list = list.filter(
+        (e) =>
+          e.eventType.toLowerCase().includes(q) ||
+          e.resourceId.toLowerCase().includes(q) ||
+          (e.correlationId && e.correlationId.toLowerCase().includes(q)) ||
+          (e.details && JSON.stringify(e.details).toLowerCase().includes(q))
+      );
+    }
+    list.sort((a, b) => b.timestamp - a.timestamp);
+    const total = list.length;
+    if (options.limit !== undefined) {
+      const offset = options.offset ?? 0;
+      list = list.slice(offset, offset + options.limit);
+    }
+    return { events: list, total };
+  }
+
+  async archiveOlderThan(timestamp: number): Promise<number> {
+    let count = 0;
+    for (const [id, e] of this.items.entries()) {
+      if (!e.isArchived && e.timestamp < timestamp) {
+        const archived = new RelayEvent({
+          id: e.id,
+          timestamp: e.timestamp,
+          resourceType: e.resourceType,
+          resourceId: e.resourceId,
+          eventType: e.eventType,
+          actor: e.actor,
+          previousState: e.previousState,
+          newState: e.newState,
+          evidence: e.evidence,
+          correlationId: e.correlationId,
+          details: e.details,
+          severity: e.severity,
+          area: e.area,
+          outcome: e.outcome,
+          isArchived: true,
+        });
+        this.items.set(id, archived);
+        count++;
+      }
+    }
+    return count;
+  }
+
+  async clearEligible(options: { beforeTimestamp?: number; severity?: string; area?: string; includeArchived?: boolean }): Promise<number> {
+    let count = 0;
+    for (const [id, e] of this.items.entries()) {
+      if (!options.includeArchived && !e.isArchived) continue;
+      if (options.beforeTimestamp && e.timestamp >= options.beforeTimestamp) continue;
+      if (options.severity && e.severity !== options.severity) continue;
+      if (options.area && e.area !== options.area) continue;
+      this.items.delete(id);
+      count++;
+    }
+    return count;
+  }
+}
+
+export class MemoryActivityRepository implements IActivityRepository {
+  private readonly items = new Map<string, ActivityRecord>();
+
+  snapshotState(): MemoryRepoSnapshot<ActivityRecord> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<ActivityRecord>): void {
+    restoreMapItems(this.items, snapshot);
+  }
+
+  async findAll(limit = 100): Promise<ActivityRecord[]> {
+    return Array.from(this.items.values())
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, limit);
+  }
+
+  async save(record: ActivityRecord): Promise<void> {
+    this.items.set(record.id, record);
+  }
+
+  async clear(): Promise<void> {
+    this.items.clear();
+  }
 }
 
 export class MemoryAttentionRepository implements IAttentionRepository {
@@ -946,6 +1051,7 @@ export class MemoryRelayDatabase implements IRelayRepositories {
   public readonly deliveries: MemoryDeliveryRepository;
   public readonly handoffs: MemoryHandoffRepository;
   public readonly events: MemoryEventRepository;
+  public readonly activities: MemoryActivityRepository;
   public readonly attention: MemoryAttentionRepository;
   public readonly associations: MemoryAssociationRepository;
   public readonly planFirstRuns: MemoryPlanFirstRunRepository;
@@ -966,6 +1072,7 @@ export class MemoryRelayDatabase implements IRelayRepositories {
     this.deliveries = new MemoryDeliveryRepository();
     this.handoffs = new MemoryHandoffRepository();
     this.events = new MemoryEventRepository();
+    this.activities = new MemoryActivityRepository();
     this.attention = new MemoryAttentionRepository();
     this.associations = new MemoryAssociationRepository();
     this.planFirstRuns = new MemoryPlanFirstRunRepository();
@@ -988,6 +1095,7 @@ export class MemoryRelayDatabase implements IRelayRepositories {
       this.deliveries,
       this.handoffs,
       this.events,
+      this.activities,
       this.attention,
       this.associations,
       this.planFirstRuns,

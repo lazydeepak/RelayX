@@ -127,6 +127,8 @@ export default function App() {
     sessionId: string | null;
   }>({ isOpen: false, sessionId: null });
 
+  const [timelineFilterResourceId, setTimelineFilterResourceId] = useState<string>('');
+
   const notify = (msg: string) => {
     setStatusNotification(msg);
     setTimeout(() => setStatusNotification(null), 3500);
@@ -634,7 +636,10 @@ export default function App() {
             {activeTab === 'timeline' && (
               <EventsTimelineView
                 events={events}
+                initialResourceId={timelineFilterResourceId}
+                onClearInitialResourceId={() => setTimelineFilterResourceId('')}
                 onViewEvidence={(ev) => setSelectedEvidence(ev)}
+                onNotify={notify}
               />
             )}
 
@@ -644,6 +649,11 @@ export default function App() {
                 onResolveAmbiguousDelivery={handleResolveAmbiguous}
                 onRecoverSuspendedRuntime={handleRecoverSuspended}
                 onAcknowledgeItem={handleAcknowledgeAttention}
+                onViewEvidence={(ev) => setSelectedEvidence(ev)}
+                onViewCorrelatedEvents={(resourceId) => {
+                  setTimelineFilterResourceId(resourceId);
+                  setActiveTab('timeline');
+                }}
               />
             )}
 

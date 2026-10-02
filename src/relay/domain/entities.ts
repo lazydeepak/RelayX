@@ -1100,6 +1100,10 @@ export interface EventProps {
   evidence?: ObservableEvidence;
   correlationId?: string;
   details?: Record<string, unknown>;
+  severity?: 'info' | 'warn' | 'error' | 'critical';
+  area?: string;
+  outcome?: string;
+  isArchived?: boolean;
 }
 
 export class RelayEvent {
@@ -1114,6 +1118,10 @@ export class RelayEvent {
   public readonly evidence?: ObservableEvidence;
   public readonly correlationId?: string;
   public readonly details?: Record<string, unknown>;
+  public readonly severity: 'info' | 'warn' | 'error' | 'critical';
+  public readonly area: string;
+  public readonly outcome?: string;
+  public readonly isArchived: boolean;
 
   constructor(props: EventProps) {
     this.id = props.id;
@@ -1127,6 +1135,10 @@ export class RelayEvent {
     this.evidence = props.evidence;
     this.correlationId = props.correlationId;
     this.details = props.details;
+    this.severity = props.severity ?? (props.eventType.includes('failed') || props.eventType.includes('ambiguous') || props.eventType.includes('interrupted') ? 'error' : props.eventType.includes('warning') ? 'warn' : 'info');
+    this.area = props.area ?? props.resourceType;
+    this.outcome = props.outcome;
+    this.isArchived = props.isArchived ?? false;
   }
 
   public static create(
@@ -1135,6 +1147,7 @@ export class RelayEvent {
     eventType: string,
     options: Partial<Omit<EventProps, 'id' | 'timestamp' | 'resourceType' | 'resourceId' | 'eventType'>> = {},
   ): RelayEvent {
+    const defaultSeverity = eventType.includes('failed') || eventType.includes('ambiguous') || eventType.includes('interrupted') ? 'error' : 'info';
     return new RelayEvent({
       id: createId<EventId>('evt'),
       timestamp: Date.now(),
@@ -1147,6 +1160,10 @@ export class RelayEvent {
       evidence: options.evidence,
       correlationId: options.correlationId,
       details: options.details,
+      severity: options.severity ?? defaultSeverity,
+      area: options.area ?? resourceType,
+      outcome: options.outcome,
+      isArchived: options.isArchived ?? false,
     });
   }
 }

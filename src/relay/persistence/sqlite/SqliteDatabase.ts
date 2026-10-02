@@ -32,6 +32,7 @@ import {
   SqliteDeliveryRepository,
   SqliteHandoffRepository,
   SqliteEventRepository,
+  SqliteActivityRepository,
   SqliteAttentionRepository,
   SqlitePlanFirstRunRepository,
   SqliteWorkUnitRepository,
@@ -77,6 +78,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
   public readonly deliveries: SqliteDeliveryRepository;
   public readonly handoffs: SqliteHandoffRepository;
   public readonly events: SqliteEventRepository;
+  public readonly activities: SqliteActivityRepository;
   public readonly attention: SqliteAttentionRepository;
   public readonly associations: SqliteAssociationRepository;
   public readonly planFirstRuns: SqlitePlanFirstRunRepository;
@@ -100,6 +102,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     this.deliveries = new SqliteDeliveryRepository(this.db);
     this.handoffs = new SqliteHandoffRepository(this.db);
     this.events = new SqliteEventRepository(this.db);
+    this.activities = new SqliteActivityRepository(this.db);
     this.attention = new SqliteAttentionRepository(this.db);
     this.associations = new SqliteAssociationRepository(this.db);
     this.planFirstRuns = new SqlitePlanFirstRunRepository(this.db);
@@ -314,6 +317,24 @@ CREATE TABLE IF NOT EXISTS handoffs (
         new_state TEXT,
         evidence_json TEXT,
         correlation_id TEXT,
+        details_json TEXT,
+        severity TEXT NOT NULL DEFAULT 'info',
+        area TEXT NOT NULL DEFAULT 'engine',
+        outcome TEXT,
+        is_archived INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS activity_records (
+        id TEXT PRIMARY KEY,
+        timestamp INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        category TEXT NOT NULL,
+        status TEXT NOT NULL,
+        resource_type TEXT NOT NULL,
+        resource_id TEXT NOT NULL,
+        correlation_id TEXT,
+        evidence_json TEXT,
         details_json TEXT
       );
 
@@ -338,6 +359,10 @@ CREATE TABLE IF NOT EXISTS handoffs (
       CREATE INDEX IF NOT EXISTS idx_handoffs_assignment ON handoffs(assignment_id);
       CREATE INDEX IF NOT EXISTS idx_events_resource ON events(resource_id);
       CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity);
+      CREATE INDEX IF NOT EXISTS idx_events_area ON events(area);
+      CREATE INDEX IF NOT EXISTS idx_events_archived ON events(is_archived);
+      CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_records(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_attention_status ON attention_items(status);
     `);
 

@@ -18,6 +18,7 @@ import {
   PairSideIdentity,
   PairSideCheckpoint,
   PairCheckpointId,
+  ObservableEvidence,
 } from '../domain/types.ts';
 import {
   Project,
@@ -173,8 +174,48 @@ export interface IEventRepository {
   findById(id: EventId): Promise<RelayEvent | null>;
   findByResourceId(resourceId: string): Promise<RelayEvent[]>;
   findRecent(limit?: number): Promise<RelayEvent[]>;
+  findFiltered(options: EventFilterOptions): Promise<{ events: RelayEvent[]; total: number }>;
+  archiveOlderThan(timestamp: number): Promise<number>;
+  clearEligible(options: { beforeTimestamp?: number; severity?: string; area?: string; includeArchived?: boolean }): Promise<number>;
   save(event: RelayEvent): Promise<void>;
 }
+
+export interface IActivityRepository {
+  findAll(limit?: number): Promise<ActivityRecord[]>;
+  save(record: ActivityRecord): Promise<void>;
+  clear(): Promise<void>;
+}
+
+export interface EventFilterOptions {
+  search?: string;
+  severity?: string;
+  area?: string;
+  eventType?: string;
+  actor?: string;
+  resourceType?: string;
+  resourceId?: string;
+  correlationId?: string;
+  startTime?: number;
+  endTime?: number;
+  isArchived?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ActivityRecord {
+  id: string;
+  timestamp: number;
+  title: string;
+  summary: string;
+  category: string;
+  status: string;
+  resourceType: string;
+  resourceId: string;
+  correlationId?: string;
+  evidence?: ObservableEvidence;
+  details?: Record<string, unknown>;
+}
+
 
 export interface IAttentionRepository {
   findById(id: AttentionItemId): Promise<AttentionItem | null>;
@@ -320,6 +361,7 @@ export interface IRelayRepositories {
   deliveries: IDeliveryRepository;
   handoffs: IHandoffRepository;
   events: IEventRepository;
+  activities: IActivityRepository;
   attention: IAttentionRepository;
   associations: IAssociationRepository;
   planFirstRuns: IPlanFirstRunRepository;

@@ -72,6 +72,9 @@ import {
   IPlanFirstRunRepository,
   IWorkUnitRepository,
   IVerificationResultRepository,
+  EventFilterOptions,
+  ActivityRecord,
+  IActivityRepository,
 } from '../interfaces.ts';
 
 /* Helper functions for JSON safety */
@@ -1056,6 +1059,10 @@ export class SqliteEventRepository implements IEventRepository {
       evidence: safeJsonParse<ObservableEvidence>(row.evidence_json),
       correlationId: (row.correlation_id as string) || undefined,
       details: safeJsonParse<Record<string, unknown>>(row.details_json),
+      severity: (row.severity as any) || 'info',
+      area: (row.area as string) || (row.resource_type as string) || 'engine',
+      outcome: (row.outcome as string) || undefined,
+      isArchived: Number(row.is_archived || 0) === 1,
     });
   }
 
@@ -1071,8 +1078,131 @@ export class SqliteEventRepository implements IEventRepository {
   }
 
   async findRecent(limit = 100): Promise<RelayEvent[]> {
-    const rows = this.db.prepare('SELECT * FROM events ORDER BY timestamp DESC LIMIT ?').all(limit) as Array<Record<string, unknown>>;
+    const rows = this.db.prepare('SELECT * FROM events WHERE is_archived = 0 ORDER BY timestamp DESC LIMIT ?').all(limit) as Array<Record<string, unknown>>;
     return rows.map((r) => this.mapRow(r));
+  }
+
+  async findFiltered(options: EventFilterOptions): Promise<{ events: RelayEvent[]; total: number }> {
+    let sql = 'SELECT * FROM events WHERE 1=1';
+    let countSql = 'SELECT COUNT(*) as cnt FROM events WHERE 1=1';
+    const params: any[] = [];
+    const countParams: any[] = [];
+
+    if (options.isArchived !== undefined) {
+      sql += ' AND is_archived = ?';
+      countSql += ' AND is_archived = ?';
+      params.push(options.isArchived ? 1 : 0);
+      countParams.push(options.isArchived ? 1 : 0);
+    } else {
+      sql += ' AND is_archived = 0';
+      countSql += ' AND is_archived = 0';
+    }
+    if (options.severity) {
+      sql += ' AND severity = ?';
+      countSql += ' AND severity = ?';
+      params.push(options.severity);
+      countParams.push(options.severity);
+    }
+    if (options.area) {
+      sql += ' AND area = ?';
+      countSql += ' AND area = ?';
+      params.push(options.area);
+      countParams.push(options.area);
+    }
+    if (options.eventType) {
+      sql += ' AND event_type = ?';
+      countSql += ' AND event_type = ?';
+      params.push(options.eventType);
+      countParams.push(options.eventType);
+    }
+    if (options.actor) {
+      sql += ' AND actor = ?';
+      countSql += ' AND actor = ?';
+      params.push(options.actor);
+      countParams.push(options.actor);
+    }
+    if (options.resourceType) {
+      sql += ' AND resource_type = ?';
+      countSql += ' AND resource_type = ?';
+      params.push(options.resourceType);
+      countParams.push(options.resourceType);
+    }
+    if (options.resourceId) {
+      sql += ' AND resource_id = ?';
+      countSql += ' AND resource_id = ?';
+      params.push(options.resourceId);
+      countParams.push(options.resourceId);
+    }
+    if (options.correlationId) {
+      sql += ' AND correlation_id = ?';
+      countSql += ' AND correlation_id = ?';
+      params.push(options.correlationId);
+      countParams.push(options.correlationId);
+    }
+    if (options.startTime) {
+      sql += ' AND timestamp >= ?';
+      countSql += ' AND timestamp >= ?';
+      params.push(options.startTime);
+      countParams.push(options.startTime);
+    }
+    if (options.endTime) {
+      sql += ' AND timestamp <= ?';
+      countSql += ' AND timestamp <= ?';
+      params.push(options.endTime);
+      countParams.push(options.endTime);
+    }
+    if (options.search) {
+      sql += ' AND (event_type LIKE ? OR resource_id LIKE ? OR correlation_id LIKE ? OR details_json LIKE ?)';
+      countSql += ' AND (event_type LIKE ? OR resource_id LIKE ? OR correlation_id LIKE ? OR details_json LIKE ?)';
+      const s = `%${options.search}%`;
+      params.push(s, s, s, s);
+      countParams.push(s, s, s, s);
+    }
+
+    const totalRow = this.db.prepare(countSql).get(...countParams) as { cnt: number };
+    const total = totalRow?.cnt ?? 0;
+
+    sql += ' ORDER BY timestamp DESC';
+    if (options.limit !== undefined) {
+      sql += ' LIMIT ?';
+      params.push(options.limit);
+      if (options.offset !== undefined) {
+        sql += ' OFFSET ?';
+        params.push(options.offset);
+      }
+    }
+
+    const rows = this.db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
+    return { events: rows.map((r) => this.mapRow(r)), total };
+  }
+
+  async archiveOlderThan(timestamp: number): Promise<number> {
+    const res = this.db.prepare(
+      'UPDATE events SET is_archived = 1 WHERE timestamp < ? AND is_archived = 0'
+    ).run(timestamp);
+    return Number(res.changes);
+  }
+
+  async clearEligible(options: { beforeTimestamp?: number; severity?: string; area?: string; includeArchived?: boolean }): Promise<number> {
+    let sql = 'DELETE FROM events WHERE 1=1';
+    const params: any[] = [];
+    if (!options.includeArchived) {
+      sql += ' AND is_archived = 1';
+    }
+    if (options.beforeTimestamp) {
+      sql += ' AND timestamp < ?';
+      params.push(options.beforeTimestamp);
+    }
+    if (options.severity) {
+      sql += ' AND severity = ?';
+      params.push(options.severity);
+    }
+    if (options.area) {
+      sql += ' AND area = ?';
+      params.push(options.area);
+    }
+    const res = this.db.prepare(sql).run(...params);
+    return Number(res.changes);
   }
 
   async save(event: RelayEvent): Promise<void> {
@@ -1080,8 +1210,8 @@ export class SqliteEventRepository implements IEventRepository {
       INSERT INTO events (
         id, timestamp, resource_type, resource_id, event_type,
         actor, previous_state, new_state, evidence_json,
-        correlation_id, details_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        correlation_id, details_json, severity, area, outcome, is_archived
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       event.id,
@@ -1095,7 +1225,67 @@ export class SqliteEventRepository implements IEventRepository {
       safeJsonStringify(event.evidence),
       event.correlationId ?? null,
       safeJsonStringify(event.details),
+      event.severity,
+      event.area,
+      event.outcome ?? null,
+      event.isArchived ? 1 : 0,
     );
+  }
+}
+
+export class SqliteActivityRepository implements IActivityRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  private mapRow(row: Record<string, unknown>): ActivityRecord {
+    return {
+      id: row.id as string,
+      timestamp: Number(row.timestamp),
+      title: row.title as string,
+      summary: row.summary as string,
+      category: row.category as string,
+      status: row.status as string,
+      resourceType: row.resource_type as string,
+      resourceId: row.resource_id as string,
+      correlationId: (row.correlation_id as string) || undefined,
+      evidence: safeJsonParse<ObservableEvidence>(row.evidence_json),
+      details: safeJsonParse<Record<string, unknown>>(row.details_json),
+    };
+  }
+
+  async findAll(limit = 100): Promise<ActivityRecord[]> {
+    const rows = this.db.prepare('SELECT * FROM activity_records ORDER BY timestamp DESC LIMIT ?').all(limit) as Array<Record<string, unknown>>;
+    return rows.map((r) => this.mapRow(r));
+  }
+
+  async save(record: ActivityRecord): Promise<void> {
+    const stmt = this.db.prepare(`
+      INSERT INTO activity_records (
+        id, timestamp, title, summary, category, status,
+        resource_type, resource_id, correlation_id, evidence_json, details_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        title = excluded.title,
+        summary = excluded.summary,
+        status = excluded.status,
+        details_json = excluded.details_json
+    `);
+    stmt.run(
+      record.id,
+      record.timestamp,
+      record.title,
+      record.summary,
+      record.category,
+      record.status,
+      record.resourceType,
+      record.resourceId,
+      record.correlationId ?? null,
+      safeJsonStringify(record.evidence),
+      safeJsonStringify(record.details),
+    );
+  }
+
+  async clear(): Promise<void> {
+    this.db.prepare('DELETE FROM activity_records').run();
   }
 }
 

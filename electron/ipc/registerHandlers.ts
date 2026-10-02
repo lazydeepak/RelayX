@@ -104,6 +104,39 @@ export function registerRelayIpcHandlers(service: RelayApiService): void {
   ipcMain.handle(RELAY_IPC_CHANNELS.LIST_EVENTS, (_event, limit, resourceId) =>
     service.listEvents(limit, resourceId),
   );
+  ipcMain.handle(RELAY_IPC_CHANNELS.QUERY_EVENTS, (_event, options) =>
+    service.queryEvents(options),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.LIST_ACTIVITIES, (_event, limit) =>
+    service.listActivities(limit),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.RUN_ARCHIVE_CYCLE, () =>
+    service.runArchiveCycle(),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.GET_ARCHIVE_POLICY, () =>
+    service.getArchivePolicy(),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.SET_ARCHIVE_POLICY, (_event, interval, note) =>
+    service.setArchivePolicy(interval, note),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.CLEAR_LOGS, (_event, options) =>
+    service.clearLogs(options),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.GET_STORAGE_ACCOUNTING, () =>
+    service.getStorageAccounting(),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.EXPORT_AUDIT_DATA, (_event, options) =>
+    service.exportAuditData(options),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.GET_AUXILIARY_LOGS_INFO, () =>
+    service.getAuxiliaryLogsInfo(),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.READ_AUXILIARY_LOG, (_event, name, maxLines) =>
+    service.readAuxiliaryLog(name, maxLines),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.CLEAR_AUXILIARY_LOG, (_event, name) =>
+    service.clearAuxiliaryLog(name),
+  );
   ipcMain.handle(RELAY_IPC_CHANNELS.LIST_ATTENTION_ITEMS, () => service.listAttentionItems());
   ipcMain.handle(RELAY_IPC_CHANNELS.ACKNOWLEDGE_ATTENTION_ITEM, (_event, id) =>
     service.acknowledgeAttentionItem(id),
