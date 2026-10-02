@@ -5,8 +5,8 @@ import { join } from 'node:path';
 import { unlinkSync, existsSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { SqliteRelayDatabase } from '../src/relay/persistence/sqlite/SqliteDatabase.ts';
-import { Pair, Project, RuntimeSession } from '../src/relay/domain/entities.ts';
-import { ProviderType } from '../src/relay/domain/types.ts';
+import { Pair, Project, RuntimeSession, RelayEvent, Attempt } from '../src/relay/domain/entities.ts';
+import { ProviderType, EventId, AttemptId, AssignmentId, PairId, RuntimeSessionId } from '../src/relay/domain/types.ts';
 
 describe('RelayX SQLite Migration & Legacy Schema Upgrade', () => {
   it('migrates an old Relay database schema (missing canonical_path, git_root, archived_at, etc.), preserves data, and supports Add Project', async () => {
@@ -269,6 +269,193 @@ describe('RelayX SQLite Migration & Legacy Schema Upgrade', () => {
       assert.strictEqual(recovered.name, 'V1 Project');
 
       db.close();
+    } finally {
+      if (existsSync(testDbPath)) {
+        try {
+          unlinkSync(testDbPath);
+        } catch {}
+      }
+    }
+  });
+
+  it('migrates an existing database with legacy events table (missing severity/area/is_archived) and legacy attempts table', async () => {
+    const testDbPath = join(tmpdir(), `relay_legacy_events_migration_${Date.now()}.sqlite`);
+    if (existsSync(testDbPath)) unlinkSync(testDbPath);
+
+    try {
+      // 1. Construct an older database where events was created before severity/area/outcome/is_archived existed,
+      // and attempts was created before session_pair_id/worker_session_id/external_session_id existed.
+      const rawDb = new DatabaseSync(testDbPath);
+      rawDb.exec(`
+        CREATE TABLE projects (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          description TEXT,
+          canonical_path TEXT,
+          git_root TEXT,
+          planner_project_url TEXT,
+          worker_workspace_path TEXT,
+          status TEXT NOT NULL DEFAULT 'active',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE runtime_sessions (
+          id TEXT PRIMARY KEY,
+          provider_type TEXT NOT NULL,
+          name TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE pairs (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          planner_session_id TEXT REFERENCES runtime_sessions(id),
+          worker_session_id TEXT REFERENCES runtime_sessions(id),
+          active_assignment_id TEXT,
+          status TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE assignments (
+          id TEXT PRIMARY KEY,
+          pair_id TEXT NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          title TEXT NOT NULL,
+          instruction TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        -- Legacy attempts table without session_pair_id, worker_session_id, external_session_id, repo_baseline_json, repo_observation_json
+        CREATE TABLE attempts (
+          id TEXT PRIMARY KEY,
+          assignment_id TEXT NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+          attempt_number INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          started_at INTEGER NOT NULL,
+          finished_at INTEGER,
+          failure_reason TEXT,
+          evidence_json TEXT
+        );
+
+        -- Legacy events table without severity, area, outcome, is_archived
+        CREATE TABLE events (
+          id TEXT PRIMARY KEY,
+          timestamp INTEGER NOT NULL,
+          resource_type TEXT NOT NULL,
+          resource_id TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          actor TEXT NOT NULL,
+          previous_state TEXT,
+          new_state TEXT,
+          evidence_json TEXT,
+          correlation_id TEXT,
+          details_json TEXT
+        );
+
+        PRAGMA user_version = 2;
+      `);
+
+      const now = Date.now();
+      const projId = 'proj_mig_1';
+      const pairId = 'pair_mig_1';
+      const assignId = 'assign_mig_1';
+      const attemptId = 'attempt_mig_1';
+      const legacyEvent1Id = 'evt_legacy_001';
+      const legacyEvent2Id = 'evt_legacy_002';
+
+      rawDb.prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)').run(projId, 'Migration Project', now, now);
+      rawDb.prepare('INSERT INTO pairs (id, project_id, name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)').run(pairId, projId, 'Migration Pair', 'active', now, now);
+      rawDb.prepare('INSERT INTO assignments (id, pair_id, project_id, title, instruction, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(assignId, pairId, projId, 'Task', 'Do work', 'active', now, now);
+      rawDb.prepare('INSERT INTO attempts (id, assignment_id, attempt_number, status, started_at) VALUES (?, ?, ?, ?, ?)').run(attemptId, assignId, 1, 'running', now);
+
+      rawDb.prepare(`
+        INSERT INTO events (id, timestamp, resource_type, resource_id, event_type, actor, correlation_id, details_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(legacyEvent1Id, now - 1000, 'project', projId, 'project.created', 'user', 'corr_1', JSON.stringify({ key: 'val1' }));
+
+      rawDb.prepare(`
+        INSERT INTO events (id, timestamp, resource_type, resource_id, event_type, actor, correlation_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(legacyEvent2Id, now - 500, 'pair', pairId, 'pair.created', 'engine', 'corr_2');
+
+      rawDb.close();
+
+      // 2. Open with SqliteRelayDatabase — this runs initSchema() on the older database!
+      // Previously, this threw: Unhandled Rejection: Error: no such column: severity
+      const db = new SqliteRelayDatabase(testDbPath);
+
+      // 3. Verify legacy events survived and were safely upgraded with correct defaults
+      const ev1 = await db.events.findById(legacyEvent1Id as EventId);
+      assert.ok(ev1, 'Legacy event 1 must survive migration');
+      assert.strictEqual(ev1.severity, 'info', 'Legacy event must default severity to info');
+      assert.strictEqual(ev1.area, 'engine', 'Legacy event area defaults to engine as per schema');
+      assert.strictEqual(ev1.isArchived, false, 'Legacy event must default isArchived to false');
+      assert.strictEqual(ev1.correlationId, 'corr_1');
+
+      const ev2 = await db.events.findById(legacyEvent2Id as EventId);
+      assert.ok(ev2, 'Legacy event 2 must survive migration');
+      assert.strictEqual(ev2.severity, 'info');
+      assert.strictEqual(ev2.isArchived, false);
+
+      // 4. Verify indexes were created and exist in the database
+      const indexes = (
+        db.db.prepare("SELECT name FROM sqlite_master WHERE type='index'").all() as { name: string }[]
+      ).map((i) => i.name);
+      assert.ok(indexes.includes('idx_events_severity'), 'idx_events_severity must exist');
+      assert.ok(indexes.includes('idx_events_area'), 'idx_events_area must exist');
+      assert.ok(indexes.includes('idx_events_archived'), 'idx_events_archived must exist');
+
+      // 5. Test filtered query on upgraded events
+      const filtered = await db.events.findFiltered({ severity: 'info' });
+      assert.ok(filtered.total >= 2, 'Filtered query by severity must find legacy events');
+
+      // 6. Test inserting a new event with explicit non-default severity/area
+      const newEvent = RelayEvent.create('assignment', assignId, 'assignment.dispatched', {
+        severity: 'warn',
+        area: 'supervisor',
+        actor: 'supervisor',
+      });
+      await db.events.save(newEvent);
+
+      const loadedNewEvent = await db.events.findById(newEvent.id);
+      assert.ok(loadedNewEvent, 'New event must be saved');
+      assert.strictEqual(loadedNewEvent.severity, 'warn');
+      assert.strictEqual(loadedNewEvent.area, 'supervisor');
+
+      // 7. Verify legacy attempts survived and upgraded columns are functional
+      const legacyAttempt = await db.attempts.findById(attemptId as AttemptId);
+      assert.ok(legacyAttempt, 'Legacy attempt must survive migration');
+      assert.ok(!legacyAttempt.sessionPairId, 'Legacy attempt has no session pair initially');
+
+      // Save an attempt with newly added columns populated
+      const newAttempt = Attempt.create(assignId as AssignmentId, 2, {
+        sessionPairId: pairId as PairId,
+        workerSessionId: 'sess_wk_1' as RuntimeSessionId,
+        externalSessionId: 'ext_ses_1',
+      });
+      await db.attempts.save(newAttempt);
+
+      const reloadedAttempt = await db.attempts.findById(newAttempt.id);
+      assert.ok(reloadedAttempt, 'Attempt must be reloaded');
+      assert.strictEqual(reloadedAttempt.sessionPairId, pairId);
+      assert.strictEqual(reloadedAttempt.workerSessionId, 'sess_wk_1');
+      assert.strictEqual(reloadedAttempt.externalSessionId, 'ext_ses_1');
+
+      db.close();
+
+      // 8. Test Idempotency: Re-opening the upgraded database must succeed without errors
+      const reopenedDb = new SqliteRelayDatabase(testDbPath);
+      const recheckedEv = await reopenedDb.events.findById(legacyEvent1Id as EventId);
+      assert.ok(recheckedEv, 'Event must still exist after idempotent reopen');
+      assert.strictEqual(recheckedEv.severity, 'info');
+      reopenedDb.close();
     } finally {
       if (existsSync(testDbPath)) {
         try {

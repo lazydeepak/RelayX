@@ -231,6 +231,9 @@ function createWindow(): void {
 // Ensure single instance lock
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
+  console.log(
+    '[Lifecycle] Another RelayX instance owns the single-instance lock; exiting.'
+  );
   app.quit();
 } else {
   app.on('second-instance', () => {

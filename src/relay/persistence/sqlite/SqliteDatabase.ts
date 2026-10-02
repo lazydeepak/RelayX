@@ -359,9 +359,6 @@ CREATE TABLE IF NOT EXISTS handoffs (
       CREATE INDEX IF NOT EXISTS idx_handoffs_assignment ON handoffs(assignment_id);
       CREATE INDEX IF NOT EXISTS idx_events_resource ON events(resource_id);
       CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp DESC);
-      CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity);
-      CREATE INDEX IF NOT EXISTS idx_events_area ON events(area);
-      CREATE INDEX IF NOT EXISTS idx_events_archived ON events(is_archived);
       CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_records(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_attention_status ON attention_items(status);
     `);
@@ -401,9 +398,14 @@ CREATE TABLE IF NOT EXISTS handoffs (
     addColumnIfNeeded(this.db, 'assignments', 'active_handoff_id', 'TEXT');
     addColumnIfNeeded(this.db, 'assignments', 'completed_at', 'INTEGER');
 
+    addColumnIfNeeded(this.db, 'attempts', 'session_pair_id', 'TEXT');
+    addColumnIfNeeded(this.db, 'attempts', 'worker_session_id', 'TEXT');
+    addColumnIfNeeded(this.db, 'attempts', 'external_session_id', 'TEXT');
     addColumnIfNeeded(this.db, 'attempts', 'finished_at', 'INTEGER');
     addColumnIfNeeded(this.db, 'attempts', 'failure_reason', 'TEXT');
     addColumnIfNeeded(this.db, 'attempts', 'evidence_json', 'TEXT');
+    addColumnIfNeeded(this.db, 'attempts', 'repo_baseline_json', 'TEXT');
+    addColumnIfNeeded(this.db, 'attempts', 'repo_observation_json', 'TEXT');
 
     addColumnIfNeeded(this.db, 'deliveries', 'evidence_json', 'TEXT');
     addColumnIfNeeded(this.db, 'deliveries', 'delivered_at', 'INTEGER');
@@ -421,6 +423,26 @@ CREATE TABLE IF NOT EXISTS handoffs (
     addColumnIfNeeded(this.db, 'events', 'evidence_json', 'TEXT');
     addColumnIfNeeded(this.db, 'events', 'correlation_id', 'TEXT');
     addColumnIfNeeded(this.db, 'events', 'details_json', 'TEXT');
+    addColumnIfNeeded(this.db, 'events', 'severity', "TEXT NOT NULL DEFAULT 'info'");
+    addColumnIfNeeded(this.db, 'events', 'area', "TEXT NOT NULL DEFAULT 'engine'");
+    addColumnIfNeeded(this.db, 'events', 'outcome', 'TEXT');
+    addColumnIfNeeded(this.db, 'events', 'is_archived', 'INTEGER NOT NULL DEFAULT 0');
+
+    this.db.exec(`
+      UPDATE events SET severity = 'info' WHERE severity IS NULL;
+      UPDATE events SET area = 'engine' WHERE area IS NULL;
+      UPDATE events SET is_archived = 0 WHERE is_archived IS NULL;
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity);
+      CREATE INDEX IF NOT EXISTS idx_events_area ON events(area);
+      CREATE INDEX IF NOT EXISTS idx_events_archived ON events(is_archived);
+    `);
+
+    addColumnIfNeeded(this.db, 'activity_records', 'correlation_id', 'TEXT');
+    addColumnIfNeeded(this.db, 'activity_records', 'evidence_json', 'TEXT');
+    addColumnIfNeeded(this.db, 'activity_records', 'details_json', 'TEXT');
 
     addColumnIfNeeded(this.db, 'attention_items', 'pair_id', 'TEXT');
     addColumnIfNeeded(this.db, 'attention_items', 'assignment_id', 'TEXT');
