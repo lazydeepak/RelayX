@@ -83,9 +83,15 @@ export function registerRelayIpcHandlers(service: RelayApiService): void {
   );
 
   ipcMain.handle(RELAY_IPC_CHANNELS.LIST_ASSIGNMENTS, () => service.listAssignments());
+  ipcMain.handle(RELAY_IPC_CHANNELS.GET_ASSIGNMENT_DETAIL, (_event, id) => service.getAssignmentDetail(id));
   ipcMain.handle(
     RELAY_IPC_CHANNELS.CREATE_ASSIGNMENT,
     (_event, pairId, title, instruction) => service.createAssignment(pairId, title, instruction),
+  );
+  ipcMain.handle(
+    RELAY_IPC_CHANNELS.CREATE_AND_DISPATCH_ASSIGNMENT,
+    (_event, pairId, title, instruction) =>
+      service.createAndDispatchAssignment(pairId, title, instruction),
   );
   ipcMain.handle(RELAY_IPC_CHANNELS.DISPATCH_ASSIGNMENT, (_event, assignmentId) =>
     service.dispatchAssignment(assignmentId),
@@ -198,6 +204,27 @@ export function registerRelayIpcHandlers(service: RelayApiService): void {
   ipcMain.handle(RELAY_IPC_CHANNELS.COPY_DIAGNOSTIC_REPORT, () =>
     service.copyDiagnosticReport(),
   );
+
+  // --- Phase 1 Health (read-only projections) ---
+  // These read persisted health state only. They do not run detectors, contact
+  // providers, or spawn subprocesses; detection happens in the application layer.
+  ipcMain.handle(RELAY_IPC_CHANNELS.GET_HEALTH_SUMMARY, () => service.getHealthSummary());
+  ipcMain.handle(RELAY_IPC_CHANNELS.LIST_HEALTH_INCIDENTS, (_event, options) =>
+    service.listHealthIncidents(options ?? {}),
+  );
+  ipcMain.handle(RELAY_IPC_CHANNELS.GET_HEALTH_INCIDENT, (_event, id) =>
+    service.getHealthIncident(id),
+  );
+  // Acknowledgement only: records that a human saw the problem. It never
+  // resolves, retries, or repairs.
+  ipcMain.handle(RELAY_IPC_CHANNELS.ACKNOWLEDGE_HEALTH_INCIDENT, (_event, id) =>
+    service.acknowledgeHealthIncident(id),
+  );
+  // Read-only handoff report. Phase 1 does NOT deliver it anywhere; the operator
+  // copies the text out. No detector runs and no provider is contacted here.
+  ipcMain.handle(RELAY_IPC_CHANNELS.GENERATE_HEALTH_HANDOFF_REPORT, (_event, id, options) =>
+    service.generateHealthHandoffReport(id, options ?? {}),
+  );
   ipcMain.handle(RELAY_IPC_CHANNELS.LIST_INTEGRATIONS, () =>
     service.listIntegrations(),
   );
@@ -233,8 +260,8 @@ export function registerRelayIpcHandlers(service: RelayApiService): void {
   ipcMain.handle(RELAY_IPC_CHANNELS.GET_SUPPORTED_MODELS, (_event, providerType) =>
     service.getSupportedModels(providerType),
   );
-  ipcMain.handle(RELAY_IPC_CHANNELS.GET_EFFECTIVE_MODEL_CONFIG, (_event, providerType, projectId) =>
-    service.getEffectiveModelConfig(providerType, projectId),
+  ipcMain.handle(RELAY_IPC_CHANNELS.GET_EFFECTIVE_MODEL_CONFIG, (_event, providerType, projectId, pairId) =>
+    service.getEffectiveModelConfig(providerType, projectId, pairId),
   );
   ipcMain.handle(RELAY_IPC_CHANNELS.SET_GLOBAL_MODEL_DEFAULT, (_event, providerType, model, note) =>
     service.setGlobalModelDefault(providerType, model, note),
@@ -248,5 +275,15 @@ export function registerRelayIpcHandlers(service: RelayApiService): void {
     RELAY_IPC_CHANNELS.CLEAR_PROJECT_MODEL_OVERRIDE,
     (_event, projectId, providerType) =>
       service.clearProjectModelOverride(projectId, providerType),
+  );
+  ipcMain.handle(
+    RELAY_IPC_CHANNELS.SET_PAIR_MODEL_OVERRIDE,
+    (_event, pairId, providerType, model, justification) =>
+      service.setPairModelOverride(pairId, providerType, model, justification),
+  );
+  ipcMain.handle(
+    RELAY_IPC_CHANNELS.CLEAR_PAIR_MODEL_OVERRIDE,
+    (_event, pairId, providerType) =>
+      service.clearPairModelOverride(pairId, providerType),
   );
 }

@@ -200,6 +200,7 @@ export interface ProviderIntegration {
   scripts?: {
     launchScript?: string;
     createSessionScript?: string;
+    discoverProjectScript?: string;
     openSessionScript?: string;
     sendMessageScript?: string;
     inspectSessionScript?: string;
@@ -229,6 +230,52 @@ export interface ProviderIntegration {
   };
   supportedModels?: string[];
   automationBreakdown?: Record<string, string>;
+}
+
+/* --- Phase 1 Health (read-only projections) -------------------------------
+ *
+ * The renderer may READ persisted health state and nothing else. These calls
+ * perform no provider contact, no subprocess, no session discovery, and no
+ * health evaluation: detection already happened in the Electron/application
+ * runtime and these are pure projections over what it persisted.
+ */
+
+/** Overall aggregate. `UNKNOWN` is truthful, not a placeholder for HEALTHY. */
+export type HealthAggregateState = 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY' | 'UNKNOWN';
+
+export interface UIHealthSummary {
+  overall: HealthAggregateState;
+  overallReason: string;
+  activeIncidentCount: number;
+  resolvedIncidentCount: number;
+  totalObservationCount: number;
+  hasSufficientEvidence: boolean;
+  observedCheckTypes: string[];
+  lastObservationAt: number | null;
+}
+
+export interface UIHealthIncident {
+  id: string;
+  incidentType: string;
+  severity: 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL';
+  status: 'OPEN' | 'ACKNOWLEDGED' | 'RESOLVED' | 'RECURRED';
+  componentType: string;
+  componentId: string | null;
+  firstSeen: number;
+  lastSeen: number;
+  occurrenceCount: number;
+  summary: string;
+  evidenceKeys: string[];
+}
+
+/**
+ * Incident detail. `evidence` contains ONLY flat scalars: nested objects and
+ * arrays are dropped by the projection, so a transcript, prompt body, or command
+ * line cannot reach the UI even if one were written into the record.
+ */
+export interface UIHealthIncidentDetail extends UIHealthIncident {
+  evidence: Record<string, string | number | boolean | null>;
+  unavailableFields: string[];
 }
 
 export interface IRelayApi {
@@ -307,8 +354,20 @@ export interface IRelayApi {
   unarchiveRuntimeSession(sessionId: string): Promise<UIRuntimeSession>;
   listAssignments(): Promise<UIAssignment[]>;
   createAssignment(pairId: string, title: string, instruction: string): Promise<UIAssignment>;
+  /**
+   * Create AND dispatch. Never throws for an expected outcome: the result
+   * distinguishes a PRE-claim refusal (nothing was created) from a POST-claim
+   * dispatch failure (the Assignment exists and owns the slot, and must be
+   * recovered — never reported as a creation failure).
+   */
+  createAndDispatchAssignment(
+    pairId: string,
+    title: string,
+    instruction: string,
+  ): Promise<CreateAndDispatchResult>;
   dispatchAssignment(assignmentId: string): Promise<{ success: boolean; deliveryOutcome: string }>;
   completeAssignment(assignmentId: string): Promise<{ success: boolean }>;
+  getAssignmentDetail(id: string): Promise<any>;
   deliverHandoff(handoffId: string): Promise<{ success: boolean }>;
   resolveAmbiguousDelivery(deliveryId: string, resolution: 'confirmed_delivered' | 'retry_permitted'): Promise<{ success: boolean }>;
   listEvents(limit?: number, resourceId?: string): Promise<UIEvent[]>;
@@ -404,6 +463,29 @@ export interface IRelayApi {
   getDiagnosticsReport(): Promise<DiagnosticsReport>;
   copyDiagnosticReport(): Promise<string>;
 
+  /* --- Phase 1 Health (read-only) -----------------------------------------
+   *
+   * These read persisted health state produced by the runtime health system.
+   * They never run a detector, never contact a provider, and never mutate any
+   * operational entity. `acknowledgeHealthIncident` is the single narrow write:
+   * it marks an operator acknowledgement and explicitly does NOT resolve.
+   */
+  getHealthSummary(): Promise<UIHealthSummary>;
+  listHealthIncidents(options?: {
+    status?: 'active' | 'history';
+    limit?: number;
+  }): Promise<UIHealthIncident[]>;
+  getHealthIncident(id: string): Promise<UIHealthIncidentDetail | null>;
+  acknowledgeHealthIncident(id: string): Promise<{ success: boolean; status?: string }>;
+  /**
+   * Generate a read-only external-worker handoff report for one incident.
+   *
+   * A factual summary of what RelayX observed and classified. Runs no detector,
+   * contacts no provider, and mutates nothing. Phase 1 does not deliver the
+   * report anywhere: the human copies it out.
+   */
+  generateHealthHandoffReport(id: string, options?: { eventLimit?: number }): Promise<string | null>;
+
   // Provider Integration & Capability Model
   listIntegrations(): Promise<ProviderIntegration[]>;
   verifyIntegration(providerType: ProviderType): Promise<ProviderIntegration>;
@@ -421,19 +503,53 @@ export interface IRelayApi {
   listProjectIntegrationOverrides(): Promise<ProjectIntegrationOverride[]>;
 
   // Worker AI Model Configuration & Application
+  //
+  // These are PERSISTENT RelayX configuration writes. None of them contact a
+  // provider: the resolved model is applied by the engine at the authorized
+  // dispatch boundary. A selection is therefore legal while a Pair is IDLE.
   getSupportedModels(providerType: ProviderType): Promise<string[]>;
-  getEffectiveModelConfig(providerType: ProviderType, projectId?: string): Promise<EffectiveModelConfig>;
+  getEffectiveModelConfig(providerType: ProviderType, projectId?: string, pairId?: string): Promise<EffectiveModelConfig>;
   setGlobalModelDefault(providerType: ProviderType, model: string, note?: string): Promise<ProviderSetting | null>;
   setProjectModelOverride(projectId: string, providerType: ProviderType, model: string, justification: string): Promise<ProviderSetting | null>;
   clearProjectModelOverride(projectId: string, providerType: ProviderType): Promise<void>;
+  setPairModelOverride(pairId: string, providerType: ProviderType, model: string, justification: string): Promise<ProviderSetting | null>;
+  clearPairModelOverride(pairId: string, providerType: ProviderType): Promise<void>;
+}
+
+/**
+ * Outcome of the Create & Dispatch orchestration command.
+ *
+ * The claim (`createAssignmentAndClaimExecutionSlot`) commits before external
+ * delivery is attempted, so a later dispatch failure must NOT be reported as a
+ * creation failure. This shape carries that distinction across IPC:
+ *   - `created: false`                 → pre-claim refusal; nothing durable.
+ *   - `created: true` + `dispatchError`→ the Assignment EXISTS and owns the slot;
+ *                                        it is recoverable, not lost.
+ *   - `created: true` + `deliveryOutcome` → delivery ran (delivered | ambiguous | failed).
+ */
+export interface CreateAndDispatchResult {
+  /** True iff an Assignment was durably created and now owns the execution slot. */
+  created: boolean;
+  /** Present whenever `created` is true. */
+  assignment?: UIAssignment;
+  /** Delivery outcome when the dispatch ran to an outcome (`delivered`/`ambiguous`/`failed`). */
+  deliveryOutcome?: string;
+  /** Present when the claim committed but the subsequent dispatch failed. */
+  dispatchError?: string;
+  /** Present when nothing was created (pre-claim refusal). */
+  error?: string;
+  /** Optional domain/engine error code for either failure shape. */
+  errorCode?: string;
 }
 
 export interface EffectiveModelConfig {
   providerType: ProviderType;
   globalDefault: string | null;
   projectOverride: string | null;
+  pairOverride?: string | null;
   effectiveModel: string;
   isProjectOverride: boolean;
+  isPairOverride?: boolean;
   justification?: string | null;
   supportedModels: string[];
 }

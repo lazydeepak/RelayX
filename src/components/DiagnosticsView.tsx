@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { DiagnosticsReport, HealthLevel } from '../types/relayApi.ts';
 import { relayBridge } from '../services/relayBridge.ts';
+import { HealthPanel } from './HealthPanel.tsx';
 
 interface DiagnosticsViewProps {
   onNotify: (msg: string) => void;
@@ -144,6 +145,9 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({ onNotify }) =>
       </div>
 
       <div className="max-w-6xl mx-auto space-y-8">
+        {/* Phase 1 Health — read-only, sits alongside the existing diagnostics. */}
+        <HealthPanel onNotify={onNotify} />
+
         {/* Overall Status & Warnings */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <div className="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-6 flex flex-col justify-between">

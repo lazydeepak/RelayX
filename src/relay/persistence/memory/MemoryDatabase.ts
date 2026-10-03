@@ -34,6 +34,7 @@ import {
   PlanFirstRun,
   PairCheckpoint,
 } from '../../domain/entities.ts';
+import { HealthObservation, HealthIncident } from '../../domain/healthDomain.ts';
 import type { VerificationResult } from '../../domain/repoBoundary.ts';
 import {
   IRelayRepositories,
@@ -57,6 +58,8 @@ import {
   IWorkUnitRepository,
   IVerificationResultRepository,
   IProviderSettingsRepository,
+  IHealthObservationRepository,
+  IHealthIncidentRepository,
   ProviderSetting,
   AssociationEvidenceCriteria,
   EventFilterOptions,
@@ -1039,6 +1042,49 @@ export class MemoryPairCheckpointRepository implements IPairCheckpointRepository
   }
 }
 
+export class MemoryHealthObservationRepository implements IHealthObservationRepository {
+  private readonly items = new Map<string, HealthObservation>();
+  async save(observation: HealthObservation): Promise<void> {
+    this.items.set(observation.id, observation);
+  }
+  async findByCheckType(checkType: string): Promise<HealthObservation[]> {
+    return [...this.items.values()].filter((o) => o.checkType === checkType);
+  }
+  async findRecent(limit = 50): Promise<HealthObservation[]> {
+    return [...this.items.values()]
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, limit);
+  }
+}
+
+export class MemoryHealthIncidentRepository implements IHealthIncidentRepository {
+  private readonly items = new Map<string, HealthIncident>();
+  async findById(id: string): Promise<HealthIncident | null> {
+    return this.items.get(id) ?? null;
+  }
+  async findOpen(): Promise<HealthIncident[]> {
+    return [...this.items.values()].filter((i) => ['OPEN', 'ACKNOWLEDGED', 'RECURRED'].includes(i.status));
+  }
+  async findByIncidentType(incidentType: string): Promise<HealthIncident[]> {
+    return [...this.items.values()].filter((i) => i.incidentType === incidentType);
+  }
+  async findByComponent(componentType: string, componentId?: string): Promise<HealthIncident[]> {
+    return [...this.items.values()].filter(
+      (i) => i.componentType === componentType && (componentId === undefined || i.componentId === componentId),
+    );
+  }
+  async findRecentHistory(limit: number): Promise<HealthIncident[]> {
+    const safeLimit = Math.max(1, Math.min(Math.floor(limit) || 1, 500));
+    return [...this.items.values()]
+      .filter((i) => i.status === 'RESOLVED' || i.status === 'RECURRED')
+      .sort((a, b) => b.lastSeen - a.lastSeen)
+      .slice(0, safeLimit);
+  }
+  async save(incident: HealthIncident): Promise<void> {
+    this.items.set(incident.id, incident);
+  }
+}
+
 export class MemoryRelayDatabase implements IRelayRepositories {
   public readonly projects: MemoryProjectRepository;
   public readonly pairs: MemoryPairRepository;
@@ -1059,6 +1105,8 @@ export class MemoryRelayDatabase implements IRelayRepositories {
   public readonly contractRevisions: MemoryContractRevisionRepository;
   public readonly verificationResults: MemoryVerificationResultRepository;
   public readonly providerSettings: MemoryProviderSettingsRepository;
+  public readonly healthObservations: MemoryHealthObservationRepository;
+  public readonly healthIncidents: MemoryHealthIncidentRepository;
 
   constructor() {
     this.projects = new MemoryProjectRepository();
@@ -1080,6 +1128,8 @@ export class MemoryRelayDatabase implements IRelayRepositories {
     this.contractRevisions = new MemoryContractRevisionRepository();
     this.verificationResults = new MemoryVerificationResultRepository();
     this.providerSettings = new MemoryProviderSettingsRepository();
+    this.healthObservations = new MemoryHealthObservationRepository();
+    this.healthIncidents = new MemoryHealthIncidentRepository();
   }
 
   async runInTransaction<T>(work: () => Promise<T>): Promise<T> {

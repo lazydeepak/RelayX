@@ -267,6 +267,25 @@ export type PlannerDeliveryAttempt =
       externalContactAttempted: true;
     };
 
+export type RelayOrchestrationTransition =
+  | 'disabled'
+  | 'awaiting_work'
+  | 'awaiting_evidence'
+  | 'assignment_dispatched'
+  | 'handoff_advanced'
+  | 'plan_first_advanced'
+  | 'busy';
+
+export interface RelayOrchestrationResult {
+  pairId: PairId;
+  transition: RelayOrchestrationTransition;
+  assignmentId?: AssignmentId;
+  attemptId?: AttemptId;
+  deliveryId?: DeliveryId;
+  handoffId?: HandoffId;
+  planFirstRunId?: PlanFirstRunId;
+}
+
 /**
  * A compact, event-safe projection of one side. Only tri-state facts and the
  * mandatory dimensions 8/9 travel into the audit stream, so an event can never
@@ -290,6 +309,7 @@ export class RelayEngine {
   private readonly providers: Map<string, IRuntimeProvider> = new Map();
   private registry?: IntegrationRegistry;
   private isSupervising = false;
+  private readonly orchestratingPairs = new Set<PairId>();
   /**
    * Deterministic verification seam (PLAN_FIRST_DOMAIN_FREEZE.md §G step 10). Defaults to
    * the fail-closed milestone-1 evaluator, because the real correctness check is
@@ -1082,16 +1102,15 @@ export class RelayEngine {
       instructionText,
       idempotencyKey,
       preDispatchWatermark: boundary.watermark,
-      modelOverride: await this.resolveProviderModelOverride(runtime.providerType, pair.projectId),
+      modelOverride: await this.resolveProviderModelOverride(runtime.providerType, pair.projectId, pair.id),
     });
 
     if (result.outcome === 'delivered') {
       delivery.confirmDelivered(result.evidence);
       await this.repos.deliveries.save(delivery);
-      if (attempt.status === 'prepared') {
-        attempt.startRunning();
-        await this.repos.attempts.save(attempt);
-      }
+      // Execution promotion removed per freeze: delivery confirmation alone
+      // does not prove execution began. Attempt remains `prepared` until
+      // execution evidence is observed (e.g. supervision tick / transcript).
       await this.emitEvent('pair', pairId, 'pair.continuation_delivered', {
         actor: 'engine',
         details: {
@@ -1613,6 +1632,76 @@ export class RelayEngine {
   }
 
   /**
+   * Atomically create an Assignment AND claim the Pair's execution slot.
+   *
+   * ## Scope (read this before assuming it sends anything)
+   *
+   * This is a pure database operation. It does NOT contact a provider and does
+   * NOT deliver anything. It is the first half of the application-level
+   * `createAndDispatchAssignment` orchestration, which subsequently calls the
+   * ordinary `dispatchAssignment` path for the external send. The name is
+   * deliberately precise: "create-and-dispatch" would wrongly imply that external
+   * delivery is transactionally atomic too, which it cannot be.
+   *
+   * ## The defect this closes
+   *
+   * `createAssignment` (backlog creation) and `dispatchAssignment` are two
+   * independent durable operations. The Create & Dispatch flow used to run them
+   * in that order, so a Pair that already owned an unresolved active Assignment
+   * produced a durable `pending` Assignment and only THEN hit the execution-slot
+   * guard at dispatch — an orphan that could never obtain the slot.
+   *
+   * ## Why this is atomic
+   *
+   * The same authority gates that dispatch enforces are evaluated HERE, inside a
+   * single transaction, BEFORE the Assignment is durable:
+   *   - `assertContactPermitted` (I-2) — an IDLE Pair creates nothing;
+   *   - `assertExecutionSlotAvailable` — an occupied slot creates nothing.
+   *
+   * The transaction then claims the slot (`pair.assignWork`) atomically with the
+   * create, so two concurrent callers cannot both create: the second sees the
+   * first as the slot holder and is refused before it writes. The returned state
+   * (`pending` Assignment owning the slot, no Attempt, no Delivery) is a coherent,
+   * recoverable intermediate — the caller starts delivery next, via the normal
+   * `dispatchAssignment` path.
+   *
+   * A plain `createAssignment` keeps its documented backlog semantics; the
+   * execution-slot authority itself is unchanged.
+   */
+  public async createAssignmentAndClaimExecutionSlot(
+    pairId: PairId,
+    title: string,
+    instruction: string,
+    context: AuthorityContext = 'OPERATOR_EXPLICIT',
+  ): Promise<Assignment> {
+    return this.repos.runInTransaction(async () => {
+      const pair = await this.repos.pairs.findById(pairId);
+      if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'PAIR_NOT_FOUND');
+
+      // Same I-2 gate dispatch enforces — evaluated before anything is durable.
+      pair.assertContactPermitted(context);
+
+      const created = Assignment.create(pairId, pair.projectId, title, instruction);
+
+      // Same execution-slot authority dispatch enforces — a non-terminal holder
+      // is refused here, so no Assignment is created.
+      await this.assertExecutionSlotAvailable(pair, created);
+
+      await this.repos.assignments.save(created);
+      pair.assignWork(created.id);
+      await this.repos.pairs.save(pair);
+
+      await this.emitEvent('assignment', created.id, 'assignment.created', {
+        actor: 'user',
+        newState: created.status,
+        details: { title, pairId },
+      });
+
+      return created;
+    });
+  }
+
+  /**
    * EXECUTION-SLOT INVARIANT — at most ONE unresolved Assignment owns a Pair's work.
    *
    * ## What the invariant is
@@ -1734,16 +1823,21 @@ export class RelayEngine {
   public async resolveEffectiveModelConfig(
     providerType: ProviderType,
     projectId?: ProjectId,
+    pairId?: PairId,
   ): Promise<{
     providerType: ProviderType;
     globalDefault: string | null;
     projectOverride: string | null;
+    pairOverride: string | null;
     effectiveModel: string;
     isProjectOverride: boolean;
+    isPairOverride: boolean;
     justification?: string | null;
     supportedModels: string[];
   }> {
-    const supportedModels = RelayEngine.getSupportedModels(providerType);
+    const allSupported = RelayEngine.getSupportedModels(providerType);
+    const freeOnly = allSupported.filter((m: string) => /(?:free|free-default)/i.test(m) || m === 'opencode-zen/free-default');
+    const supportedModels = freeOnly.length ? freeOnly : allSupported;
     const globalSetting = await this.repos.providerSettings.get(
       RelayEngine.providerSettingKey(providerType, 'transportModel'),
     );
@@ -1761,16 +1855,32 @@ export class RelayEngine {
       }
     }
 
-    const effectiveModel = projectOverride || globalDefault || supportedModels[0] || 'default';
+    let pairOverride: string | null = null;
+    let pairJustification: string | null = null;
+    if (pairId) {
+      const pairSetting = await this.repos.providerSettings.get(
+        `${providerType}:pair:${pairId}:transportModel`,
+      );
+      if (pairSetting && pairSetting.value.trim()) {
+        pairOverride = pairSetting.value.trim();
+        pairJustification = pairSetting.note || null;
+      }
+    }
+
+    // Narrowest scope wins: pair > project > global > first supported free model.
+    const effectiveModel = pairOverride || projectOverride || globalDefault || supportedModels[0] || 'default';
+    const isPairOverride = Boolean(pairOverride);
     const isProjectOverride = Boolean(projectOverride);
 
     return {
       providerType,
       globalDefault,
       projectOverride,
+      pairOverride,
       effectiveModel,
       isProjectOverride,
-      justification,
+      isPairOverride,
+      justification: pairJustification ?? justification,
       supportedModels,
     };
   }
@@ -1793,32 +1903,69 @@ export class RelayEngine {
     await this.setProviderSetting(key, '', { note: 'Cleared project override', setBy: 'operator' });
   }
 
+  /**
+   * Persist a pair-scoped worker model.
+   *
+   * This is the SAME provider_settings authority as the global and project
+   * overrides — a third scope, not a third authority. Writing it makes NO
+   * provider contact: it is a RelayX-owned row that the delivery boundary reads
+   * later, so it is legal while the Pair is IDLE.
+   */
+  public async setPairModelOverride(
+    pairId: PairId,
+    providerType: ProviderType,
+    model: string,
+    justification: string,
+  ): Promise<ProviderSetting | null> {
+    const key = `${providerType}:pair:${pairId}:transportModel`;
+    return this.setProviderSetting(key, model, { note: justification, setBy: 'operator' });
+  }
+
+  public async clearPairModelOverride(
+    pairId: PairId,
+    providerType: ProviderType,
+  ): Promise<void> {
+    const key = `${providerType}:pair:${pairId}:transportModel`;
+    await this.setProviderSetting(key, '', { note: 'Cleared pair override', setBy: 'operator' });
+  }
+
   public async resolveProviderModelOverride(
     providerType: ProviderType,
     projectId?: ProjectId,
+    pairId?: PairId,
   ): Promise<string | null> {
-    if (projectId) {
-      const projSetting = await this.repos.providerSettings.get(
-        `${providerType}:project:${projectId}:transportModel`,
-      );
-      if (projSetting) {
-        const val = projSetting.value.trim();
-        if (val.length > 0 && /^[^/\s]+\/[^/\s]+(#\S+)?$/.test(val)) {
-          return val;
-        }
-      }
-    }
+    const allSupported = RelayEngine.getSupportedModels(providerType);
+    // Narrow: only verified free-tier candidates allowed for automatic fallback.
+    const freeOnly = allSupported.filter((m: string) =>
+      /(?:free|free-default)/i.test(m) || m === 'opencode-zen/free-default',
+    );
+    const supported = freeOnly.length ? freeOnly : allSupported;
 
-    const setting = await this.repos.providerSettings.get(
+    const readSupported = async (key: string): Promise<string | null> => {
+      const setting = await this.repos.providerSettings.get(key);
+      if (setting && setting.value.trim()) {
+        const val = setting.value.trim();
+        if (supported.includes(val)) return val;
+      }
+      return null;
+    };
+
+    // 1. Explicit pair-specific override (narrowest scope), IF supported.
+    const pairValue = pairId
+      ? await readSupported(`${providerType}:pair:${pairId}:transportModel`)
+      : null;
+    // 2. Explicit project-specific override, IF supported.
+    const projectValue = projectId
+      ? await readSupported(`${providerType}:project:${projectId}:transportModel`)
+      : null;
+    // 3. Engine Settings global Worker AI Model (authoritative when no narrower override).
+    const globalValue = await readSupported(
       RelayEngine.providerSettingKey(providerType, 'transportModel'),
     );
-    if (!setting) return null;
-    const value = setting.value.trim();
-    if (value.length === 0) return null;
-    // Must be exactly `provider/model` or `provider/model#variant`. Refusing anything else
-    // here keeps the failure legible at configuration time instead of at send time.
-    if (!/^[^/\s]+\/[^/\s]+(#\S+)?$/.test(value)) return null;
-    return value;
+    // 4. No hidden/legacy setting may silently supersede visible Engine Settings.
+    // If every configured scope is unsupported, fall back to the first supported free model.
+    const effective = pairValue || projectValue || globalValue || (supported.length ? supported[0] : null);
+    return effective;
   }
 
   /** Read one provider setting, or `null` when unset. */
@@ -1947,12 +2094,15 @@ export class RelayEngine {
    * degradation rather than a defect (I-6).
    */
   private async assertDispatchTargetPresent(pair: Pair, assignment: Assignment): Promise<void> {
-    if (!pair.workerSessionId) return;
-    const identity = await this.repos.sideIdentities.find(pair.id, 'worker');
+    const targetSessionId = assignment.targetSideRole === 'planner'
+      ? pair.plannerSessionId
+      : pair.workerSessionId;
+    if (!targetSessionId) return;
+    const identity = await this.repos.sideIdentities.find(pair.id, assignment.targetSideRole);
     if (identity && identity.existenceState === 'absent') {
       const observedAt = identity.observation?.observedAt ?? null;
       throw new RelayDomainError(
-        `Assignment ${assignment.id} cannot be dispatched: the worker's exact session ` +
+        `Assignment ${assignment.id} cannot be dispatched: the ${assignment.targetSideRole}'s exact session ` +
         `(${identity.externalSessionId ?? 'unbound'}) was observed ABSENT in the provider's own store` +
         `${observedAt ? ` on ${new Date(observedAt).toISOString()}` : ' (observation time not recorded)'}. ` +
         `A delivery into an absent session is a blind write. Re-verify the side before dispatching.`,
@@ -2001,12 +2151,23 @@ export class RelayEngine {
       // dispatch intent is written, so a refused dispatch leaves no partial record.
       pair.assertContactPermitted(context);
 
-      if (!pair.workerSessionId) {
-        throw new RelayDomainError('Pair has no worker runtime bound', 'NO_WORKER_BOUND');
+      const targetRuntimeId = assignment.targetSideRole === 'planner'
+        ? pair.plannerSessionId
+        : pair.workerSessionId;
+      if (!targetRuntimeId) {
+        throw new RelayDomainError(
+          `Pair has no ${assignment.targetSideRole} runtime bound`,
+          assignment.targetSideRole === 'worker' ? 'NO_WORKER_BOUND' : 'NO_PLANNER_BOUND',
+        );
       }
 
-      const worker = await this.repos.runtimes.findById(pair.workerSessionId);
-      if (!worker) throw new RelayDomainError(`Worker runtime ${pair.workerSessionId} not found`, 'NOT_FOUND');
+      // `worker` is retained as a local compatibility name throughout this method;
+      // semantically it is the runtime executing this Assignment, on either Pair side.
+      const worker = await this.repos.runtimes.findById(targetRuntimeId);
+      if (!worker) throw new RelayDomainError(
+        `${assignment.targetSideRole} runtime ${targetRuntimeId} not found`,
+        'NOT_FOUND',
+      );
 
       // ---- TARGET-VALIDITY PRECONDITIONS ----
       //
@@ -2142,7 +2303,7 @@ export class RelayEngine {
       instructionText: assignment.instruction,
       idempotencyKey,
       preDispatchWatermark: boundary.watermark,
-      modelOverride: await this.resolveProviderModelOverride(worker.providerType, pair.projectId),
+      modelOverride: await this.resolveProviderModelOverride(worker.providerType, pair.projectId, pair.id),
     });
 
     // ---- Phase 3: record the outcome ----
@@ -2163,12 +2324,29 @@ export class RelayEngine {
         // delivery that succeeded followed by a worker that died on a provider quota error is
         // a DELIVERED delivery and an INTERRUPTED attempt, and reporting it as a failed
         // delivery would send recovery looking for a resend that must never happen.
-        if (attempt.status === 'prepared') {
-          attempt.startRunning();
-          await this.repos.attempts.save(attempt);
-        }
+        // Execution promotion removed per freeze: delivery confirmation (`delivered`)
+        // does not prove execution began (`Attempt.running` requires execution evidence).
+        // The promotion mechanism (`promoteAttemptToRunning()`) must be called
+        // separately when execution/completion evidence is observed.
 
         const execution = result.reconciliation?.workerExecution ?? null;
+        const executionObserved = execution === 'in_progress' || execution === 'completed' || execution === 'terminal_error';
+        if (executionObserved && attempt.status === 'prepared') {
+          attempt.startRunning();
+          await this.repos.attempts.save(attempt);
+          await this.emitEvent('attempt', attempt.id, 'attempt.running', {
+            actor: 'provider',
+            previousState: 'prepared',
+            newState: 'running',
+            evidence: result.evidence,
+            details: {
+              deliveryId: delivery.id,
+              workerExecution: execution,
+              evidenceKind: 'exact_session_execution_reconciliation',
+            },
+            correlationId: idempotencyKey,
+          });
+        }
         if (execution === 'terminal_error') {
           // A provider-reported terminal error on the assistant turn. The closest existing
           // frozen Dimension-A state is `interrupted`: Case 5, "runtime/process lost mid-work;
@@ -2246,7 +2424,7 @@ export class RelayEngine {
           return { assignment, attempt, delivery };
         }
 
-        worker.recordObservationSuccess('working', result.evidence);
+        worker.recordObservationSuccess(executionObserved ? 'working' : 'available', result.evidence);
         await this.repos.runtimes.save(worker);
 
         await this.emitEvent('delivery', delivery.id, 'delivery.confirmed', {
@@ -2259,27 +2437,15 @@ export class RelayEngine {
         });
 
         if (execution === 'completed') {
-          // The worker already produced a completed response during the transport call.
-          // Physical completion is proven by the provider, so it is recorded now rather than
-          // waiting for a supervision tick that would otherwise have to re-derive it.
-          if (attempt.status === 'running') {
-            attempt.completePhysical(result.evidence);
-            await this.repos.attempts.save(attempt);
-          }
+          // Completion was observed during transport reconciliation, but the supervision
+          // path owns the atomic completed_physical -> Handoff transition. Leaving the
+          // independently-proven Attempt running here lets the next tick re-observe the
+          // exact transcript and create both records together; completing it here stranded
+          // an Assignment because supervision then rejected running promotion and never
+          // reached Handoff creation.
           worker.recordObservationSuccess('idle', result.evidence);
           await this.repos.runtimes.save(worker);
-          await this.emitEvent('attempt', attempt.id, 'attempt.completed_physical', {
-            actor: 'provider',
-            previousState: 'running',
-            newState: 'completed_physical',
-            evidence: result.evidence,
-            details: {
-              deliveryId: delivery.id,
-              assistantMessageId: result.reconciliation?.workerExecutionEvidence.assistantMessageId ?? null,
-            },
-            correlationId: idempotencyKey,
-          });
-        } else {
+        } else if (execution === 'in_progress') {
           await this.emitEvent('runtime', worker.id, 'worker.started', {
             actor: 'engine',
             previousState: 'available',
@@ -2547,7 +2713,10 @@ export class RelayEngine {
         }
 
         if (attempt) {
-          if (attempt.status === 'prepared') {
+          const executionEvidence = reconciliationEvidence(reconciliation, delivery, assignment);
+          const executionObserved = ['in_progress', 'completed', 'terminal_error']
+            .includes(reconciliation.workerExecution);
+          if (executionObserved && attempt.status === 'prepared') {
             attempt.startRunning();
             changes.push(`Attempt ${attempt.id}: prepared -> running`);
           }
@@ -2559,11 +2728,11 @@ export class RelayEngine {
               `${e.providerId ? ` on ${e.providerId}/${e.modelId ?? 'unknown'}` : ''}: ` +
               `${e.errorMessage ?? 'no error message reported'}. The instruction WAS delivered ` +
               `(message ${reconciliation.matchingUserTurn?.messageId ?? 'unknown'}).`,
-              reconciliationEvidence(reconciliation, delivery, assignment),
+              executionEvidence,
             );
             changes.push(`Attempt ${attempt.id}: running -> interrupted`);
           } else if (reconciliation.workerExecution === 'completed' && attempt.status === 'running') {
-            attempt.completePhysical(reconciliationEvidence(reconciliation, delivery, assignment));
+            attempt.completePhysical(executionEvidence);
             changes.push(`Attempt ${attempt.id}: running -> completed_physical`);
           }
           await this.repos.attempts.save(attempt);
@@ -2823,6 +2992,7 @@ export class RelayEngine {
     try {
       let handoffsCreated = 0;
       let attentionItemsCreated = 0;
+      const pairsWithNewHandoff = new Set<PairId>();
 
       // 1. Inspect active assignments
       const activeAssignments = await this.repos.assignments.findActive();
@@ -2832,8 +3002,11 @@ export class RelayEngine {
         if (!pair) continue;
 
         if (!pair.isAutomatedContactPermitted()) continue;
-        if (!pair.workerSessionId) continue;
-        const worker = await this.repos.runtimes.findById(pair.workerSessionId);
+        const targetRuntimeId = assignment.targetSideRole === 'planner'
+          ? pair.plannerSessionId
+          : pair.workerSessionId;
+        if (!targetRuntimeId) continue;
+        const worker = await this.repos.runtimes.findById(targetRuntimeId);
         if (!worker) continue;
         if (worker.status === 'terminated') continue;
         if (worker.status === 'suspended' && worker.lastObservedAt && Date.now() - worker.lastObservedAt < 30000) {
@@ -2844,7 +3017,10 @@ export class RelayEngine {
 
         // Probe worker runtime state with fault isolation
         try {
-          const inspection = await provider.inspectRuntime(worker.id);
+          const activeDelivery = assignment.activeDeliveryId ? await this.repos.deliveries.findById(assignment.activeDeliveryId) : null;
+          const snippet = activeDelivery?.instructionSnippet ?? assignment.instruction?.substring(0, 200) ?? null;
+          const dispatchBoundary = activeDelivery?.deliveredAt ? { afterCreatedAt: activeDelivery.deliveredAt, expectedInstructionSnippet: snippet } : (snippet ? { expectedInstructionSnippet: snippet } : undefined);
+          const inspection = await provider.inspectRuntime(worker.id, dispatchBoundary);
           if (!inspection.found) {
             // Failure to find runtime: record observation failure (never immediately mark dead)
             const { previousStatus, newStatus } = worker.recordObservationFailure();
@@ -2930,19 +3106,66 @@ export class RelayEngine {
               }
             }
 
-            if ((inspection.isComplete || isWorkerComplete) && assignment.status === 'active') {
+            const rawExecutionEvidence = transcriptEvidence
+              ? { ...transcriptEvidence, details: { ...transcriptEvidence.details, sourceUsed: 'exact_session_transcript' } }
+              : inspection.evidence ?? undefined;
+            const executionEvidence: ObservableEvidence | undefined = rawExecutionEvidence
+              ? {
+                  ...rawExecutionEvidence,
+                  details: {
+                    ...(rawExecutionEvidence.details ?? {}),
+                    executionState: (inspection.isComplete || isWorkerComplete)
+                      ? 'completed'
+                      : inspection.isWorking
+                        ? 'running'
+                        : 'observed',
+                    targetSideRole: assignment.targetSideRole,
+                  },
+                }
+              : undefined;
+            const activeDelivery = assignment.activeDeliveryId
+              ? await this.repos.deliveries.findById(assignment.activeDeliveryId)
+              : null;
+            const deliveryConfirmed = activeDelivery?.status === 'delivered';
+
+            // A positive working observation is execution evidence even when the turn has
+            // not completed yet. It is accepted only after this Assignment's Delivery is
+            // confirmed, so unrelated activity on the same runtime cannot promote it.
+            if (deliveryConfirmed && inspection.isWorking && assignment.status === 'active' && executionEvidence) {
+              await this.promoteAttemptToRunning(assignment.id, executionEvidence);
+            }
+
+            if (deliveryConfirmed && (inspection.isComplete || isWorkerComplete) && assignment.status === 'active' && executionEvidence) {
+              // Completion evidence first promotes prepared -> running, then records the
+              // independent physical-completion claim. The Handoff is created only after
+              // that durable Attempt transition succeeds.
+              if (assignment.currentAttemptId && executionEvidence) {
+                await this.promoteAttemptToRunning(assignment.id, executionEvidence);
+                const currentAttempt = await this.repos.attempts.findById(assignment.currentAttemptId);
+                if (currentAttempt?.status === 'running') {
+                  currentAttempt.completePhysical(executionEvidence);
+                  await this.repos.attempts.save(currentAttempt);
+                  await this.emitEvent('attempt', currentAttempt.id, 'attempt.completed_physical', {
+                    actor: 'supervisor',
+                    previousState: 'running',
+                    newState: 'completed_physical',
+                    evidence: executionEvidence,
+                  });
+                }
+              }
               const handoff = Handoff.create(assignment.id, assignment.currentAttemptId);
               const responseForHandoff = lastResponseSnippet ?? inspection.lastResponseSnippet ?? 'Worker completed task response.';
               handoff.markReady(
                 responseForHandoff,
                 { fullResponse: responseForHandoff, transcriptEvidence: transcriptEvidence ? transcriptEvidence.details : null },
-                transcriptEvidence ? { ...transcriptEvidence, details: { ...transcriptEvidence.details, sourceUsed: 'exact_session_transcript' } } : inspection.evidence,
+                executionEvidence,
               );
               await this.repos.handoffs.save(handoff);
 
               assignment.markWaitingForHandoff(handoff.id);
               await this.repos.assignments.save(assignment);
               handoffsCreated++;
+              pairsWithNewHandoff.add(pair.id);
 
               await this.emitEvent('handoff', handoff.id, 'handoff.received', {
                 actor: 'supervisor',
@@ -2981,6 +3204,25 @@ export class RelayEngine {
           );
           await this.repos.attention.save(item);
           attentionItemsCreated++;
+        }
+      }
+
+      // 3. Advance each enabled Pair by one deterministic relay step. This is what
+      // turns Start into an orchestration command: pending work is dispatched, and a
+      // completed side's ready Handoff becomes the opposite side's next Assignment on
+      // a subsequent tick. PAUSED/STOPPED pairs are rejected by the shared authority gate.
+      const runningPairs = (await this.repos.pairs.findAll())
+        .filter((pair) => pair.isAutomatedContactPermitted())
+        .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+      for (const pair of runningPairs) {
+        // Preserve an observable boundary between "completion/Handoff recorded" and
+        // "Handoff converted to opposite-side Assignment". The next tick advances it.
+        if (pairsWithNewHandoff.has(pair.id)) continue;
+        try {
+          await this.advancePairOrchestration(pair.id);
+        } catch {
+          // One Pair must not stop supervision of the others. Dispatch outcomes remain
+          // durable and provider failures are surfaced by their existing attention paths.
         }
       }
 
@@ -3157,16 +3399,12 @@ export class RelayEngine {
     const assignment = await this.repos.assignments.findById(assignmentId);
     if (!assignment) throw new RelayDomainError(`Assignment ${assignmentId} not found`, 'NOT_FOUND');
 
+    const previousStatus = assignment.status;
     assignment.complete();
     await this.repos.assignments.save(assignment);
 
-    if (assignment.currentAttemptId) {
-      const attempt = await this.repos.attempts.findById(assignment.currentAttemptId);
-      if (attempt && attempt.status === 'running') {
-        attempt.completePhysical();
-        await this.repos.attempts.save(attempt);
-      }
-    }
+    // Assignment resolution is a local/operator decision. It must never manufacture
+    // `completed_physical`; only provider completion evidence may move the Attempt.
 
     const pair = await this.repos.pairs.findById(assignment.pairId);
     if (pair && pair.activeAssignmentId === assignment.id) {
@@ -3176,7 +3414,7 @@ export class RelayEngine {
 
     await this.emitEvent('assignment', assignment.id, 'assignment.completed', {
       actor: 'user',
-      previousState: assignment.status,
+      previousState: previousStatus,
       newState: 'completed',
     });
 
@@ -3303,6 +3541,48 @@ export class RelayEngine {
    * subject, not a grant of permission. Case C in the S6 closure report pins this
    * behaviour with call counts.
    */
+  /**
+   * Central execution-evidence promotion: `prepared` → `running`.
+   * Only called when provider evidence proves execution started or completed.
+   * Delivery confirmation (`delivered`) is NOT sufficient — see SEMANTIC_FREEZE.
+   */
+  public async promoteAttemptToRunning(
+    assignmentId: AssignmentId,
+    evidence: ObservableEvidence,
+  ): Promise<{ promoted: boolean; attempt?: Attempt; previousStatus?: string; newStatus?: string }> {
+    const details = evidence.details as Record<string, unknown> | undefined;
+    const executionState = details?.executionState ?? details?.workerExecution;
+    const supportsExecution =
+      executionState === 'running' ||
+      executionState === 'in_progress' ||
+      executionState === 'completed' ||
+      executionState === 'terminal_error' ||
+      details?.responseActivityObserved === true ||
+      typeof details?.assistantMessageId === 'string' ||
+      typeof details?.assistantFinish === 'string';
+    if (!supportsExecution) return { promoted: false };
+
+    const assignment = await this.repos.assignments.findById(assignmentId);
+    if (!assignment) return { promoted: false };
+    if (!assignment.currentAttemptId) return { promoted: false };
+    const attempt = await this.repos.attempts.findById(assignment.currentAttemptId);
+    if (!attempt || attempt.status !== 'prepared') return { promoted: false };
+
+    // Evidence must explicitly support execution (not just delivery confirmation).
+    // For providers with separate execution verdicts (e.g., OpenCode workerExecution),
+    // the caller passes evidence that includes execution proof. For providers without
+    // such capability, this promotion will not succeed (execution unobservable).
+    attempt.startRunning();
+    await this.repos.attempts.save(attempt);
+    await this.emitEvent('attempt', attempt.id, 'attempt.running', {
+      actor: 'engine',
+      previousState: 'prepared',
+      newState: 'running',
+      evidence,
+    });
+    return { promoted: true, attempt, previousStatus: 'prepared', newStatus: 'running' };
+  }
+
   public async reconcileAndRecoverRuntime(sessionId: RuntimeSessionId): Promise<RuntimeSession> {
     const runtime = await this.repos.runtimes.findById(sessionId);
     if (!runtime) throw new RelayDomainError(`Runtime ${sessionId} not found`, 'NOT_FOUND');
@@ -4454,7 +4734,12 @@ export class RelayEngine {
       reason,
     });
 
-    // Authority check: explicit operator contact requires operationalState === ACTIVE.
+    // Authority check (execution-authority realignment): this is an explicit
+    // operator observation, so operationalState === ACTIVE is the gate.
+    // Automated background contact is gated separately by relayState at the
+    // supervision-tick level (runSupervisionTick / advancePairOrchestration
+    // filter by pair.isAutomatedContactPermitted() before any contact), so an
+    // ACTIVE Pair keeps its explicit observation path regardless of relayState.
     if (!pair.isProviderContactPermitted()) {
       return refuse(
         `Provider contact not permitted (operationalState: ${pair.operationalState}). ` +
@@ -4544,6 +4829,171 @@ export class RelayEngine {
 
 
   /**
+   * Advance one Pair by exactly one durable orchestration step.
+   *
+   * Selection order is deterministic: the current execution-slot holder, then the
+   * oldest pending Assignment, then the oldest non-terminal Plan-First run. A ready
+   * Handoff is converted once into an Assignment for the opposite side; the unique
+   * `sourceHandoffId` makes retries and restarts idempotent.
+   */
+  public async advancePairOrchestration(pairId: PairId): Promise<RelayOrchestrationResult> {
+    if (this.orchestratingPairs.has(pairId)) return { pairId, transition: 'busy' };
+    this.orchestratingPairs.add(pairId);
+
+    try {
+      let pair = await this.repos.pairs.findById(pairId);
+      if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'PAIR_NOT_FOUND');
+      if (!pair.isAutomatedContactPermitted()) return { pairId, transition: 'disabled' };
+
+      let assignments = (await this.repos.assignments.findByPairId(pairId))
+        .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+      let current = pair.activeAssignmentId
+        ? await this.repos.assignments.findById(pair.activeAssignmentId)
+        : null;
+
+      if (current && RelayEngine.TERMINAL_ASSIGNMENT_STATES.has(current.status)) {
+        pair.clearWork();
+        await this.repos.pairs.save(pair);
+        current = null;
+      }
+
+      // Plan-First owns the lifecycle of its bound Assignment, including verification
+      // after physical completion. Do not reinterpret its Handoff as a generic ping-pong
+      // relay step or bypass the run's acceptance gate.
+      if (current) {
+        const candidateRuns = (await this.repos.planFirstRuns.findByProjectId(pair.projectId))
+          .filter((candidate) => candidate.sessionPairId === pairId && !candidate.isTerminal())
+          .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+        for (const candidate of candidateRuns) {
+          const units = await this.repos.workUnits.findByContractRevisionId(candidate.contractRevisionId);
+          if (units.some((unit) => unit.assignmentId === current!.id)) {
+            const tick = await this.runPlanFirstTick(candidate.id);
+            return {
+              pairId,
+              transition: 'plan_first_advanced',
+              assignmentId: (tick.assignmentId as AssignmentId | undefined) ?? current.id,
+              attemptId: tick.attemptId as AttemptId | undefined,
+              planFirstRunId: candidate.id,
+            };
+          }
+        }
+      }
+
+      if (current?.status === 'waiting_for_handoff' && current.activeHandoffId) {
+        const handoff = await this.repos.handoffs.findById(current.activeHandoffId);
+        if (!handoff || !['ready', 'delivered', 'complete'].includes(handoff.status)) {
+          return { pairId, transition: 'awaiting_evidence', assignmentId: current.id };
+        }
+
+        let next = assignments.find((candidate) => candidate.sourceHandoffId === handoff.id) ?? null;
+        if (!next) {
+          next = await this.repos.runInTransaction(async () => {
+            // Re-read inside the transaction so concurrent/restarted ticks cannot create
+            // two opposite-side Assignments from the same Handoff.
+            const freshAssignments = await this.repos.assignments.findByPairId(pairId);
+            const existing = freshAssignments.find((candidate) => candidate.sourceHandoffId === handoff.id);
+            if (existing) return existing;
+
+            const freshPair = await this.repos.pairs.findById(pairId);
+            const freshCurrent = await this.repos.assignments.findById(current!.id);
+            const freshHandoff = await this.repos.handoffs.findById(handoff.id);
+            if (!freshPair || !freshCurrent || !freshHandoff) {
+              throw new RelayDomainError('Relay handoff conversion lost its durable source records', 'NOT_FOUND');
+            }
+
+            const nextSide: PairSideRole = freshCurrent.targetSideRole === 'worker' ? 'planner' : 'worker';
+            const derived = Assignment.create(
+              pairId,
+              freshCurrent.projectId,
+              `Handoff from ${freshCurrent.targetSideRole}: ${freshCurrent.title}`,
+              freshHandoff.resultSummary ?? 'Continue the relay from the completed opposite-side handoff.',
+              nextSide,
+              freshHandoff.id,
+            );
+            freshCurrent.complete();
+            if (freshHandoff.status !== 'complete') freshHandoff.completeHandoff();
+            freshPair.clearWork();
+            await this.repos.assignments.save(freshCurrent);
+            await this.repos.handoffs.save(freshHandoff);
+            await this.repos.pairs.save(freshPair);
+            await this.repos.assignments.save(derived);
+            return derived;
+          });
+
+          await this.emitEvent('assignment', next.id, 'assignment.created_from_handoff', {
+            actor: 'engine',
+            newState: 'pending',
+            details: {
+              sourceHandoffId: handoff.id,
+              sourceAssignmentId: current.id,
+              targetSideRole: next.targetSideRole,
+            },
+          });
+        }
+
+        const dispatched = await this.dispatchAssignment(next.id, 'AUTOMATED');
+        return {
+          pairId,
+          transition: 'handoff_advanced',
+          assignmentId: dispatched.assignment.id,
+          attemptId: dispatched.attempt.id,
+          deliveryId: dispatched.delivery.id,
+          handoffId: handoff.id,
+        };
+      }
+
+      if (current) {
+        if (current.status === 'pending' || !current.currentAttemptId) {
+          const dispatched = await this.dispatchAssignment(current.id, 'AUTOMATED');
+          return {
+            pairId,
+            transition: 'assignment_dispatched',
+            assignmentId: dispatched.assignment.id,
+            attemptId: dispatched.attempt.id,
+            deliveryId: dispatched.delivery.id,
+          };
+        }
+        return { pairId, transition: 'awaiting_evidence', assignmentId: current.id };
+      }
+
+      const pending = assignments.find((assignment) => assignment.status === 'pending');
+      if (pending) {
+        const dispatched = await this.dispatchAssignment(pending.id, 'AUTOMATED');
+        return {
+          pairId,
+          transition: 'assignment_dispatched',
+          assignmentId: dispatched.assignment.id,
+          attemptId: dispatched.attempt.id,
+          deliveryId: dispatched.delivery.id,
+        };
+      }
+
+      const run = (await this.repos.planFirstRuns.findByProjectId(pair.projectId))
+        .filter((candidate) => candidate.sessionPairId === pairId && !candidate.isTerminal())
+        .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))[0];
+      if (run) {
+        const tick = await this.runPlanFirstTick(run.id);
+        return {
+          pairId,
+          transition: 'plan_first_advanced',
+          assignmentId: tick.assignmentId as AssignmentId | undefined,
+          attemptId: tick.attemptId as AttemptId | undefined,
+          planFirstRunId: run.id,
+        };
+      }
+
+      await this.emitEvent('pair', pairId, 'pair.awaiting_executable_assignment', {
+        actor: 'engine',
+        newState: pair.relayState,
+        details: { reason: 'Relay is running but no pending Assignment or executable Plan-First run exists yet.' },
+      });
+      return { pairId, transition: 'awaiting_work' };
+    } finally {
+      this.orchestratingPairs.delete(pairId);
+    }
+  }
+
+  /**
    * `startPair` — EXECUTION authority. It is NOT the activation authority.
    *
    * ## It never grants ACTIVE, and never transitions IDLE -> ACTIVE
@@ -4599,6 +5049,9 @@ export class RelayEngine {
       actor: 'user',
       newState: pair.status,
     });
+    // Start means begin orchestration. This call performs the first deterministic
+    // step immediately; the background supervision loop continues subsequent steps.
+    await this.advancePairOrchestration(pair.id);
     return pair;
   }
 
@@ -4638,6 +5091,7 @@ export class RelayEngine {
       actor: 'user',
       newState: pair.status,
     });
+    await this.advancePairOrchestration(pair.id);
     return pair;
   }
 
@@ -4663,13 +5117,29 @@ export class RelayEngine {
    * `operational_state === 'ACTIVE'`. This method only schedules the tick, so the
    * gate there gates the loop completely; no second check is needed here and none
    * is added, because one enforcement point is the point.
+   *
+   * `tickOverride` lets a caller run work AFTER a supervision tick without this
+   * class owning another timer. The override is additive and cannot replace,
+   * reorder, or fail the supervision tick itself; Phase 1 health monitoring uses
+   * it to ride this existing cadence rather than starting its own loop.
    */
-  public startSupervisionLoop(intervalMs = 5000): void {
+  public startSupervisionLoop(
+    intervalMs = 5000,
+    tickOverride?: () => Promise<unknown>,
+  ): void {
     if (this.supervisionTimer) return;
     this.supervisionTimer = setInterval(() => {
       this.runSupervisionTick().catch((err) => {
         console.error('[RelayEngine] Error in background supervision tick:', err);
       });
+      if (tickOverride) {
+        // Failures are swallowed: monitoring must never disturb supervision.
+        Promise.resolve()
+          .then(() => tickOverride())
+          .catch((err) => {
+            console.warn('[RelayEngine] Post-supervision observer failed (ignored):', err?.message ?? err);
+          });
+      }
     }, intervalMs);
     if (typeof this.supervisionTimer?.unref === 'function') {
       this.supervisionTimer.unref();
@@ -4921,10 +5391,10 @@ export class RelayEngine {
         await this.repos.deliveries.save(delivery);
 
         if (attempt && attempt.status === 'prepared') {
-          // startRunning() is legal only from `prepared`; a `running` attempt is
-          // already in the executing state and must not be disturbed.
-          attempt.startRunning();
-          await this.repos.attempts.save(attempt);
+          // Execution promotion removed per freeze: delivery confirmation (`delivered`)
+          // does not prove execution began (`Attempt.running` requires execution evidence).
+          // The promotion mechanism (`promoteAttemptToRunning()`) must be called
+          // separately when execution/completion evidence is observed.
         }
 
         await this.emitEvent('delivery', delivery.id, 'delivery.confirmed', {
@@ -5066,9 +5536,13 @@ export class RelayEngine {
       try {
         const inspection = await provider.inspectRuntime(worker.id);
         if (inspection.found) {
-          if (inspection.isComplete) {
-            // Worker finished while Relay was restarting!
-            const handoff = Handoff.create(assignment.id, assignment.currentAttemptId!);
+          if (inspection.isComplete && assignment.currentAttemptId) {
+            // Worker finished while Relay was restarting! A handoff is only
+            // meaningful for an Assignment that was actually dispatched, so this
+            // requires a recorded Attempt. An Assignment created and slot-claimed
+            // but killed before delivery has NO attempt — it must never fabricate
+            // a handoff for work that was never sent (it is resumed via dispatch).
+            const handoff = Handoff.create(assignment.id, assignment.currentAttemptId);
             handoff.markReady(
               inspection.lastResponseSnippet ?? 'Worker completed output while Relay was offline.',
               { fullResponse: inspection.lastResponseSnippet },

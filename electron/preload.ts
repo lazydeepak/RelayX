@@ -88,8 +88,11 @@ const relayApi: IRelayApi = {
   deleteRuntimeSession: (sessionId: string) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.DELETE_RUNTIME_SESSION, sessionId),
   listAssignments: () => ipcRenderer.invoke(RELAY_IPC_CHANNELS.LIST_ASSIGNMENTS),
+  getAssignmentDetail: (id: string) => ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_ASSIGNMENT_DETAIL, id),
   createAssignment: (pairId: string, title: string, instruction: string) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.CREATE_ASSIGNMENT, pairId, title, instruction),
+  createAndDispatchAssignment: (pairId: string, title: string, instruction: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.CREATE_AND_DISPATCH_ASSIGNMENT, pairId, title, instruction),
   dispatchAssignment: (assignmentId: string) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.DISPATCH_ASSIGNMENT, assignmentId),
   completeAssignment: (assignmentId: string) =>
@@ -156,6 +159,15 @@ const relayApi: IRelayApi = {
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_DIAGNOSTICS_REPORT),
   copyDiagnosticReport: () =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.COPY_DIAGNOSTIC_REPORT),
+  // Phase 1 Health — read-only projections over persisted health state.
+  getHealthSummary: () => ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_HEALTH_SUMMARY),
+  listHealthIncidents: (options?: { status?: 'active' | 'history'; limit?: number }) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.LIST_HEALTH_INCIDENTS, options ?? {}),
+  getHealthIncident: (id: string) => ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_HEALTH_INCIDENT, id),
+  acknowledgeHealthIncident: (id: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.ACKNOWLEDGE_HEALTH_INCIDENT, id),
+  generateHealthHandoffReport: (id: string, options?: { eventLimit?: number }) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.GENERATE_HEALTH_HANDOFF_REPORT, id, options ?? {}),
   listIntegrations: () =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.LIST_INTEGRATIONS),
   verifyIntegration: (providerType: ProviderType) =>
@@ -188,14 +200,18 @@ const relayApi: IRelayApi = {
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.LIST_PROJECT_INTEGRATION_OVERRIDES),
   getSupportedModels: (providerType: ProviderType) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_SUPPORTED_MODELS, providerType),
-  getEffectiveModelConfig: (providerType: ProviderType, projectId?: string) =>
-    ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_EFFECTIVE_MODEL_CONFIG, providerType, projectId),
+  getEffectiveModelConfig: (providerType: ProviderType, projectId?: string, pairId?: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_EFFECTIVE_MODEL_CONFIG, providerType, projectId, pairId),
   setGlobalModelDefault: (providerType: ProviderType, model: string, note?: string) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.SET_GLOBAL_MODEL_DEFAULT, providerType, model, note),
   setProjectModelOverride: (projectId: string, providerType: ProviderType, model: string, justification: string) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.SET_PROJECT_MODEL_OVERRIDE, projectId, providerType, model, justification),
   clearProjectModelOverride: (projectId: string, providerType: ProviderType) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.CLEAR_PROJECT_MODEL_OVERRIDE, projectId, providerType),
+  setPairModelOverride: (pairId: string, providerType: ProviderType, model: string, justification: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.SET_PAIR_MODEL_OVERRIDE, pairId, providerType, model, justification),
+  clearPairModelOverride: (pairId: string, providerType: ProviderType) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.CLEAR_PAIR_MODEL_OVERRIDE, pairId, providerType),
 };
 
 contextBridge.exposeInMainWorld('relayApi', relayApi);

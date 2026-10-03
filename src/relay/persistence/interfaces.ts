@@ -349,6 +349,31 @@ export interface IProviderSettingsRepository {
   delete(key: string): Promise<void>;
 }
 
+import { HealthObservation, HealthIncident } from '../domain/healthDomain.ts';
+
+export interface IHealthObservationRepository {
+  save(observation: HealthObservation): Promise<void>;
+  findByCheckType(checkType: string): Promise<HealthObservation[]>;
+  findRecent(limit?: number): Promise<HealthObservation[]>;
+}
+
+export interface IHealthIncidentRepository {
+  findById(id: string): Promise<HealthIncident | null>;
+  findOpen(): Promise<HealthIncident[]>;
+  findByIncidentType(incidentType: string): Promise<HealthIncident[]>;
+  findByComponent(componentType: string, componentId?: string): Promise<HealthIncident[]>;
+  /**
+   * Bounded recent history, newest first.
+   *
+   * `findOpen()` deliberately EXCLUDES resolved rows, so history needs its own
+   * read. The limit is MANDATORY and applied in SQL: an unbounded history query
+   * on a UI refresh path is exactly the kind of hidden cost this contract exists
+   * to prevent.
+   */
+  findRecentHistory(limit: number): Promise<HealthIncident[]>;
+  save(incident: HealthIncident): Promise<void>;
+}
+
 export interface IRelayRepositories {
   projects: IProjectRepository;
   pairs: IPairRepository;
@@ -369,5 +394,7 @@ export interface IRelayRepositories {
   contractRevisions: IContractRevisionRepository;
   verificationResults: IVerificationResultRepository;
   providerSettings: IProviderSettingsRepository;
+  healthObservations: IHealthObservationRepository;
+  healthIncidents: IHealthIncidentRepository;
   runInTransaction<T>(work: () => Promise<T>): Promise<T>;
 }

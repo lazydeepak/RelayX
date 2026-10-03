@@ -31,11 +31,23 @@ import {
   BrowserChatGPTProvider,
   BrowserOpenCodeProvider,
 } from '../providers/browserProviders.ts';
-import { parseChatGPTConversationUrl } from '../providers/adapters.ts';
-import { RuntimeSession, Project, RuntimeProjectAssociation } from '../domain/entities.ts';
+import { parseChatGPTConversationUrl } from '../providers/chatgptConversationUrl.ts';
+import {
+  isChatGPTProjectLessUrl,
+  parseChatGPTProjectUrl,
+} from '../providers/chatgptProjectUrl.ts';
+import { chatgptProjectDiscoveryError } from '../providers/chatgptProjectDiscovery.ts';
+import { RuntimeSession, Project, RuntimeProjectAssociation, Assignment } from '../domain/entities.ts';
 import { IRelayRepositories } from '../persistence/interfaces.ts';
 import { RelayEngine } from './RelayEngine.ts';
 import { relayDiagnostics } from './RelayDiagnostics.ts';
+import {
+  HealthProjectionService,
+  UIHealthSummary,
+  UIHealthIncident,
+  UIHealthIncidentDetail,
+} from './HealthProjectionService.ts';
+import { HealthHandoffReportService } from './HealthHandoffReportService.ts';
 import {
   IntegrationManager,
   AppIntegrationConfig,
@@ -62,6 +74,7 @@ import {
   ProviderRequirementsInfo,
   EffectiveModelConfig,
   ProviderSetting,
+  CreateAndDispatchResult,
 } from '../../types/relayApi.ts';
 import {
   UIPair,
@@ -79,6 +92,8 @@ import {
   UIAttentionItem,
   ObservableEvidence,
   ProviderType,
+  DeliveryStatus,
+  AttemptStatus,
 } from '../../types/ui.ts';
 import {
   ProjectId,
@@ -1237,15 +1252,90 @@ export class RelayApiService implements IRelayApi {
       const pair = await this.db.pairs.findById(a.pairId);
       let deliveryStatus: any;
       let handoffStatus: any;
+      let currentAttemptStatus: AttemptStatus | undefined;
+      let currentAttemptStartedAt: number | undefined;
+      let currentAttemptFinishedAt: number | undefined;
+      let currentAttemptFailureReason: string | undefined;
+      let currentAttemptEvidence: ObservableEvidence | undefined;
+      let deliveryStatusDetailed: DeliveryStatus | undefined;
+      let deliveryEvidenceDetail: ObservableEvidence | undefined;
+      let deliveryFailureReasonDetail: string | undefined;
+      let sourceDerived: 'manual' | 'handoff' | 'other';
+      let blockerReason: string | undefined;
+
+      sourceDerived = a.sourceHandoffId ? 'handoff' : 'manual';
+
+      if (a.currentAttemptId) {
+        const att = await this.db.attempts.findById(a.currentAttemptId);
+        if (att) {
+          currentAttemptStatus = att.status;
+          currentAttemptStartedAt = att.startedAt;
+          currentAttemptFinishedAt = att.finishedAt ?? undefined;
+          currentAttemptFailureReason = att.failureReason ?? undefined;
+          currentAttemptEvidence = att.evidence ?? undefined;
+        }
+      }
 
       if (a.activeDeliveryId) {
         const d = await this.db.deliveries.findById(a.activeDeliveryId);
         deliveryStatus = d?.status;
+        deliveryStatusDetailed = d?.status as DeliveryStatus | undefined;
+        deliveryEvidenceDetail = d?.evidence ?? undefined;
+        deliveryFailureReasonDetail = d?.failureReason ?? undefined;
       }
+
       if (a.activeHandoffId) {
         const h = await this.db.handoffs.findById(a.activeHandoffId);
         handoffStatus = h?.status;
       }
+
+      const pairStatusStr = pair?.status ?? 'idle';
+      const pairOpState = pair?.operationalState ?? 'IDLE';
+      const pairRelayStr = pair?.relayState ?? 'STOPPED';
+      const reasons: string[] = [];
+      if (pairStatusStr === 'blocked') reasons.push('Pair blocked');
+      if (pairStatusStr === 'paused') reasons.push('Pair paused');
+      if (pairStatusStr === 'archived') reasons.push('Pair archived');
+      if (pairOpState === 'IDLE') reasons.push('Pair operationally IDLE');
+      if (a.status === 'pending') {
+        if (pairStatusStr === 'active' && pairOpState === 'ACTIVE') {
+          if (!currentAttemptStatus) {
+            reasons.push('Awaiting orchestration pickup');
+          } else if (currentAttemptStatus === 'prepared') {
+            reasons.push('Attempt prepared, delivery pending');
+          }
+        } else {
+          reasons.push('Pair not active for dispatch');
+        }
+      }
+      if (a.status === 'active') {
+        if (currentAttemptStatus === 'interrupted') {
+          reasons.push('Attempt interrupted');
+        } else if (currentAttemptStatus === 'prepared' && !deliveryStatusDetailed) {
+          reasons.push('Attempt prepared, no delivery started');
+        }
+        if (deliveryStatusDetailed === 'ambiguous') reasons.push('Ambiguous delivery');
+        if (deliveryStatusDetailed === 'failed') reasons.push('Delivery failed');
+      }
+      if (currentAttemptStatus === 'interrupted') reasons.push('Attempt interrupted');
+      if (deliveryStatusDetailed === 'ambiguous') reasons.push('Ambiguous delivery');
+      if (deliveryStatusDetailed === 'delivered' && currentAttemptStatus === 'interrupted') {
+        reasons.push('Delivery delivered but attempt interrupted (provider execution failed)');
+      }
+
+      const attentionItems = await this.db.attention.findAll();
+      const assignmentAttention = attentionItems.filter(
+        (item) => item.assignmentId === a.id && item.status !== 'resolved'
+      );
+      const unresolvedAttention = assignmentAttention.filter((item) => item.status === 'open');
+      let attentionStatusStr: 'open' | 'acknowledged' | 'resolved' | undefined;
+      if (unresolvedAttention.length > 0) {
+        attentionStatusStr = unresolvedAttention[0].status as 'open' | 'acknowledged';
+      } else if (assignmentAttention.length > 0) {
+        attentionStatusStr = 'acknowledged';
+      }
+
+      blockerReason = reasons.length > 0 ? reasons.join('; ') : undefined;
 
       result.push({
         id: a.id,
@@ -1259,6 +1349,27 @@ export class RelayApiService implements IRelayApi {
         activeHandoffStatus: handoffStatus,
         createdAt: a.createdAt,
         completedAt: a.completedAt,
+        updatedAt: a.updatedAt ?? undefined,
+        targetSideRole: a.targetSideRole ?? 'worker',
+        source: sourceDerived,
+        currentAttemptId: a.currentAttemptId ?? undefined,
+        currentAttemptNumber: a.currentAttemptId ? (await this.db.attempts.findById(a.currentAttemptId))?.attemptNumber : undefined,
+        currentAttemptStatus,
+        currentAttemptStartedAt,
+        currentAttemptFinishedAt,
+        currentAttemptFailureReason,
+        currentAttemptEvidence,
+        deliveryStatus: deliveryStatusDetailed,
+        deliveryEvidence: deliveryEvidenceDetail,
+        deliveryFailureReason: deliveryFailureReasonDetail,
+        attentionStatus: attentionStatusStr,
+        attentionCount: assignmentAttention.length,
+        attentionTitle: unresolvedAttention[0]?.title ?? assignmentAttention[0]?.title ?? undefined,
+        attentionMessage: unresolvedAttention[0]?.message ?? assignmentAttention[0]?.message ?? undefined,
+        pairStatus: pairStatusStr,
+        pairOperationalState: pairOpState as 'IDLE' | 'ACTIVE',
+        pairRelayState: pairRelayStr as 'STOPPED' | 'RUNNING' | 'PAUSED',
+        blockerReason,
       });
     }
 
@@ -1281,6 +1392,66 @@ export class RelayApiService implements IRelayApi {
     };
   }
 
+  /**
+   * Application orchestration for the Create & Dispatch intent.
+   *
+   * Two steps, deliberately not one transaction:
+   *   1. `createAssignmentAndClaimExecutionSlot` — atomic create + slot claim
+   *      (pure DB). A Pair that already owns an unresolved active Assignment, or
+   *      is IDLE, produces NO record.
+   *   2. `dispatchAssignment` — the ordinary, unchanged delivery path (durable
+   *      intent, external send, outcome).
+   *
+   * This does not change `createAssignment`'s backlog semantics or
+   * `dispatchAssignment`'s authority guard.
+   */
+  public async createAndDispatchAssignment(
+    pairId: string,
+    title: string,
+    instruction: string,
+  ): Promise<CreateAndDispatchResult> {
+    let assignment: Assignment;
+    try {
+      assignment = await this.engine.createAssignmentAndClaimExecutionSlot(
+        pairId as PairId,
+        title,
+        instruction,
+      );
+    } catch (err: any) {
+      // PRE-claim refusal: the claim transaction rolled back, so nothing durable
+      // exists. This is the only shape that may be reported as "not created".
+      return { created: false, error: err?.message || String(err), errorCode: err?.code };
+    }
+
+    const pair = await this.db.pairs.findById(pairId as PairId);
+    const uiAssignment: UIAssignment = {
+      id: assignment.id,
+      pairId: assignment.pairId,
+      pairName: pair?.name ?? 'Unknown Pair',
+      projectId: assignment.projectId,
+      title: assignment.title,
+      instruction: assignment.instruction,
+      status: assignment.status,
+      createdAt: assignment.createdAt,
+    };
+
+    try {
+      const { delivery } = await this.engine.dispatchAssignment(assignment.id);
+      return { created: true, assignment: uiAssignment, deliveryOutcome: delivery.status };
+    } catch (err: any) {
+      // POST-claim dispatch failure. The claim already committed, so the
+      // Assignment EXISTS and owns the execution slot. It is NEVER rolled back
+      // merely because external delivery failed — report it as recoverable, and
+      // never imply that nothing was created.
+      return {
+        created: true,
+        assignment: uiAssignment,
+        dispatchError: err?.message || String(err),
+        errorCode: err?.code,
+      };
+    }
+  }
+
   public async dispatchAssignment(assignmentId: string): Promise<{ success: boolean; deliveryOutcome: string }> {
     const result = await this.engine.dispatchAssignment(assignmentId as AssignmentId);
     return {
@@ -1292,6 +1463,114 @@ export class RelayApiService implements IRelayApi {
   public async completeAssignment(assignmentId: string): Promise<{ success: boolean }> {
     await this.engine.completeAssignment(assignmentId as AssignmentId);
     return { success: true };
+  }
+
+  public async getAssignmentDetail(id: string): Promise<any> {
+    const assignment = await this.db.assignments.findById(id as AssignmentId);
+    if (!assignment) return null;
+    const pair = await this.db.pairs.findById(assignment.pairId);
+    const attempts = await this.db.attempts.findByAssignmentId(assignment.id);
+    const deliveries = await this.db.deliveries.findByAssignmentId(assignment.id);
+    const handoffs = await this.db.handoffs.findByAssignmentId(assignment.id);
+    const events = await this.db.events.findByResourceId(assignment.id);
+    const attentionItems = await this.db.attention.findAll();
+    const assignmentAttention = attentionItems.filter(
+      (item) => item.assignmentId === assignment.id && item.status !== 'resolved'
+    );
+    return {
+      assignment: {
+        id: assignment.id,
+        pairId: assignment.pairId,
+        pairName: pair?.name ?? 'Unknown Pair',
+        projectId: assignment.projectId,
+        title: assignment.title,
+        instruction: assignment.instruction,
+        status: assignment.status,
+        targetSideRole: assignment.targetSideRole ?? 'worker',
+        source: assignment.sourceHandoffId ? 'handoff' : 'manual',
+        currentAttemptId: assignment.currentAttemptId ?? undefined,
+        currentAttemptStatus: assignment.currentAttemptId ? (await this.db.attempts.findById(assignment.currentAttemptId))?.status : undefined,
+        activeDeliveryStatus: assignment.activeDeliveryId ? (await this.db.deliveries.findById(assignment.activeDeliveryId))?.status : undefined,
+        activeHandoffStatus: assignment.activeHandoffId ? (await this.db.handoffs.findById(assignment.activeHandoffId))?.status : undefined,
+        createdAt: assignment.createdAt,
+        updatedAt: assignment.updatedAt,
+        completedAt: assignment.completedAt,
+      },
+      pair: pair ? {
+        id: pair.id,
+        name: pair.name,
+        status: pair.status,
+        operationalState: pair.operationalState,
+        relayState: pair.relayState,
+      } : null,
+      attempts: attempts.map((at) => ({
+        id: at.id,
+        assignmentId: at.assignmentId,
+        attemptNumber: at.attemptNumber,
+        status: at.status,
+        sessionPairId: at.sessionPairId,
+        workerSessionId: at.workerSessionId,
+        externalSessionId: at.externalSessionId,
+        startedAt: at.startedAt,
+        finishedAt: at.finishedAt,
+        failureReason: at.failureReason,
+        evidence: at.evidence,
+      })),
+      deliveries: deliveries.map((d) => ({
+        id: d.id,
+        assignmentId: d.assignmentId,
+        attemptId: d.attemptId,
+        targetRuntimeId: d.targetRuntimeId,
+        status: d.status,
+        instructionSnippet: d.instructionSnippet,
+        evidence: d.evidence,
+        deliveredAt: d.deliveredAt,
+        failureReason: d.failureReason,
+        createdAt: d.createdAt,
+        updatedAt: d.updatedAt,
+      })),
+      handoffs: handoffs.map((h) => ({
+        id: h.id,
+        assignmentId: h.assignmentId,
+        attemptId: h.attemptId,
+        status: h.status,
+        resultSummary: h.resultSummary,
+        payload: h.payload,
+        evidence: h.evidence,
+        plannerDeliveryEvidence: h.plannerDeliveryEvidence,
+        deliveredToPlannerAt: h.deliveredToPlannerAt,
+        completedAt: h.completedAt,
+        createdAt: h.createdAt,
+        updatedAt: h.updatedAt,
+      })),
+      events: events.map((e) => ({
+        id: e.id,
+        timestamp: e.timestamp,
+        resourceType: e.resourceType,
+        resourceId: e.resourceId,
+        eventType: e.eventType,
+        actor: e.actor,
+        previousState: e.previousState,
+        newState: e.newState,
+        evidence: e.evidence,
+        correlationId: e.correlationId,
+        details: e.details,
+        severity: e.severity,
+      })),
+      attentionItems: assignmentAttention.map((item) => ({
+        id: item.id,
+        pairId: item.pairId,
+        assignmentId: item.assignmentId,
+        severity: item.severity,
+        status: item.status,
+        type: item.type,
+        title: item.title,
+        message: item.message,
+        suggestedAction: item.suggestedAction,
+        suggestedTier: item.suggestedTier,
+        createdAt: item.createdAt,
+      })),
+    };
   }
 
   /* --- Recovery & reconciliation operations (no SQL required) --- */
@@ -1986,6 +2265,40 @@ export class RelayApiService implements IRelayApi {
     }
   }
 
+  /**
+   * Validates a ChatGPT Project binding and returns its canonical form.
+   *
+   * THE single gate used by BOTH paths:
+   *   - automatic GUI Project discovery (`resolveChatGPTProject` / `discoverChatGPTPlanner`)
+   *   - manual pasted URL (`finalizeProjectSetup` / `updateProject` via the wizard)
+   *
+   * Both go through `parseChatGPTProjectUrl`, so the same input always produces
+   * the same canonical Project binding. A URL with no `/g/<g-p-…>` Project
+   * identity — most importantly a standalone `/c/<conversationId>` conversation
+   * URL, which is SESSION identity — is rejected rather than bound.
+   */
+  private validateChatGPTProjectBinding(url: string | null | undefined): {
+    ok: boolean;
+    error?: string;
+    projectId?: string;
+    canonicalProjectUrl?: string;
+  } {
+    const trimmed = (url || '').trim();
+    if (!trimmed) {
+      return { ok: false, error: chatgptProjectDiscoveryError('INVALID_PROJECT_URL', 'no URL was provided') };
+    }
+    const identity = parseChatGPTProjectUrl(trimmed);
+    if (!identity) {
+      const stage = isChatGPTProjectLessUrl(trimmed) ? 'PROJECT_ID_PARSE_FAILED' : 'INVALID_PROJECT_URL';
+      return { ok: false, error: chatgptProjectDiscoveryError(stage, trimmed) };
+    }
+    return {
+      ok: true,
+      projectId: identity.projectId,
+      canonicalProjectUrl: identity.canonicalProjectUrl,
+    };
+  }
+
   public async resolveChatGPTProject(name: string): Promise<{
     success: boolean;
     projectUrl?: string;
@@ -1998,7 +2311,20 @@ export class RelayApiService implements IRelayApi {
       if (!provider || typeof provider.resolveChatGPTProject !== 'function') {
         return { success: false, error: 'ChatGPT provider does not support project resolution' };
       }
-      return await provider.resolveChatGPTProject(name);
+      const res: any = await provider.resolveChatGPTProject(name);
+      if (res?.success) {
+        // Fail closed at the boundary: a "success" carrying no bindable Project
+        // identity must never reach the persistence layer.
+        const binding = this.validateChatGPTProjectBinding(res.finalUrl ?? res.projectUrl);
+        if (!binding.ok) {
+          return {
+            success: false,
+            error: binding.error,
+            diagnostics: { ...(res.diagnostics || {}), discoveryError: binding.error },
+          };
+        }
+      }
+      return res;
     } catch (err: any) {
       return { success: false, error: err.message };
     }
@@ -2698,7 +3024,19 @@ export class RelayApiService implements IRelayApi {
         if (!provider || typeof provider.resolveChatGPTProject !== 'function') {
           return { success: false, error: 'ChatGPT provider does not support project resolution' };
         }
-        return await provider.resolveChatGPTProject(name);
+        const res: any = await provider.resolveChatGPTProject(name);
+        if (res?.success) {
+          // Same parser, same binding gate as the manual path.
+          const binding = this.validateChatGPTProjectBinding(res.finalUrl ?? res.projectUrl);
+          if (!binding.ok) {
+            return {
+              success: false,
+              error: binding.error,
+              diagnostics: { ...(res.diagnostics || {}), discoveryError: binding.error },
+            };
+          }
+        }
+        return res;
       } catch (err: any) {
         return { success: false, error: err.message };
       } finally {
@@ -2725,6 +3063,23 @@ export class RelayApiService implements IRelayApi {
         };
       }
 
+      // 0. Validate the ChatGPT Project binding BEFORE anything is created.
+      //
+      // This is the manual path, but it is the SAME gate the automatic GUI
+      // discovery path goes through, so both yield the identical canonical
+      // Project binding. It also runs before any write so a rejected binding
+      // never leaves a half-created project behind.
+      const plannerBinding = setup.plannerUrl?.trim()
+        ? this.validateChatGPTProjectBinding(setup.plannerUrl)
+        : null;
+      if (plannerBinding && !plannerBinding.ok) {
+        return { success: false, error: plannerBinding.error };
+      }
+      // The canonical Project URL is what gets persisted: it carries the stable
+      // external ChatGPT Project identity (`/g/<g-p-…>`) AND remains usable for
+      // navigation/discovery. No duplicate schema field is introduced.
+      const plannerUrl = plannerBinding?.canonicalProjectUrl;
+
       // 1. Create Project
       const project = await this.engine.createProject(
         setup.name,
@@ -2739,7 +3094,6 @@ export class RelayApiService implements IRelayApi {
       // values — only an explicit user update may change them.
       {
         const workerWorkspace = setup.canonicalPath?.trim() || undefined;
-        const plannerUrl = setup.plannerUrl?.trim() || undefined;
         if (workerWorkspace || plannerUrl) {
           project.update(undefined, undefined, undefined, undefined, plannerUrl, workerWorkspace);
           await this.db.projects.save(project);
@@ -2748,7 +3102,7 @@ export class RelayApiService implements IRelayApi {
 
       // 2. Register/Find Runtimes
       let plannerId: RuntimeSessionId | undefined;
-      if (setup.plannerUrl) {
+      if (plannerUrl) {
         const planner = await this.engine.registerRuntimeSession(
           'chatgpt',
           `ChatGPT: ${setup.name}`,
@@ -2760,11 +3114,15 @@ export class RelayApiService implements IRelayApi {
           timestamp: Date.now(),
           source: 'reconciliation_probe',
           windowTitle: `ChatGPT - ${setup.name}`,
-          details: { projectUrl: setup.plannerUrl, bindingRecorded: true },
+          details: {
+            projectUrl: plannerUrl,
+            chatgptProjectId: plannerBinding?.projectId,
+            bindingRecorded: true,
+          },
         });
         // Persist the project binding as the planner runtime's provider reference
         // (session identity is unknown until a conversation URL is bound later).
-        planner.updateExternalIdentity(undefined, setup.plannerUrl);
+        planner.updateExternalIdentity(undefined, plannerUrl);
         await this.db.runtimes.save(planner);
         plannerId = planner.id;
       }
@@ -2799,6 +3157,62 @@ export class RelayApiService implements IRelayApi {
     } catch (err: any) {
       return { success: false, error: err.message };
     }
+  }
+
+  /* --- Phase 1 Health (read-only projections) -----------------------------
+   *
+   * These are pure projections over what the runtime health system already
+   * persisted. They run no detector, contact no provider, spawn no subprocess,
+   * and touch no operational repository. Detection continues to function with
+   * no UI open.
+   */
+
+  private healthProjection(): HealthProjectionService {
+    return new HealthProjectionService({
+      incidentsRepo: this.db.healthIncidents,
+      observationsRepo: this.db.healthObservations,
+    });
+  }
+
+  public async getHealthSummary(): Promise<UIHealthSummary> {
+    return this.healthProjection().getHealthSummary();
+  }
+
+  public async listHealthIncidents(
+    options: { status?: 'active' | 'history'; limit?: number } = {},
+  ): Promise<UIHealthIncident[]> {
+    const projection = this.healthProjection();
+    return options.status === 'history'
+      ? projection.listResolvedIncidents(options.limit)
+      : projection.listActiveIncidents(options.limit);
+  }
+
+  public async getHealthIncident(id: string): Promise<UIHealthIncidentDetail | null> {
+    return this.healthProjection().getHealthIncident(id);
+  }
+
+  /**
+   * Operator acknowledgement only. This never resolves an incident, never
+   * retries, and never repairs: it records that a human has seen the problem.
+   */
+  public async acknowledgeHealthIncident(id: string): Promise<{ success: boolean; status?: string }> {
+    return this.healthProjection().acknowledgeIncident(id);
+  }
+
+  /**
+   * Read-only external-worker handoff report for one incident.
+   *
+   * Returns the plain-text report, or null when the incident does not exist. This
+   * runs no health check, contacts no provider, and mutates nothing. Phase 1 does
+   * not deliver the report to a worker: the operator copies it out.
+   */
+  public async generateHealthHandoffReport(
+    id: string,
+    options: { eventLimit?: number } = {},
+  ): Promise<string | null> {
+    const service = new HealthHandoffReportService(this.db, this.db.healthIncidents);
+    const report = await service.generate(id, options);
+    return report?.text ?? null;
   }
 
   public async getDiagnosticsReport(): Promise<DiagnosticsReport> {
@@ -3028,8 +3442,13 @@ export class RelayApiService implements IRelayApi {
   public async getEffectiveModelConfig(
     providerType: ProviderType,
     projectId?: string,
+    pairId?: string,
   ): Promise<EffectiveModelConfig> {
-    return this.engine.resolveEffectiveModelConfig(providerType, projectId as ProjectId | undefined);
+    return this.engine.resolveEffectiveModelConfig(
+      providerType,
+      projectId as ProjectId | undefined,
+      pairId as PairId | undefined,
+    );
   }
 
   public async setGlobalModelDefault(
@@ -3060,5 +3479,31 @@ export class RelayApiService implements IRelayApi {
     providerType: ProviderType,
   ): Promise<void> {
     await this.engine.clearProjectModelOverride(projectId as ProjectId, providerType);
+  }
+
+  /**
+   * Persist a pair-scoped worker model on the SAME provider_settings authority as
+   * the global and project scopes. No provider contact: the delivery boundary
+   * reads the resolved value later, so this is legal while the Pair is IDLE.
+   */
+  public async setPairModelOverride(
+    pairId: string,
+    providerType: ProviderType,
+    model: string,
+    justification: string,
+  ): Promise<ProviderSetting | null> {
+    return this.engine.setPairModelOverride(
+      pairId as PairId,
+      providerType,
+      model,
+      justification,
+    );
+  }
+
+  public async clearPairModelOverride(
+    pairId: string,
+    providerType: ProviderType,
+  ): Promise<void> {
+    await this.engine.clearPairModelOverride(pairId as PairId, providerType);
   }
 }

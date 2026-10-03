@@ -40,6 +40,7 @@ import {
   SqliteVerificationResultRepository,
 } from './SqliteRepositories.ts';
 import { SqliteProviderSettingsRepository } from './SqliteProviderSettingsRepository.ts';
+import { SqliteHealthObservationRepository, SqliteHealthIncidentRepository } from './SqliteHealthRepository.ts';
 
 function tableExists(db: DatabaseSync, tableName: string): boolean {
   const rows = db
@@ -86,6 +87,8 @@ export class SqliteRelayDatabase implements IRelayRepositories {
   public readonly contractRevisions: SqliteContractRevisionRepository;
   public readonly verificationResults: SqliteVerificationResultRepository;
   public readonly providerSettings: SqliteProviderSettingsRepository;
+  public readonly healthObservations: SqliteHealthObservationRepository;
+  public readonly healthIncidents: SqliteHealthIncidentRepository;
 
   constructor(filePath = ':memory:') {
     this.db = new DatabaseSync(filePath);
@@ -110,6 +113,8 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     this.contractRevisions = new SqliteContractRevisionRepository(this.db);
     this.verificationResults = new SqliteVerificationResultRepository(this.db);
     this.providerSettings = new SqliteProviderSettingsRepository(this.db);
+    this.healthObservations = new SqliteHealthObservationRepository(this.db);
+    this.healthIncidents = new SqliteHealthIncidentRepository(this.db);
   }
 
   private initSchema(): void {
@@ -198,6 +203,8 @@ export class SqliteRelayDatabase implements IRelayRepositories {
         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
         title TEXT NOT NULL,
         instruction TEXT NOT NULL,
+        target_side_role TEXT NOT NULL DEFAULT 'worker',
+        source_handoff_id TEXT,
         status TEXT NOT NULL,
         current_attempt_id TEXT,
         active_delivery_id TEXT,
@@ -396,7 +403,10 @@ CREATE TABLE IF NOT EXISTS handoffs (
     addColumnIfNeeded(this.db, 'assignments', 'current_attempt_id', 'TEXT');
     addColumnIfNeeded(this.db, 'assignments', 'active_delivery_id', 'TEXT');
     addColumnIfNeeded(this.db, 'assignments', 'active_handoff_id', 'TEXT');
+    addColumnIfNeeded(this.db, 'assignments', 'target_side_role', "TEXT NOT NULL DEFAULT 'worker'");
+    addColumnIfNeeded(this.db, 'assignments', 'source_handoff_id', 'TEXT');
     addColumnIfNeeded(this.db, 'assignments', 'completed_at', 'INTEGER');
+    this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_assignments_source_handoff ON assignments(source_handoff_id) WHERE source_handoff_id IS NOT NULL;`);
 
     addColumnIfNeeded(this.db, 'attempts', 'session_pair_id', 'TEXT');
     addColumnIfNeeded(this.db, 'attempts', 'worker_session_id', 'TEXT');
@@ -541,6 +551,36 @@ CREATE TABLE IF NOT EXISTS handoffs (
     this.migrateSideObservationSchema();
     this.migrateSideCheckpointSchema();
     this.migrateProviderSettingsSchema();
+
+    // Phase 1 health domain tables (additive only)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS health_observations (
+        id TEXT PRIMARY KEY,
+        check_type TEXT NOT NULL,
+        component_type TEXT NOT NULL,
+        component_id TEXT,
+        result TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        evidence_json TEXT
+      );
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS health_incidents (
+        id TEXT PRIMARY KEY,
+        incident_type TEXT NOT NULL,
+        component_type TEXT NOT NULL,
+        component_id TEXT,
+        severity TEXT NOT NULL,
+        status TEXT NOT NULL,
+        first_seen INTEGER NOT NULL,
+        last_seen INTEGER NOT NULL,
+        occurrence_count INTEGER NOT NULL DEFAULT 1,
+        evidence_json TEXT
+      );
+    `);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_health_incidents_status ON health_incidents(status);`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_health_incidents_type ON health_incidents(incident_type);`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_health_observations_check ON health_observations(check_type);`);
   }
 
   /**

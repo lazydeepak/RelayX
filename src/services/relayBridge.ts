@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- * RELAY BRIDGE — CLIENT IPC & IN-MEMORY DEV FALLBACK BRIDGE
+ * RELAY BRIDGE — CLIENT IPC & BROWSER PREVIEW BOUNDARY
  * ============================================================================
  *
  * This module exports `relayBridge`, implementing the `IRelayApi` interface.
@@ -12,46 +12,22 @@
  *    main Electron process with native SQLite and macOS system automation.
  *
  * 2. Web / Dev Preview (Fallback):
- *    When running in a standard web browser or AI Studio preview where Electron
- *    is absent, `relayBridge` lazily instantiates a local in-memory `RelayApiService`
- *    backed by `MemoryRelayDatabase` and simulated browser providers. This enables
- *    full UI testing and live state exploration without requiring native macOS binaries.
+ *    When Electron is absent, `relayBridge` delegates to a deliberately inert,
+ *    browser-safe preview API. Backend state and provider operations remain in the
+ *    Electron main process and are never bundled into the renderer.
  */
 
 import { IRelayApi } from '../types/relayApi.ts';
-import { MemoryRelayDatabase } from '../relay/persistence/memory/MemoryDatabase.ts';
-import { RelayEngine } from '../relay/application/RelayEngine.ts';
-import { RelayApiService } from '../relay/application/RelayApiService.ts';
-import {
-  BrowserChatGPTProvider,
-  BrowserOpenCodeProvider,
-  BrowserVSCodeProvider,
-} from '../relay/providers/browserProviders.ts';
+import { browserPreviewApi } from './browserPreviewApi.ts';
 
-let localFallbackService: RelayApiService | null = null;
-
-function getLocalFallbackService(): RelayApiService {
-  if (!localFallbackService) {
-    const memDb = new MemoryRelayDatabase();
-    const engine = new RelayEngine(memDb);
-
-    engine.registerProvider(new BrowserChatGPTProvider());
-    engine.registerProvider(new BrowserOpenCodeProvider());
-    engine.registerProvider(new BrowserVSCodeProvider());
-
-    localFallbackService = new RelayApiService(memDb, engine, {
-      isElectron: false,
-      databasePath: ':memory:',
-      databaseType: 'memory',
-    });
-  }
-  return localFallbackService;
+function getLocalFallbackService(): IRelayApi {
+  return browserPreviewApi;
 }
 
 /**
  * The unified Relay Bridge.
  * Prioritizes the secure typed Electron IPC bridge (`window.relayApi`).
- * Falls back to an in-memory RelayApiService in browser dev preview.
+ * Falls back to an inert browser-only API in web preview.
  */
 export const relayBridge: IRelayApi = {
   getAppStatus: async () => {
@@ -360,6 +336,13 @@ export const relayBridge: IRelayApi = {
     return getLocalFallbackService().createAssignment(pairId, title, instruction);
   },
 
+  createAndDispatchAssignment: async (pairId: string, title: string, instruction: string) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.createAndDispatchAssignment(pairId, title, instruction);
+    }
+    return getLocalFallbackService().createAndDispatchAssignment(pairId, title, instruction);
+  },
+
   dispatchAssignment: async (assignmentId: string) => {
     if (typeof window !== 'undefined' && window.relayApi) {
       return window.relayApi.dispatchAssignment(assignmentId);
@@ -372,6 +355,12 @@ export const relayBridge: IRelayApi = {
       return window.relayApi.completeAssignment(assignmentId);
     }
     return getLocalFallbackService().completeAssignment(assignmentId);
+  },
+  getAssignmentDetail: async (id: string) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return (window.relayApi as any).getAssignmentDetail ? (window.relayApi as any).getAssignmentDetail(id) : getLocalFallbackService().getAssignmentDetail(id);
+    }
+    return getLocalFallbackService().getAssignmentDetail(id);
   },
 
   deliverHandoff: async (handoffId: string) => {
@@ -595,12 +584,49 @@ export const relayBridge: IRelayApi = {
     return getLocalFallbackService().getDiagnosticsReport();
   },
 
+  // --- Phase 1 Health (read-only) ---
+  // The renderer only READS persisted health state. None of these run a
+  // detector, contact a provider, or spawn a subprocess.
+  getHealthSummary: async () => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.getHealthSummary();
+    }
+    return getLocalFallbackService().getHealthSummary();
+  },
+
+  listHealthIncidents: async (options) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.listHealthIncidents(options);
+    }
+    return getLocalFallbackService().listHealthIncidents(options);
+  },
+
+  getHealthIncident: async (id) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.getHealthIncident(id);
+    }
+    return getLocalFallbackService().getHealthIncident(id);
+  },
+
+  acknowledgeHealthIncident: async (id) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.acknowledgeHealthIncident(id);
+    }
+    return getLocalFallbackService().acknowledgeHealthIncident(id);
+  },
+
+  generateHealthHandoffReport: async (id, options) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.generateHealthHandoffReport(id, options);
+    }
+    return getLocalFallbackService().generateHealthHandoffReport(id, options);
+  },
+
   copyDiagnosticReport: async () => {
     if (typeof window !== 'undefined' && window.relayApi) {
       return window.relayApi.copyDiagnosticReport();
     }
-    return getLocalFallbackService().copyDiagnosticReport();
-  },
+    return getLocalFallbackService().copyDiagnosticReport();  },
 
   listIntegrations: async () => {
     if (typeof window !== 'undefined' && window.relayApi) {
@@ -707,11 +733,11 @@ export const relayBridge: IRelayApi = {
     return getLocalFallbackService().getSupportedModels(providerType);
   },
 
-  getEffectiveModelConfig: async (providerType, projectId) => {
+  getEffectiveModelConfig: async (providerType, projectId, pairId) => {
     if (typeof window !== 'undefined' && window.relayApi) {
-      return window.relayApi.getEffectiveModelConfig(providerType, projectId);
+      return window.relayApi.getEffectiveModelConfig(providerType, projectId, pairId);
     }
-    return getLocalFallbackService().getEffectiveModelConfig(providerType, projectId);
+    return getLocalFallbackService().getEffectiveModelConfig(providerType, projectId, pairId);
   },
 
   setGlobalModelDefault: async (providerType, model, note) => {
@@ -733,5 +759,19 @@ export const relayBridge: IRelayApi = {
       return window.relayApi.clearProjectModelOverride(projectId, providerType);
     }
     return getLocalFallbackService().clearProjectModelOverride(projectId, providerType);
+  },
+
+  setPairModelOverride: async (pairId, providerType, model, justification) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.setPairModelOverride(pairId, providerType, model, justification);
+    }
+    return getLocalFallbackService().setPairModelOverride(pairId, providerType, model, justification);
+  },
+
+  clearPairModelOverride: async (pairId, providerType) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.clearPairModelOverride(pairId, providerType);
+    }
+    return getLocalFallbackService().clearPairModelOverride(pairId, providerType);
   },
 };

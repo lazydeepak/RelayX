@@ -38,7 +38,9 @@ export const RELAY_IPC_CHANNELS = {
   CAN_DELETE_RUNTIME_SESSION: 'relay:can-delete-runtime-session',
   DELETE_RUNTIME_SESSION: 'relay:delete-runtime-session',
   LIST_ASSIGNMENTS: 'relay:list-assignments',
+  GET_ASSIGNMENT_DETAIL: 'relay:get-assignment-detail',
   CREATE_ASSIGNMENT: 'relay:create-assignment',
+  CREATE_AND_DISPATCH_ASSIGNMENT: 'relay:create-and-dispatch-assignment',
   DISPATCH_ASSIGNMENT: 'relay:dispatch-assignment',
   COMPLETE_ASSIGNMENT: 'relay:complete-assignment',
   DELIVER_HANDOFF: 'relay:deliver-handoff',
@@ -74,6 +76,17 @@ export const RELAY_IPC_CHANNELS = {
   PROVISION_PAIR_WITH_NEW_SESSIONS: 'relay:provision-pair-with-new-sessions',
   FINALIZE_PROJECT_SETUP: 'relay:finalize-project-setup',
   GET_DIAGNOSTICS_REPORT: 'relay:get-diagnostics-report',
+
+  /* --- Phase 1 Health (read-only) -----------------------------------------
+   *
+   * These channels only READ persisted health state. No detector runs, no
+   * provider is contacted, and no subprocess is spawned by any of them.
+   */
+  GET_HEALTH_SUMMARY: 'relay:get-health-summary',
+  LIST_HEALTH_INCIDENTS: 'relay:list-health-incidents',
+  GET_HEALTH_INCIDENT: 'relay:get-health-incident',
+  ACKNOWLEDGE_HEALTH_INCIDENT: 'relay:acknowledge-health-incident',
+  GENERATE_HEALTH_HANDOFF_REPORT: 'relay:generate-health-handoff-report',
   COPY_DIAGNOSTIC_REPORT: 'relay:copy-diagnostic-report',
 
   // Provider Integration & Capability Model
@@ -99,6 +112,8 @@ export const RELAY_IPC_CHANNELS = {
   SET_GLOBAL_MODEL_DEFAULT: 'relay:set-global-model-default',
   SET_PROJECT_MODEL_OVERRIDE: 'relay:set-project-model-override',
   CLEAR_PROJECT_MODEL_OVERRIDE: 'relay:clear-project-model-override',
+  SET_PAIR_MODEL_OVERRIDE: 'relay:set-pair-model-override',
+  CLEAR_PAIR_MODEL_OVERRIDE: 'relay:clear-pair-model-override',
 } as const;
 
 export type RelayIpcChannel = (typeof RELAY_IPC_CHANNELS)[keyof typeof RELAY_IPC_CHANNELS];

@@ -10,12 +10,24 @@ import {
   VSCodeProvider,
 } from '../src/relay/providers/adapters.ts';
 import { registerRelayIpcHandlers } from './ipc/registerHandlers.ts';
+import { HealthIncidentEngine } from '../src/relay/application/HealthIncidentEngine.ts';
+import { HealthRuntimeCoordinator } from '../src/relay/application/HealthRuntimeCoordinator.ts';
+import { HealthScheduler, withHealthDeliverySweep } from '../src/relay/application/HealthScheduler.ts';
 
 let mainWindow: BrowserWindow | null = null;
 let sqliteDb: SqliteRelayDatabase | null = null;
 let relayEngine: RelayEngine | null = null;
 let relayService: RelayApiService | null = null;
 let tray: Tray | null = null;
+
+/**
+ * Phase 1 health monitoring lives in the ELECTRON MAIN PROCESS, never the
+ * renderer. Detection must work with no window open, and the lag probe must
+ * measure the main event loop — a renderer probe would measure a different loop
+ * and could report a healthy main process as stalled.
+ */
+let healthCoordinator: HealthRuntimeCoordinator | null = null;
+let healthScheduler: HealthScheduler | null = null;
 
 function createTrayIcon(): Electron.NativeImage {
   const size = 16;
@@ -129,7 +141,26 @@ function initializeEngine(): RelayApiService {
   });
 
   registerRelayIpcHandlers(relayService);
+  initializeHealthMonitoring(sqliteDb);
   return relayService;
+}
+
+/**
+ * Phase 1 health wiring. Read-only observation only: no repair, no retry, no
+ * restart, and no health-specific mutation of any operational entity.
+ *
+ * Exactly one health timer exists in the whole application: the main-process
+ * heartbeat. Time-based delivery checks ride RelayX's existing supervision loop
+ * instead of adding a second timer.
+ */
+function initializeHealthMonitoring(db: SqliteRelayDatabase): void {
+  const engine = new HealthIncidentEngine(db.healthObservations, db.healthIncidents);
+  healthCoordinator = new HealthRuntimeCoordinator({ repos: db, engine });
+
+  healthScheduler = new HealthScheduler({ coordinator: healthCoordinator });
+  healthScheduler.start();
+
+  console.log('[Health] Phase 1 health monitoring active in main process (read-only).');
 }
 
 function createWindow(): void {
@@ -256,7 +287,22 @@ if (!gotSingleInstanceLock) {
       }
 
       // Phase 8: Start continuous background supervision loop
-      relayEngine.startSupervisionLoop(5000);
+      //
+      // Health's time-based DELIVERY_STALLED check rides this EXISTING loop
+      // instead of adding another timer. The engine's interval body runs RelayX
+      // supervision unchanged; the override passed alongside it performs only the
+      // throttled health sweep, so supervision is never run twice and never
+      // blocked or failed by health.
+      if (relayEngine && healthCoordinator) {
+        const sweep = withHealthDeliverySweep(healthCoordinator);
+        relayEngine.startSupervisionLoop(5000, () => sweep.sweepIfDue());
+      } else {
+        relayEngine.startSupervisionLoop(5000);
+      }
+
+      if (healthCoordinator) {
+        await healthCoordinator.onStartup();
+      }
     }
 
     createWindow();
@@ -282,6 +328,10 @@ if (!gotSingleInstanceLock) {
 
   app.on('will-quit', () => {
     console.log('[Lifecycle] will-quit');
+    if (healthScheduler) {
+      healthScheduler.stop();
+      healthScheduler = null;
+    }
     if (relayEngine) {
       relayEngine.stopSupervisionLoop();
     }
