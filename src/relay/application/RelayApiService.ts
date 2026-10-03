@@ -437,6 +437,7 @@ export class RelayApiService implements IRelayApi {
         handoffSummary,
         status: pair.status,
         operationalState: pair.operationalState,
+        relayState: pair.relayState,
         lastSupervisedAt: pair.lastSupervisedAt,
       });
     }

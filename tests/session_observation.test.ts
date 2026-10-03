@@ -177,7 +177,8 @@ class LevelZeroProvider extends MockProvider {
   constructor(type: any = 'chatgpt') { super(type); }
 }
 // The capability genuinely does not exist on this class.
-delete (LevelZeroProvider.prototype as any).observeSide;
+(LevelZeroProvider.prototype as any).observeSide = undefined;
+(LevelZeroProvider.prototype as any).resolveSideIdentity = undefined;
 
 /* ------------------------------------------------------------------ *
  * Fixtures

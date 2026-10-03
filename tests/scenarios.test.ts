@@ -29,6 +29,7 @@ describe('RelayX Architectural Scenarios & Recovery Invariants', () => {
     // which requires operational_state = ACTIVE. Load & Activate is the ONLY
     // authorized grantor (freeze §4.4, §11.5).
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine.startPair(pair.id);
 
     const assignment = await engine.createAssignment(pair.id, 'Async Job', 'Compute long batch');
     await engine.dispatchAssignment(assignment.id);
@@ -59,6 +60,7 @@ describe('RelayX Architectural Scenarios & Recovery Invariants', () => {
     // which requires operational_state = ACTIVE. Load & Activate is the ONLY
     // authorized grantor (freeze §4.4, §11.5).
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine.startPair(pair.id);
 
     const assignment = await engine.createAssignment(pair.id, 'Job', 'Run script');
     await engine.dispatchAssignment(assignment.id);
@@ -101,6 +103,7 @@ describe('RelayX Architectural Scenarios & Recovery Invariants', () => {
     // which requires operational_state = ACTIVE. Load & Activate is the ONLY
     // authorized grantor (freeze §4.4, §11.5).
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine.startPair(pair.id);
 
     const assignment = await engine.createAssignment(pair.id, 'Tracing Task', 'Log steps');
     await engine.dispatchAssignment(assignment.id);

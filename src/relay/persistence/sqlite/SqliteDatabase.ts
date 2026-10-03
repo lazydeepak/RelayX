@@ -159,6 +159,8 @@ export class SqliteRelayDatabase implements IRelayRepositories {
         worker_session_id TEXT REFERENCES runtime_sessions(id),
         active_assignment_id TEXT,
         status TEXT NOT NULL,
+        operational_state TEXT NOT NULL DEFAULT 'IDLE',
+        relay_state TEXT NOT NULL DEFAULT 'STOPPED',
         predecessor_pair_id TEXT,
         source_checkpoint_id TEXT,
         last_supervised_at INTEGER,
@@ -387,10 +389,8 @@ CREATE TABLE IF NOT EXISTS handoffs (
 
     addColumnIfNeeded(this.db, 'pairs', 'active_assignment_id', 'TEXT');
     addColumnIfNeeded(this.db, 'pairs', 'last_supervised_at', 'INTEGER');
-    // S1 — Session Pair operations: the two-valued operational dimension and the
-    // stable identity anchor. Both additive; the gated step below backfills and
-    // stamps user_version = 4.
     addColumnIfNeeded(this.db, 'pairs', 'operational_state', "TEXT NOT NULL DEFAULT 'IDLE'");
+    addColumnIfNeeded(this.db, 'pairs', 'relay_state', "TEXT NOT NULL DEFAULT 'STOPPED'");
     addColumnIfNeeded(this.db, 'pairs', 'stable_pair_id', 'TEXT');
 
     addColumnIfNeeded(this.db, 'assignments', 'current_attempt_id', 'TEXT');

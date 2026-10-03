@@ -73,6 +73,7 @@ export interface UIPair {
   handoffSummary?: string;
   status: 'idle' | 'active' | 'paused' | 'recovering' | 'blocked' | 'archived';
   operationalState?: 'IDLE' | 'ACTIVE';
+  relayState?: 'STOPPED' | 'RUNNING' | 'PAUSED';
   lastSupervisedAt?: number;
 }
 

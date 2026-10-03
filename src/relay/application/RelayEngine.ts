@@ -31,9 +31,12 @@ import {
   PairSideCheckpointId,
   PairCheckpointId,
   PairContinuityResult,
+  CompletedTurnObservation,
+  CompletedTurnObservationResult,
   CHECKPOINT_BASELINE_ALREADY_EXISTS,
   CHECKPOINT_BASELINE_REQUIRED,
   CHECKPOINT_OBSERVATION_REQUIRED,
+  AuthorityContext,
 } from '../domain/types.ts';
 import {
   evaluateSideContinuity,
@@ -1961,7 +1964,10 @@ export class RelayEngine {
   /**
    * Dispatch precondition: the worker session must be bound to an identity that exists.
    */
-  public async dispatchAssignment(assignmentId: AssignmentId): Promise<{
+  public async dispatchAssignment(
+    assignmentId: AssignmentId,
+    context: AuthorityContext = 'OPERATOR_EXPLICIT',
+  ): Promise<{
     assignment: Assignment;
     attempt: Attempt;
     delivery: Delivery;
@@ -1990,10 +1996,10 @@ export class RelayEngine {
       if (!pair) throw new RelayDomainError(`Pair ${assignment.pairId} not found`, 'PAIR_NOT_FOUND');
 
       // I-2 GATE — ARMED (S6). §11.5: every provider contact is gated on
-      // `operational_state === 'ACTIVE'`, and this is the single enforcement point.
+      // authority determined by CALL CONTEXT (REALIGNMENT).
       // The check sits at the top of the Phase-1 transaction, BEFORE any durable
       // dispatch intent is written, so a refused dispatch leaves no partial record.
-      pair.assertProviderContactPermitted();
+      pair.assertContactPermitted(context);
 
       if (!pair.workerSessionId) {
         throw new RelayDomainError('Pair has no worker runtime bound', 'NO_WORKER_BOUND');
@@ -2377,7 +2383,10 @@ export class RelayEngine {
    * real work inside a conversation. The returned `resendPermitted` flag exists so the
    * caller cannot bypass that conclusion.
    */
-  public async reconcileDeliveryAgainstExactSession(deliveryId: DeliveryId): Promise<{
+  public async reconcileDeliveryAgainstExactSession(
+    deliveryId: DeliveryId,
+    context: AuthorityContext = 'OPERATOR_EXPLICIT',
+  ): Promise<{
     delivery: Delivery;
     reconciliation: TransportReconciliation;
     changes: string[];
@@ -2419,34 +2428,39 @@ export class RelayEngine {
     // lookup, so the gate consults the same Pair the dispatch was authorised against.
     if (attempt?.sessionPairId) {
       const owningPair = await this.repos.pairs.findById(attempt.sessionPairId);
-      if (owningPair && !owningPair.isProviderContactPermitted()) {
-        const reason =
-          `Pair ${attempt.sessionPairId} is not ACTIVE, so the exact session behind ` +
-          `Delivery ${delivery.id} cannot be read. No provider contact was made and no ` +
-          `external state was inferred (DESIGN_FREEZE I-2, I-6, §11.5).`;
-        await this.emitEvent('delivery', delivery.id, 'delivery.reconciled', {
-          actor: 'recovery',
-          previousState: delivery.status,
-          details: {
-            disposition: 'insufficient',
-            changes: [],
-            transportClassification: 'ambiguous',
-            reason,
+      if (owningPair) {
+        try {
+          owningPair.assertContactPermitted(context);
+        } catch (err: any) {
+          const reason =
+            `Pair ${attempt.sessionPairId} does not permit ${context} contact, so the exact ` +
+            `session behind Delivery ${delivery.id} cannot be read. No provider contact was ` +
+            `made and no external state was inferred (DESIGN_FREEZE I-2, I-6, §11.5). ` +
+            `Error: ${err.message}`;
+          await this.emitEvent('delivery', delivery.id, 'delivery.reconciled', {
+            actor: 'recovery',
+            previousState: delivery.status,
+            details: {
+              disposition: 'insufficient',
+              changes: [],
+              transportClassification: 'ambiguous',
+              reason,
+              resendPermitted: false,
+            },
+          });
+          return {
+            delivery,
+            reconciliation: reconcileTransportOutcome({
+              expectedText: assignment.instruction,
+              watermark: extractRecordedWatermark(delivery.evidence),
+              messages: [],
+              transcriptReadable: false,
+              transcriptReadFailure: reason,
+            }),
+            changes,
             resendPermitted: false,
-          },
-        });
-        return {
-          delivery,
-          reconciliation: reconcileTransportOutcome({
-            expectedText: assignment.instruction,
-            watermark: extractRecordedWatermark(delivery.evidence),
-            messages: [],
-            transcriptReadable: false,
-            transcriptReadFailure: reason,
-          }),
-          changes,
-          resendPermitted: false,
-        };
+          };
+        }
       }
     }
 
@@ -2817,7 +2831,7 @@ export class RelayEngine {
         const pair = await this.repos.pairs.findById(assignment.pairId);
         if (!pair) continue;
 
-        if (!pair.isProviderContactPermitted()) continue;
+        if (!pair.isAutomatedContactPermitted()) continue;
         if (!pair.workerSessionId) continue;
         const worker = await this.repos.runtimes.findById(pair.workerSessionId);
         if (!worker) continue;
@@ -2997,7 +3011,12 @@ export class RelayEngine {
     if (!assignment) throw new RelayDomainError(`Assignment ${handoff.assignmentId} not found`, 'NOT_FOUND');
 
     const pair = await this.repos.pairs.findById(assignment.pairId);
-    if (pair && pair.plannerSessionId) {
+    if (!pair) throw new RelayDomainError(`Pair ${assignment.pairId} not found`, 'PAIR_NOT_FOUND');
+
+    // I-2 GATE — ARMED (S6). Explicit operator contact requires operationalState === ACTIVE.
+    pair.assertProviderContactPermitted();
+
+    if (pair.plannerSessionId) {
       const plannerSession = await this.repos.runtimes.findById(pair.plannerSessionId);
       const effectiveSessionId = plannerSession?.externalSessionId || plannerSession?.sessionUrl;
       if (plannerSession && effectiveSessionId) {
@@ -3240,6 +3259,7 @@ export class RelayEngine {
    */
   public async assertRuntimeProviderContactPermitted(
     runtimeSessionId: RuntimeSessionId,
+    context: AuthorityContext = 'OPERATOR_EXPLICIT',
   ): Promise<RuntimePairGovernance> {
     const governance = await this.resolveRuntimePairGovernance(runtimeSessionId);
 
@@ -3254,14 +3274,11 @@ export class RelayEngine {
       );
     }
 
-    if (governance.kind === 'paired' && governance.operationalState !== 'ACTIVE') {
-      throw new RelayDomainError(
-        `Pair ${governance.pairId} is ${governance.operationalState}, so runtime ` +
-          `${runtimeSessionId} cannot be inspected: provider contact is not permitted and persisted ` +
-          'provider information is last-known evidence only (DESIGN_FREEZE I-2, I-3, §11.5). Run Load & ' +
-          'Activate on the Pair first.',
-        RUNTIME_PAIR_NOT_ACTIVE,
-      );
+    if (governance.kind === 'paired') {
+      const pair = await this.repos.pairs.findById(governance.pairId);
+      if (pair) {
+        pair.assertContactPermitted(context);
+      }
     }
 
     return governance;
@@ -4406,6 +4423,125 @@ export class RelayEngine {
     return checkpoint;
   }
 
+  /**
+   * Read-only completed-turn observation operation.
+   *
+   * Preconditions:
+   * - Obeys relay/provider authority: automated contact requires `relayState === RUNNING` and `operationalState === ACTIVE` (`pair.isAutomatedContactPermitted()`).
+   * - Inspects the exact bound external session.
+   * - Identifies latest COMPLETED assistant turn (ensuring generating/incomplete turns are never treated as completed).
+   * - Preserves provider capability differences (OpenCode vs ChatGPT/Level 0; unavailable fields are explicitly null).
+   * - Performs zero outbound transport.
+   * - Persists observation durably.
+   */
+  public async observeCompletedTurn(
+    pairId: PairId,
+    sideRole: PairSideRole,
+  ): Promise<CompletedTurnObservationResult> {
+    const pair = await this.repos.pairs.findById(pairId);
+    if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'PAIR_NOT_FOUND');
+
+    const runtimeSessionId = sideRole === 'planner' ? pair.plannerSessionId : pair.workerSessionId;
+    const runtime = runtimeSessionId ? await this.repos.runtimes.findById(runtimeSessionId) : null;
+    const externalSessionId = runtime?.externalSessionId ?? null;
+
+    const refuse = (reason: string): CompletedTurnObservationResult => ({
+      pairId,
+      sideRole,
+      outcome: 'refused',
+      providerContacted: false,
+      turn: null,
+      reason,
+    });
+
+    // Authority check: explicit operator contact requires operationalState === ACTIVE.
+    if (!pair.isProviderContactPermitted()) {
+      return refuse(
+        `Provider contact not permitted (operationalState: ${pair.operationalState}). ` +
+          'Observation refused with zero provider contact.'
+      );
+    }
+
+    if (!runtimeSessionId || !runtime || !externalSessionId) {
+      return refuse(`Side ${sideRole} has no bound runtime or external session id.`);
+    }
+
+    let provider;
+    try {
+      provider = this.getProvider(runtime.providerType);
+    } catch {
+      return refuse(`No provider registered for ${runtime.providerType}.`);
+    }
+
+    if (typeof provider.observeSide !== 'function') {
+      return refuse(`Provider ${runtime.providerType} exposes no observation capability.`);
+    }
+
+    let reading: SideObservationReading;
+    try {
+      const project = await this.repos.projects.findById(pair.projectId).catch(() => null);
+      const projectPath = project?.workerWorkspacePath ?? project?.canonicalPath ?? undefined;
+      reading = await provider.observeSide({ externalSessionId, projectPath });
+    } catch (err: any) {
+      return refuse(`Observation read failed: ${err?.message ?? String(err)}`);
+    }
+
+    // Persist via observeSide to keep pair_side_identity updated durably.
+    await this.observeSide(pairId, sideRole);
+
+    const isGenerating = reading.activityState === 'working';
+    if (isGenerating) {
+      return {
+        pairId,
+        sideRole,
+        outcome: 'refused',
+        providerContacted: true,
+        turn: null,
+        reason: 'Observed turn is currently generating/in-progress; not treated as completed.',
+      };
+    }
+
+    if (reading.messageEvidenceState === 'none' || reading.messageEvidenceState === 'unknown') {
+      return {
+        pairId,
+        sideRole,
+        outcome: 'refused',
+        providerContacted: true,
+        turn: null,
+        reason: `No completed message evidence found (state: ${reading.messageEvidenceState}).`,
+      };
+    }
+
+    const msg = reading.message;
+    const contentText = msg.text ?? '';
+    const contentFingerprint = contentText ? `${contentText.substring(0, 64)}_${contentText.length}` : null;
+
+    const turn: CompletedTurnObservation = {
+      sessionPairId: pairId,
+      sideRole,
+      runtimeSessionId,
+      externalSessionId,
+      externalMessageId: msg.ref,
+      ordinal: msg.ordinal,
+      completedAt: reading.observedAt,
+      contentFingerprint,
+      observedAt: Date.now(),
+      isGenerating: false,
+      determinacy: msg.ref !== null || msg.ordinal !== null ? 'identified' : 'unverified',
+      sourceProvider: runtime.providerType,
+      reason: reading.reason,
+    };
+
+    return {
+      pairId,
+      sideRole,
+      outcome: 'observed',
+      providerContacted: true,
+      turn,
+      reason: 'Completed turn successfully observed.',
+    };
+  }
+
 
   /**
    * `startPair` — EXECUTION authority. It is NOT the activation authority.
@@ -4457,7 +4593,7 @@ export class RelayEngine {
       );
     }
 
-    pair.resume();
+    pair.startRelay();
     await this.repos.pairs.save(pair);
     await this.emitEvent('pair', pair.id, 'pair.started', {
       actor: 'user',
@@ -4469,7 +4605,7 @@ export class RelayEngine {
   public async pausePair(pairId: PairId): Promise<Pair> {
     const pair = await this.repos.pairs.findById(pairId);
     if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'PAIR_NOT_FOUND');
-    pair.pause();
+    pair.pauseRelay();
     await this.repos.pairs.save(pair);
     await this.emitEvent('pair', pair.id, 'pair.paused', {
       actor: 'user',
@@ -4479,13 +4615,36 @@ export class RelayEngine {
   }
 
   public async resumePair(pairId: PairId): Promise<Pair> {
-    return this.startPair(pairId);
+    const pair = await this.repos.pairs.findById(pairId);
+    if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'PAIR_NOT_FOUND');
+    
+    if (!pair.isProviderContactPermitted()) {
+      const missing = [
+        !pair.plannerSessionId ? 'planner' : null,
+        !pair.workerSessionId ? 'worker' : null,
+      ].filter(Boolean);
+      const remedy = missing.length
+        ? `Pair ${pairId} has no bound ${missing.join(' or ')} runtime.`
+        : `Run Load & Activate on Pair ${pairId} first.`;
+      throw new RelayDomainError(
+        `Pair ${pairId} is IDLE, so execution cannot resume. ${remedy}`,
+        'PAIR_OPERATIONAL_STATE_IDLE',
+      );
+    }
+
+    pair.resumeRelay();
+    await this.repos.pairs.save(pair);
+    await this.emitEvent('pair', pair.id, 'pair.resumed', {
+      actor: 'user',
+      newState: pair.status,
+    });
+    return pair;
   }
 
   public async stopPair(pairId: PairId): Promise<Pair> {
     const pair = await this.repos.pairs.findById(pairId);
     if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'PAIR_NOT_FOUND');
-    pair.clearWork();
+    pair.stopRelay();
     await this.repos.pairs.save(pair);
     await this.emitEvent('pair', pair.id, 'pair.stopped', {
       actor: 'user',
@@ -4585,9 +4744,10 @@ export class RelayEngine {
    * @param options.assignmentId scope to one assignment (used before dispatching more work)
    */
   public async reconcileUnresolvedDispatches(
-    options: { assignmentId?: AssignmentId } = {},
+    options: { assignmentId?: AssignmentId; context?: AuthorityContext } = {},
   ): Promise<DispatchReconciliationReport> {
     const dispositions: DispatchReconciliationDispositionRecord[] = [];
+    const context = options.context ?? 'AUTOMATED';
 
     const candidates = options.assignmentId
       ? (await this.repos.deliveries.findByAssignmentId(options.assignmentId)).filter(
@@ -4603,7 +4763,7 @@ export class RelayEngine {
         continue;
       }
 
-      const outcome = await this.probeDispatchOutcome(current);
+      const outcome = await this.probeDispatchOutcome(current, context);
       const record = await this.commitDispatchDisposition(current, outcome);
       dispositions.push(record);
     }
@@ -4625,7 +4785,10 @@ export class RelayEngine {
    * thereby proven anything, and an unanswered question about a durable dispatch intent
    * is itself unresolved work that an operator must see.
    */
-  private async probeDispatchOutcome(delivery: Delivery): Promise<DispatchProbeOutcome> {
+  private async probeDispatchOutcome(
+    delivery: Delivery,
+    context: AuthorityContext = 'AUTOMATED',
+  ): Promise<DispatchProbeOutcome> {
     const attempt = await this.repos.attempts.findById(delivery.attemptId);
     if (!attempt) {
       return {
@@ -4649,24 +4812,28 @@ export class RelayEngine {
     }
 
     // I-2 GATE — ARMED (S6). `provider.reconcileDispatch(...)` below is a real
-    // external contact, not a local read, so §11.5 gates it like every other
-    // contact. The owning Pair is reached through the Attempt's FROZEN authority
-    // (`sessionPairId`), never a mutable lookup, so the gate consults the same Pair
-    // the dispatch was authorized against.
+    // external contact, not a local read, so §11.5 gates it according to the
+    // CALL CONTEXT (REALIGNMENT). The owning Pair is reached through the Attempt's
+    // FROZEN authority (`sessionPairId`), never a mutable lookup, so the gate
+    // consults the same Pair the dispatch was authorized against.
     //
     // `insufficient` is the correct disposition: the probe was not performed, so
     // RelayX genuinely does not know. It is NOT recorded as `not_delivered`, because
     // that would assert an external fact that was never established (I-6, I-13).
     if (attempt.sessionPairId) {
       const owningPair = await this.repos.pairs.findById(attempt.sessionPairId);
-      if (owningPair && !owningPair.isProviderContactPermitted()) {
-        return {
-          kind: 'insufficient',
-          reason:
-            `Pair ${attempt.sessionPairId} is IDLE, so dispatch intent ${delivery.id} cannot be ` +
-            'probed against the provider. No provider contact was made and no external state ' +
-            'was inferred (DESIGN_FREEZE I-2, I-6, §11.5).',
-        };
+      if (owningPair) {
+        try {
+          owningPair.assertContactPermitted(context);
+        } catch (err: any) {
+          return {
+            kind: 'insufficient',
+            reason:
+              `Pair ${attempt.sessionPairId} does not permit ${context} contact, so dispatch ` +
+              `intent ${delivery.id} cannot be probed. No provider contact was made and no ` +
+              `external state was inferred (DESIGN_FREEZE I-2, I-6, §11.5). Error: ${err.message}`,
+          };
+        }
       }
     }
 
@@ -4880,7 +5047,7 @@ export class RelayEngine {
     // delivery decides whether work is already in flight, so it must not be
     // influenced by — or race with — runtime observation below, which can create
     // handoffs and change assignment state.
-    const dispatchIntents = await this.reconcileUnresolvedDispatches();
+    const dispatchIntents = await this.reconcileUnresolvedDispatches({ context: 'AUTOMATED' });
 
     let reconciledAssignments = 0;
     let suspendedRuntimes = 0;
@@ -4890,7 +5057,7 @@ export class RelayEngine {
     for (const assignment of activeAssignments) {
       const pair = await this.repos.pairs.findById(assignment.pairId);
       if (!pair) continue;
-      if (!pair.isProviderContactPermitted()) continue;
+      if (!pair.isAutomatedContactPermitted()) continue;
       if (!pair.workerSessionId) continue;
       const worker = await this.repos.runtimes.findById(pair.workerSessionId);
       if (!worker) continue;
@@ -4971,6 +5138,19 @@ export class RelayEngine {
     const run = await repos.planFirstRuns.findById(runId);
     if (!run) throw new RelayDomainError(`PlanFirstRun ${runId} not found`, 'NOT_FOUND');
 
+    const pair = await repos.pairs.findById(run.sessionPairId);
+    if (!pair) throw new RelayDomainError(`Pair ${run.sessionPairId} not found`, 'NOT_FOUND');
+
+    // Authority check: Plan-First execution is AUTOMATED relay behavior.
+    if (!pair.isAutomatedContactPermitted()) {
+      return {
+        transition: 'run_terminal', // actually run_suspended but we don't have that state yet for tick result
+        runId: run.id,
+        plannerUpdateRequired: false,
+        blocker: 'pair_not_running',
+      };
+    }
+
     // --- 2. Invariant 2: a terminal run never executes again. No side effects.
     if (run.isTerminal()) {
       return { transition: 'run_terminal', runId: run.id, plannerUpdateRequired: false };
@@ -5009,7 +5189,7 @@ export class RelayEngine {
     // It is intentionally NOT inside the Plan-First domain and NOT inside
     // `dispatchAssignment`. This is engine/dispatch reliability, and the Plan-First
     // controller's own handling of `prepared | running` below is untouched.
-    await this.reconcileUnresolvedDispatches();
+    await this.reconcileUnresolvedDispatches({ context: 'AUTOMATED' });
 
     const inFlight = units.find((u) => u.status === 'in_progress');
     if (inFlight) {
@@ -5210,7 +5390,7 @@ export class RelayEngine {
 
     let dispatched: { assignment: Assignment; attempt: Attempt; delivery: Delivery };
     try {
-      dispatched = await this.dispatchAssignment(current.id);
+      dispatched = await this.dispatchAssignment(current.id, 'AUTOMATED');
     } catch (err) {
       if (err instanceof RuntimeNotAvailableError) {
         // Invariant 9: suspend rather than corrupt run state. The durable intent and the
@@ -5489,7 +5669,7 @@ export class RelayEngine {
     // external contact, so §11.5 gates it. The observation it produces is recorded
     // on the runtime and never promotes a WorkUnit, so skipping it for an IDLE Pair
     // loses no derived state — the only thing lost is a contact I-2 forbids.
-    if (pair?.workerSessionId && pair.isProviderContactPermitted()) {
+    if (pair?.workerSessionId && pair.isAutomatedContactPermitted()) {
       const worker = await this.repos.runtimes.findById(pair.workerSessionId);
       if (worker) {
         try {

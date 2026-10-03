@@ -78,6 +78,10 @@ import {
   PairOperationalState,
   DEFAULT_PAIR_OPERATIONAL_STATE,
   isPairOperationalState,
+  PairRelayState,
+  DEFAULT_PAIR_RELAY_STATE,
+  isPairRelayState,
+  AuthorityContext,
   AssignmentStatus,
   AttemptStatus,
   RuntimeSessionStatus,
@@ -189,6 +193,7 @@ export interface PairProps {
    * safe default for a pre-existing record (§17.3).
    */
   operationalState?: PairOperationalState;
+  relayState?: PairRelayState;
   /**
    * Stable Pair identity that survives session rebinding (C-1 prerequisite).
    * Immutable once set; defaults to `id`.
@@ -217,6 +222,7 @@ export class Pair {
   public readonly sourceCheckpointId: PairCheckpointId | null;
 
   private operational: PairOperationalState;
+  private relay: PairRelayState;
 
   constructor(props: PairProps) {
     this.id = props.id;
@@ -230,10 +236,12 @@ export class Pair {
     this.predecessorPairId = props.predecessorPairId ?? null;
     this.sourceCheckpointId = props.sourceCheckpointId ?? null;
     this.operational = DEFAULT_PAIR_OPERATIONAL_STATE;
+    this.relay = DEFAULT_PAIR_RELAY_STATE;
     this.lastSupervisedAt = props.lastSupervisedAt;
     this.createdAt = props.createdAt;
     this.updatedAt = props.updatedAt;
     this.operationalState = props.operationalState ?? DEFAULT_PAIR_OPERATIONAL_STATE;
+    this.relayState = props.relayState ?? DEFAULT_PAIR_RELAY_STATE;
   }
 
   /**
@@ -259,6 +267,48 @@ export class Pair {
     this.operational = value;
   }
 
+  public get relayState(): PairRelayState {
+    return this.relay;
+  }
+
+  public set relayState(value: PairRelayState) {
+    if (!isPairRelayState(value)) {
+      throw new RelayDomainError(
+        `Pair relay state must be STOPPED, RUNNING, or PAUSED; received '${String(value)}'.`,
+        'PAIR_RELAY_STATE_INVALID',
+      );
+    }
+    this.relay = value;
+  }
+
+  public startRelay(): void {
+    this.relayState = 'RUNNING';
+    this.resume();
+    this.updatedAt = Date.now();
+  }
+
+  public pauseRelay(): void {
+    this.relayState = 'PAUSED';
+    this.pause();
+    this.updatedAt = Date.now();
+  }
+
+  public resumeRelay(): void {
+    this.relayState = 'RUNNING';
+    this.resume();
+    this.updatedAt = Date.now();
+  }
+
+  public stopRelay(): void {
+    this.relayState = 'STOPPED';
+    this.pause();
+    this.updatedAt = Date.now();
+  }
+
+  public isAutomatedContactPermitted(): boolean {
+    return this.operationalState === 'ACTIVE' && this.relayState === 'RUNNING';
+  }
+
   public static create(
     projectId: ProjectId,
     name: string,
@@ -274,6 +324,7 @@ export class Pair {
       workerSessionId,
       status: 'idle',
       operationalState: DEFAULT_PAIR_OPERATIONAL_STATE,
+      relayState: DEFAULT_PAIR_RELAY_STATE,
       createdAt: now,
       updatedAt: now,
     });
@@ -323,6 +374,37 @@ export class Pair {
           'last-known evidence only (DESIGN_FREEZE I-2, I-3).',
         'PAIR_OPERATIONAL_STATE_IDLE',
       );
+    }
+  }
+
+  /**
+   * The single authority check for provider contact, determined by CALL CONTEXT (REALIGNMENT).
+   *
+   * 1. ACTIVATION: permitted for IDLE Pairs during loadAndActivate verification.
+   * 2. OPERATOR_EXPLICIT: requires ACTIVE.
+   * 3. AUTOMATED: requires ACTIVE AND RUNNING.
+   */
+  public assertContactPermitted(context: AuthorityContext): void {
+    if (context === 'ACTIVATION') {
+      // Activation verification is a deliberate special authority.
+      // It may perform bounded contact necessary to verify an IDLE Pair.
+      return;
+    }
+
+    if (context === 'OPERATOR_EXPLICIT') {
+      this.assertProviderContactPermitted();
+      return;
+    }
+
+    if (context === 'AUTOMATED') {
+      if (!this.isAutomatedContactPermitted()) {
+        throw new RelayDomainError(
+          `Pair is not permitted for AUTOMATED contact: requires ACTIVE and RUNNING. ` +
+            `(state: ${this.operationalState}, relay: ${this.relayState})`,
+          'PAIR_AUTOMATED_CONTACT_FORBIDDEN',
+        );
+      }
+      return;
     }
   }
 

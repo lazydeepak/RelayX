@@ -87,6 +87,7 @@ describe('Phase G — Exact Planner Transport', () => {
     const pair = await engine.createPair(project.id, 'Phase G Pair', planner.id, worker.id);
 
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine.startPair(pair.id);
 
     const assignment = await engine.createAssignment(pair.id, 'Task G', 'Build feature');
     await engine.dispatchAssignment(assignment.id);
@@ -155,6 +156,7 @@ describe('Phase G — Exact Planner Transport', () => {
     const pair = await engine.createPair(project.id, 'Phase G Pair 2', planner.id, worker.id);
 
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine.startPair(pair.id);
 
     const assignment2 = await engine.createAssignment(pair.id, 'Task G2', 'Build feature 2');
     await engine.dispatchAssignment(assignment2.id);

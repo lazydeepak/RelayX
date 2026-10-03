@@ -178,6 +178,7 @@ describe('Dispatch-intent reconciliation', () => {
     // activated before dispatch/reconciliation here can exercise their real
     // behaviour rather than being refused at the gate.
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine.startPair(pair.id);
     return pair;
   }
 
@@ -460,6 +461,7 @@ describe('Dispatch-intent reconciliation', () => {
         await db1.pairs.save(pair);
         // Same I-2 reason as bindPair: activation must precede dispatch.
         assert.strictEqual((await engine1.loadAndActivate(pair.id)).outcome, 'activated');
+        await engine1.startPair(pair.id);
         const assignment = await engine1.createAssignment(pair.id, 'A', 'Do X');
         const { attempt, delivery } = await engine1.dispatchAssignment(assignment.id);
 
@@ -531,6 +533,7 @@ describe('Dispatch-intent reconciliation', () => {
         await db3.pairs.save(pair2);
         // Same I-2 reason as bindPair: activation must precede dispatch.
         assert.strictEqual((await engine3.loadAndActivate(pair2.id)).outcome, 'activated');
+        await engine3.startPair(pair2.id);
         const asg2 = await engine3.createAssignment(pair2.id, 'B', 'Do Y');
         const { attempt: a2, delivery: d2 } = await engine3.dispatchAssignment(asg2.id);
         db3.db.prepare(`UPDATE deliveries SET status = 'delivering' WHERE id = ?`).run(d2.id);

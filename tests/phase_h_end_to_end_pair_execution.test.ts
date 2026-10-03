@@ -88,6 +88,7 @@ describe('Phase H — End-to-End Exact-Session Pair Execution Proof', () => {
     const pair = await engine.createPair(project.id, pairName, planner.id, worker.id);
     const activation = await engine.loadAndActivate(pair.id);
     assert.strictEqual(activation.outcome, 'activated');
+    await engine.startPair(pair.id);
 
     return { project, planner, worker, pair };
   }

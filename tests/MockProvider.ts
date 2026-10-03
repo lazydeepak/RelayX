@@ -57,6 +57,36 @@ export class MockProvider implements IRuntimeProvider {
   async matchSessionsByPath(projectPath: string, gitRoot?: string): Promise<RuntimeInspectionResult[]> { return [await this.findRuntime({ providerType: this.providerType })]; }
   async inspectRuntime(sessionId: RuntimeSessionId): Promise<RuntimeInspectionResult> { return this.findRuntime({ providerType: this.providerType }); }
   async activateRuntime(sessionId: RuntimeSessionId): Promise<boolean> { return true; }
+  async resolveSideIdentity(params: { externalSessionId: string; projectPath?: string }): Promise<any> {
+    return {
+      identityState: 'identified',
+      identityValue: params.externalSessionId,
+      verificationState: 'verified',
+      verificationValue: params.externalSessionId,
+      existenceState: 'present',
+      sourceCapability: 'mock_identity'
+    };
+  }
+  async observeSide(params: { externalSessionId: string; projectPath?: string }): Promise<any> {
+    return {
+      reachabilityState: 'reachable',
+      uiPresenceState: 'present',
+      activityState: 'idle',
+      messageEvidenceState: 'observed',
+      message: {
+        ref: 'msg_1',
+        role: 'assistant',
+        text: 'Hello',
+        truncated: false,
+        ordinal: 1,
+      },
+      observationCapability: 'mock_observation',
+      observedAt: Date.now(),
+      validUntil: Date.now() + 300000,
+      reason: 'Mock observed side',
+      evidence: null,
+    };
+  }
   async deliverInstruction(request: DeliveryInstructionRequest): Promise<DeliveryInstructionResult> {
     return {
       outcome: this.deliveryOutcome,

@@ -14,6 +14,8 @@ import {
   PairStatus,
   DEFAULT_PAIR_OPERATIONAL_STATE,
   isPairOperationalState,
+  DEFAULT_PAIR_RELAY_STATE,
+  isPairRelayState,
   PairSideRole,
   PairSideIdentity,
   SideIdentityState,
@@ -299,6 +301,8 @@ export class SqlitePairRepository implements IPairRepository {
   private mapRow(row: Record<string, unknown>): Pair {
     const rawOperational = row.operational_state;
     const operationalState = isPairOperationalState(rawOperational) ? rawOperational : DEFAULT_PAIR_OPERATIONAL_STATE;
+    const rawRelay = row.relay_state;
+    const relayState = isPairRelayState(rawRelay) ? rawRelay : DEFAULT_PAIR_RELAY_STATE;
     const rawStable = row.stable_pair_id;
     return new Pair({
       id: row.id as PairId,
@@ -309,6 +313,7 @@ export class SqlitePairRepository implements IPairRepository {
       activeAssignmentId: (row.active_assignment_id as AssignmentId) || undefined,
       status: row.status as PairStatus,
       operationalState,
+      relayState,
       stableId: ((rawStable as string) || (row.id as string)) as PairId,
       predecessorPairId: (row.predecessor_pair_id as PairId | null) ?? null,
       sourceCheckpointId: (row.source_checkpoint_id as PairCheckpointId | null) ?? null,
@@ -345,10 +350,10 @@ export class SqlitePairRepository implements IPairRepository {
     const stmt = this.db.prepare(`
       INSERT INTO pairs (
         id, project_id, name, planner_session_id, worker_session_id,
-        active_assignment_id, status, operational_state, stable_pair_id,
+        active_assignment_id, status, operational_state, relay_state, stable_pair_id,
         predecessor_pair_id, source_checkpoint_id,
         last_supervised_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         planner_session_id = excluded.planner_session_id,
@@ -356,6 +361,7 @@ export class SqlitePairRepository implements IPairRepository {
         active_assignment_id = excluded.active_assignment_id,
         status = excluded.status,
         operational_state = excluded.operational_state,
+        relay_state = excluded.relay_state,
         last_supervised_at = excluded.last_supervised_at,
         updated_at = excluded.updated_at
     `);
@@ -368,6 +374,7 @@ export class SqlitePairRepository implements IPairRepository {
       pair.activeAssignmentId ?? null,
       pair.status,
       pair.operationalState,
+      pair.relayState,
       pair.stableId,
       pair.predecessorPairId ?? null,
       pair.sourceCheckpointId ?? null,

@@ -106,6 +106,7 @@ describe('Phase 8 & Phase 9 — Background Supervision & Crash/Restart Recovery'
     // activated, the engine is rebuilt, and the recovered operational state still
     // permits contact. Load & Activate is the only authorized grantor (§4.4, §11.5).
     assert.strictEqual((await engine1.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine1.startPair(pair.id);
 
     const assignment = await engine1.createAssignment(pair.id, 'Offline task', 'do something');
     // Dispatch assignment

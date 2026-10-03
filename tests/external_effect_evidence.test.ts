@@ -231,6 +231,7 @@ describe('S1 — deliverHandoffToPlanner cannot mark external delivery (§9.4, �
     // grantor (freeze §4.4, §11.5). Nothing here weakens an S1 evidence assertion:
     // the external-effect semantics under test are unaffected by activation.
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine.startPair(pair.id);
     const assignment = await engine.createAssignment(pair.id, 'Build Component', 'Write a button');
     await engine.dispatchAssignment(assignment.id);
 
@@ -332,6 +333,7 @@ describe('S1 — attemptPlannerDelivery reports a truthful, typed outcome (§9.4
     // grantor (freeze §4.4, §11.5). Nothing here weakens an S1 evidence assertion:
     // the external-effect semantics under test are unaffected by activation.
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine.startPair(pair.id);
     const assignment = await engine.createAssignment(pair.id, 'Task', 'Instruction');
     await engine.dispatchAssignment(assignment.id);
     worker.isWorking = false;
@@ -426,6 +428,7 @@ describe('S1 — no event type in src/ asserts the Planner was notified', () => 
     // grantor (freeze §4.4, §11.5). Nothing here weakens an S1 evidence assertion:
     // the external-effect semantics under test are unaffected by activation.
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine.startPair(pair.id);
     const assignment = await engine.createAssignment(pair.id, 'Task', 'Instruction');
     await engine.dispatchAssignment(assignment.id);
     (engine.getProvider('opencode') as MockProvider).isComplete = true;
@@ -465,6 +468,7 @@ describe('S1 — the handoff lifecycle cannot manufacture a delivery record', ()
     // grantor (freeze §4.4, §11.5). Nothing here weakens an S1 evidence assertion:
     // the external-effect semantics under test are unaffected by activation.
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine.startPair(pair.id);
     const assignment = await engine.createAssignment(pair.id, 'Task', 'Instruction');
     await engine.dispatchAssignment(assignment.id);
     const worker = engine.getProvider('opencode') as MockProvider;

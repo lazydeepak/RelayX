@@ -90,6 +90,9 @@ class CountingProvider extends MockProvider {
   async captureEvidence(id: any, a: any) { this.calls.push('captureEvidence'); return super.captureEvidence(id, a); }
   async reconcileDispatch(r: any) { this.calls.push('reconcileDispatch'); return { outcome: 'unknown' as any }; }
 }
+// This class deliberately exposes NO identity capability. It models a LEVEL 0 provider.
+(CountingProvider.prototype as any).resolveSideIdentity = undefined;
+(CountingProvider.prototype as any).observeSide = undefined;
 
 /** LEVEL 1: a provider that CAN resolve and verify an exact external session id. */
 class VerifyingProvider extends CountingProvider {

@@ -28,6 +28,7 @@ describe('RelayX Engine Application Lifecycle & Supervision', () => {
     // (freeze §4.4, §11.5); neither MockProvider exposes an identity capability, so
     // both sides report `unknown` and the asymmetry is recorded, not hidden.
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine.startPair(pair.id);
 
     const assignment = await engine.createAssignment(pair.id, 'Refactor Engine', 'Organize into modules');
     assert.strictEqual(assignment.status, 'pending');
@@ -106,6 +107,7 @@ describe('RelayX Engine Application Lifecycle & Supervision', () => {
     // (freeze §4.4, §11.5); neither MockProvider exposes an identity capability, so
     // both sides report `unknown` and the asymmetry is recorded, not hidden.
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine.startPair(pair.id);
 
     const assignment = await engine.createAssignment(pair.id, 'Build Component', 'Write React button');
     await engine.dispatchAssignment(assignment.id);
@@ -171,6 +173,7 @@ describe('RelayX Engine Application Lifecycle & Supervision', () => {
     // (freeze §4.4, §11.5); neither MockProvider exposes an identity capability, so
     // both sides report `unknown` and the asymmetry is recorded, not hidden.
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine.startPair(pair.id);
 
     const assignment = await engine.createAssignment(pair.id, 'Task', 'Run script');
     await engine.dispatchAssignment(assignment.id);

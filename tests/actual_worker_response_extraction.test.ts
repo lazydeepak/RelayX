@@ -32,6 +32,7 @@ describe('Phase F — Actual Worker Response Extraction', () => {
     const pair = await engine.createPair(project.id, 'Supervision Pair', planner.id, worker.id);
 
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine.startPair(pair.id);
 
     const assignment = await engine.createAssignment(pair.id, 'Supervised Task', 'code');
     await engine.dispatchAssignment(assignment.id);

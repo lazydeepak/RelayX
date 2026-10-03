@@ -254,6 +254,7 @@ describe('Phase 3 & Phase 4 — OpenCode UI Control & Worker Supervision', () =>
     // which requires operational_state = ACTIVE. Load & Activate is the ONLY
     // authorized grantor (freeze §4.4, §11.5).
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine.startPair(pair.id);
 
     const assignment = await engine.createAssignment(pair.id, 'Supervised Task', 'code');
     await engine.dispatchAssignment(assignment.id);

@@ -173,6 +173,7 @@ describe('S1 — rebinding a Pair never cascades away its history (§10.5, I-10,
     // Activate is the only authorized grantor (§4.4, §11.5). The C-1 fence this
     // file guards is untouched by activation.
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine.startPair(pair.id);
 
     const assignment = await engine.createAssignment(pair.id, 'Task', 'Instruction');
     const dispatched = await engine.dispatchAssignment(assignment.id);
@@ -231,6 +232,7 @@ describe('S1 — rebinding a Pair never cascades away its history (§10.5, I-10,
     // Activate is the only authorized grantor (§4.4, §11.5). The C-1 fence this
     // file guards is untouched by activation.
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine.startPair(pair.id);
 
     const assignment = await engine.createAssignment(pair.id, 'Task', 'Instruction');
     const { attempt } = await engine.dispatchAssignment(assignment.id);

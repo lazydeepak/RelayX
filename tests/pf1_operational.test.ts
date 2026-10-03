@@ -133,6 +133,7 @@ async function setupBoundary0(
     'activated',
     `fixture pair must activate, otherwise every boundary below silently contacts nothing: ${activation.reason ?? ''}`,
   );
+  await engine.startPair(pair.id);
 
   const semanticFields = {
     wu1: { objective: 'a.txt', expect: 'A' },

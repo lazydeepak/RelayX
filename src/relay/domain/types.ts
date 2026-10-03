@@ -114,6 +114,15 @@ export const PAIR_OPERATIONAL_STATES = ['IDLE', 'ACTIVE'] as const;
 
 export type PairOperationalState = (typeof PAIR_OPERATIONAL_STATES)[number];
 
+export const PAIR_RELAY_STATES = ['STOPPED', 'RUNNING', 'PAUSED'] as const;
+
+export type PairRelayState = (typeof PAIR_RELAY_STATES)[number];
+
+export const DEFAULT_PAIR_RELAY_STATE: PairRelayState = 'STOPPED';
+
+export const isPairRelayState = (value: unknown): value is PairRelayState =>
+  typeof value === 'string' && (PAIR_RELAY_STATES as readonly string[]).includes(value);
+
 /**
  * §17.3: existing Pairs backfill to IDLE. It is the only safe default, because
  * ACTIVE would grant a provider-contact permission (I-2) that cannot be
@@ -124,6 +133,9 @@ export const DEFAULT_PAIR_OPERATIONAL_STATE: PairOperationalState = 'IDLE';
 /** Runtime guard for the two-valued operational state (I-1). */
 export const isPairOperationalState = (value: unknown): value is PairOperationalState =>
   typeof value === 'string' && (PAIR_OPERATIONAL_STATES as readonly string[]).includes(value);
+
+export const AUTHORITY_CONTEXTS = ['ACTIVATION', 'OPERATOR_EXPLICIT', 'AUTOMATED'] as const;
+export type AuthorityContext = (typeof AUTHORITY_CONTEXTS)[number];
 
 /* --- S5: per-side identity resolution and verification --------------------
  *
@@ -570,6 +582,31 @@ export interface PairContinuityResult {
   readonly computedAt: number;
   readonly planner: SideContinuityEvaluation;
   readonly worker: SideContinuityEvaluation;
+}
+
+export interface CompletedTurnObservation {
+  readonly sessionPairId: PairId;
+  readonly sideRole: PairSideRole;
+  readonly runtimeSessionId: RuntimeSessionId | null;
+  readonly externalSessionId: string | null;
+  readonly externalMessageId: string | null;
+  readonly ordinal: number | null;
+  readonly completedAt: number | null;
+  readonly contentFingerprint: string | null;
+  readonly observedAt: number;
+  readonly isGenerating: boolean;
+  readonly determinacy: 'identified' | 'unverified';
+  readonly sourceProvider: ProviderType;
+  readonly reason: string | null;
+}
+
+export interface CompletedTurnObservationResult {
+  readonly pairId: PairId;
+  readonly sideRole: PairSideRole;
+  readonly outcome: 'observed' | 'refused' | 'stale';
+  readonly providerContacted: boolean;
+  readonly turn: CompletedTurnObservation | null;
+  readonly reason: string | null;
 }
 
 export const CHECKPOINT_BASELINE_ALREADY_EXISTS = 'CHECKPOINT_BASELINE_ALREADY_EXISTS';
