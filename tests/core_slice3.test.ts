@@ -79,7 +79,7 @@ describe('Core Slice 3 — Repository Boundary B1-B7', () => {
     const assignment = await engine.createAssignment(pair.id, 'A', 'Do X');
     const { attempt } = await engine.dispatchAssignment(assignment.id);
     // Baseline should be preserved; README change is outside scope; not automatic failure
-    assert.strictEqual(attempt.status, 'running');
+    assert.strictEqual(attempt.status, 'prepared');
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 

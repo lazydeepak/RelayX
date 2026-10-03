@@ -1,4 +1,4 @@
-import { parseChatGPTConversationUrl } from '../relay/providers/adapters.ts';
+import { parseChatGPTConversationUrl } from '../relay/providers/chatgptConversationUrl.ts';
 import type { ChatGPTConversationChoice, WorkerChoice } from '../types/relayApi.ts';
 
 /**

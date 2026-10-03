@@ -321,11 +321,17 @@ describe('Completed-Turn Observation & Durable Relay Checkpoints', () => {
     assert.strictEqual(result.turn, null);
   });
 
-  it('PAUSED or STOPPED relay state causes zero provider contact during observation', async () => {
+  it('PAUSED or STOPPED relay state causes zero provider contact during automation', async () => {
     const db = new SqliteRelayDatabase(':memory:');
     const engine = new RelayEngine(db);
 
     const provider = new ConfigurableMockProvider('opencode');
+    let contactCount = 0;
+    const originalObserveSide = provider.observeSide.bind(provider);
+    provider.observeSide = async (params) => {
+      contactCount++;
+      return originalObserveSide(params);
+    };
     engine.registerProvider(provider);
 
     const project = Project.create('Proj', '', '/p', '/p');
@@ -347,8 +353,18 @@ describe('Completed-Turn Observation & Durable Relay Checkpoints', () => {
     // relayState is STOPPED by default
     await db.pairs.save(pair);
 
+    // The AUTOMATED supervision path must make zero provider contact for a
+    // STOPPED pair, even though the Pair is operationally ACTIVE.
+    await engine.runSupervisionTick();
+    assert.strictEqual(contactCount, 0, 'automated observation must not contact the provider for a STOPPED pair');
+
+    // The explicit operator observation remains permitted for an ACTIVE
+    // Pair regardless of relay state (execution-authority realignment:
+    // authority is determined by call context; OPERATOR_EXPLICIT requires
+    // ACTIVE, AUTOMATED requires ACTIVE + RUNNING).
     const result = await engine.observeCompletedTurn(pair.id, 'planner');
-    assert.strictEqual(result.providerContacted, false);
-    assert.strictEqual(result.outcome, 'refused');
+    assert.strictEqual(result.providerContacted, true);
+    assert.strictEqual(result.outcome, 'observed');
+    assert.strictEqual(contactCount, 2, 'explicit observation contacts the provider exactly twice (reading + persistence)');
   });
 });

@@ -82,3 +82,13 @@ Before any state-changing transition on an Attempt (complete, fail, verify, appl
 - Must freeze domain concept before DB mapping (this document does that).
 - Must decide dispatch-correlation mechanism before `recordDispatchIntent()` / `confirmDispatch()` can be fully specified (section 10 unfrozen).
 - Must design Session Pair replacement / adoption rule (Part 3) before active Assignment continuation can be defined.
+
+## 9. Create & Dispatch claims the execution slot — FROZEN (cross-reference)
+
+The execution slot (`Pair.activeAssignmentId`) is claimed **atomically with
+Assignment creation** by the Create & Dispatch application command, in a DB-only
+transaction, BEFORE any external delivery is attempted. External delivery is not
+transactionally atomic and never was. See **ATTEMPT_LIFECYCLE.md §7** for the
+frozen boundary, the intentional `pending + owns slot + no Attempt/Delivery`
+crash state, and the pre-claim vs post-claim outcome rules. Do not collapse this
+back into `createAssignment()` → `dispatchAssignment()`.

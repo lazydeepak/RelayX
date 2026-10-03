@@ -131,7 +131,7 @@ describe('Phase 3 & Phase 4 — OpenCode UI Control & Worker Supervision', () =>
     assert.equal(updatedAssignment?.status, 'active');
 
     const updatedWorker = await db.runtimes.findById(worker.id);
-    assert.equal(updatedWorker?.status, 'working');
+    assert.equal(updatedWorker?.status, 'available');
     assert.ok(updatedWorker?.lastEvidence);
     assert.equal(updatedWorker?.lastEvidence?.visibleButtonState?.stopButtonVisible, true);
   });

@@ -14,6 +14,7 @@ import {
 } from '../../providers/interfaces.ts';
 import { ChatGPTProvider } from '../../providers/adapters.ts';
 import { BrowserChatGPTProvider } from '../../providers/browserProviders.ts';
+import { DEFAULT_CHATGPT_PROJECT_DISCOVERY_SCRIPT } from '../../providers/chatgptProjectDiscovery.ts';
 import { RuntimeSessionId, createId } from '../../domain/types.ts';
 
 export class ChatGPTAppHandler implements IAppIntegrationHandler {
@@ -48,6 +49,8 @@ export class ChatGPTAppHandler implements IAppIntegrationHandler {
       scripts: {
         launchScript: customConfig?.scripts?.launchScript || 'open -a "/Applications/ChatGPT.app"',
         createSessionScript: customConfig?.scripts?.createSessionScript || 'Cmd+Shift+O / New Conversation',
+        discoverProjectScript:
+          customConfig?.scripts?.discoverProjectScript || DEFAULT_CHATGPT_PROJECT_DISCOVERY_SCRIPT,
         openSessionScript: customConfig?.scripts?.openSessionScript || 'open "https://chatgpt.com/c/{externalSessionId}"',
         sendMessageScript: customConfig?.scripts?.sendMessageScript || 'keystroke "{instruction}" + Return',
         inspectSessionScript: customConfig?.scripts?.inspectSessionScript || 'AXUIElement composer inspection',
@@ -78,6 +81,33 @@ export class ChatGPTAppHandler implements IAppIntegrationHandler {
       const isDarwin = typeof process !== 'undefined' && (process as any).platform === 'darwin';
       this.provider = isDarwin ? new ChatGPTProvider() : new BrowserChatGPTProvider();
     }
+    this.refreshProviderScripts();
+  }
+
+  /**
+   * Pushes the configured automation scripts onto the live provider.
+   *
+   * This is what makes the ChatGPT Project discovery sequence repairable from the
+   * Integration page: editing `scripts.discoverProjectScript` here changes the
+   * GUI flow the provider runs, with no domain-layer change.
+   */
+  public refreshProviderScripts(): void {
+    const script = this.config.scripts.discoverProjectScript;
+    const apply = (target: unknown): void => {
+      const provider = target as { applyProjectDiscoveryScript?: (s?: string) => void };
+      if (typeof provider?.applyProjectDiscoveryScript === 'function') {
+        provider.applyProjectDiscoveryScript(script);
+      }
+    };
+
+    // Apply to BOTH this handler's own provider and the engine's active
+    // provider. They are only the same instance when the engine had no provider
+    // registered yet; when the caller pre-registered one (test harness, or a
+    // host that owns provider construction) the engine's instance is the one
+    // discovery actually runs on, so it must receive the edit too.
+    apply(this.provider);
+    const active = this.engine ? this.getActiveProvider() : undefined;
+    if (active && active !== this.provider) apply(active);
   }
 
   private getActiveProvider(): any {

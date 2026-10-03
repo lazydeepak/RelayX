@@ -58,6 +58,8 @@ export default function App() {
   });
   const [statusNotification, setStatusNotification] = useState<string | null>(null);
   const [isAddProjectWizardOpen, setIsAddProjectWizardOpen] = useState(false);
+  // Pair id the assignment modal should auto-select once the refreshed list contains it.
+  const [pendingSelectedPairId, setPendingSelectedPairId] = useState<string | null>(null);
 
   useEffect(() => {
     localStorage.setItem('relay_theme', theme);
@@ -128,6 +130,7 @@ export default function App() {
   }>({ isOpen: false, sessionId: null });
 
   const [timelineFilterResourceId, setTimelineFilterResourceId] = useState<string>('');
+  const [assignmentFilterStatuses, setAssignmentFilterStatuses] = useState<string[] | undefined>(undefined);
 
   const notify = (msg: string) => {
     setStatusNotification(msg);
@@ -339,15 +342,49 @@ export default function App() {
     }
   };
 
-  const handleCreateAssignment = async (pairId: string, title: string, instruction: string) => {
+  const handleCreateAssignment = async (
+    pairId: string,
+    title: string,
+    instruction: string,
+  ): Promise<{ created: boolean }> => {
+    let result;
     try {
-      const asgn = await relayBridge.createAssignment(pairId, title, instruction);
-      await relayBridge.dispatchAssignment(asgn.id);
-      notify(`Assignment created & dispatched: "${title}"`);
-      await loadData();
+      result = await relayBridge.createAndDispatchAssignment(pairId, title, instruction);
     } catch (err: any) {
-      notify(`Dispatch error: ${err.message}`);
+      // Unexpected IPC/transport failure before a structured result: creation is
+      // unproven, so report it and keep the modal open (draft preserved).
+      notify(`Dispatch error: ${formatFriendlyError(err)}`);
+      return { created: false };
     }
+
+    // Always refresh: when the claim committed but dispatch failed, the
+    // slot-holder Assignment must become visible immediately (and block a
+    // duplicate Create & Dispatch), not only after the next background poll.
+    try {
+      await loadData();
+    } catch {
+      // Best-effort refresh; the durable outcome below is what the modal acts on.
+    }
+
+    if (!result.created) {
+      // Pre-claim refusal — nothing durable was created.
+      notify(`Dispatch error: ${formatFriendlyError({ message: result.error })}`);
+      return { created: false };
+    }
+    if (result.dispatchError) {
+      // Post-claim failure — the Assignment EXISTS and owns the slot.
+      notify(
+        `Assignment created, but dispatch failed: ${formatFriendlyError({ message: result.dispatchError })} ` +
+          'It is saved and can be retried from the Pair.',
+      );
+      return { created: true };
+    }
+    if (result.deliveryOutcome === 'ambiguous') {
+      notify('Assignment created; delivery is ambiguous — reconcile it in Attention & Recovery.');
+      return { created: true };
+    }
+    notify(`Assignment created & dispatched: "${title}"`);
+    return { created: true };
   };
 
   const handleDispatchPair = async (pairId: string) => {
@@ -366,13 +403,22 @@ export default function App() {
         await relayBridge.dispatchAssignment(pair.activeAssignmentId);
         notify('Existing assignment dispatched/retried');
       } else {
-        const asgn = await relayBridge.createAssignment(
+        // Atomic create+dispatch — no orphan if a concurrent caller takes the slot.
+        const result = await relayBridge.createAndDispatchAssignment(
           pair.id,
           'Next Planner Iteration',
           'Execute planned subtask and verify observable test results',
         );
-        await relayBridge.dispatchAssignment(asgn.id);
-        notify('New assignment dispatched to worker runtime');
+        if (result.created && !result.dispatchError) {
+          notify('New assignment dispatched to worker runtime');
+        } else if (result.created) {
+          notify(
+            `Assignment created, but dispatch failed: ${formatFriendlyError({ message: result.dispatchError })} ` +
+              'It is saved and can be retried from the Pair.',
+          );
+        } else {
+          notify(`Dispatch error: ${formatFriendlyError({ message: result.error })}`);
+        }
       }
       await loadData();
     } catch (err: any) {
@@ -427,7 +473,7 @@ export default function App() {
         await relayBridge.loadAndActivatePair(pairId);
       }
       await relayBridge.startPair(pairId);
-      notify('Pair activated and started successfully');
+      notify('Relay orchestration started');
       await loadData();
     } catch (err: any) {
       notify(`Pair action error: ${formatFriendlyError(err)}`);
@@ -572,6 +618,10 @@ export default function App() {
                 onTriggerSupervision={handleTriggerSupervision}
                 onOpenNewAssignment={() => setIsNewAssignmentOpen(true)}
                 onViewEvidence={(ev) => setSelectedEvidence(ev)}
+                onNavigateAssignments={() => {
+                  setActiveTab('assignments');
+                  setAssignmentFilterStatuses(['pending', 'active', 'waiting_for_handoff']);
+                }}
                 isSupervising={isSupervising}
               />
             )}
@@ -603,6 +653,7 @@ export default function App() {
                 onInspectPair={handleInspect}
                 onStartPair={handleStartPair}
                 onPausePair={handlePausePair}
+                onOpenAttentionRecovery={() => setActiveTab('attention')}
                 onViewEvidence={(ev) => setSelectedEvidence(ev)}
                 onOpenSessionDetail={handleOpenSessionDetail}
                 onActivateRuntime={handleActivateRuntime}
@@ -631,7 +682,7 @@ export default function App() {
               />
             )}
 
-            {activeTab === 'assignments' && <AssignmentsView assignments={assignments} />}
+            {activeTab === 'assignments' && <AssignmentsView assignments={assignments} filterStatuses={assignmentFilterStatuses} />}
 
             {activeTab === 'timeline' && (
               <EventsTimelineView
@@ -723,6 +774,16 @@ export default function App() {
         isOpen={isNewAssignmentOpen}
         onClose={() => setIsNewAssignmentOpen(false)}
         onCreate={handleCreateAssignment}
+        onCreateProject={() => setIsAddProjectWizardOpen(true)}
+        onCreatePair={(projectId) =>
+          setPairModal({ isOpen: true, mode: 'create', pair: null, initialProjectId: projectId })
+        }
+        pendingSelectedPairId={pendingSelectedPairId}
+        onPendingSelectedPairIdConsumed={() => setPendingSelectedPairId(null)}
+        onOpenAttentionRecovery={() => {
+          setIsNewAssignmentOpen(false);
+          setActiveTab('attention');
+        }}
       />
 
       <AddProjectWizard
@@ -753,9 +814,13 @@ export default function App() {
         runtimes={sessions}
         initialProjectId={pairModal.initialProjectId}
         onClose={() => setPairModal((prev) => ({ ...prev, isOpen: false }))}
-        onSuccess={(msg) => {
+        onSuccess={(msg, createdPairId) => {
           notify(msg);
-          loadData();
+          loadData().then(() => {
+            if (createdPairId) {
+              setPendingSelectedPairId(createdPairId);
+            }
+          });
         }}
         onRefresh={loadData}
       />

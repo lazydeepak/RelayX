@@ -16,7 +16,10 @@
  *
  * 2. ChatGPTProvider (Planner):
  *    - Discovers active ChatGPT sessions in Google Chrome via AppleScript tab inspection.
- *    - Navigates ChatGPT UI using native keyboard shortcuts (`Cmd+K`) and DOM search injection.
+ *    - PROJECT discovery via https://chatgpt.com/projects (the obsolete Cmd+K
+ *      project-search path is removed) — see `chatgptProjectDiscovery.ts`.
+ *    - SESSION/conversation discovery and provisioning are unchanged and
+ *      independent of the project flow.
  *    - Parses and normalizes project/conversation URLs (`chatgpt.com/g/<project>/c/<conversation>`).
  *
  * 3. OpenCodeProvider (Worker):
@@ -76,6 +79,26 @@ import {
   type ExactSessionWatermark,
   type ReconciliationMessage,
 } from './exactSessionReconciliation.ts';
+import { execSync } from 'node:child_process';
+import { parseChatGPTConversationUrl } from './chatgptConversationUrl.ts';
+import {
+  canonicalizeChatGPTProjectUrlFromUrl,
+  extractChatGPTProjectIdFromUrl,
+  isChatGPTProjectLessUrl,
+  parseChatGPTProjectUrl,
+} from './chatgptProjectUrl.ts';
+import {
+  DEFAULT_CHATGPT_PROJECT_DISCOVERY_PROFILE,
+  DEFAULT_CHATGPT_PROJECT_DISCOVERY_SCRIPT,
+  buildChatGPTProjectResultNavigationAppleScript,
+  buildChatGPTProjectSearchInputAppleScript,
+  chatgptProjectDiscoveryError,
+  describeChatGPTProjectDiscoveryProfile,
+  parseChatGPTProjectDiscoveryScript,
+  type ChatGPTProjectDiscoveryProfile,
+  type ChatGPTProjectDiscoveryStage,
+} from './chatgptProjectDiscovery.ts';
+export { parseChatGPTConversationUrl } from './chatgptConversationUrl.ts';
 
 /**
  * S2 observation helpers.
@@ -299,7 +322,6 @@ export abstract class BaseMacOSProvider implements IRuntimeProvider {
     // 1. Try pgrep across candidate process names
     for (const name of candidateNames) {
       try {
-        const { execSync } = require('child_process');
         const pidOutput = execSync(`pgrep -i -x "${name}" || true`, {
           encoding: 'utf8',
           timeout: 1000,
@@ -513,12 +535,12 @@ export abstract class BaseMacOSProvider implements IRuntimeProvider {
     };
   }
 
-  async inspectRuntime(sessionId: RuntimeSessionId): Promise<RuntimeInspectionResult> {
+  async inspectRuntime(sessionId: RuntimeSessionId, dispatchBoundary?: { afterCreatedAt?: number; afterMessageId?: string | null; sessionId?: string | null }): Promise<RuntimeInspectionResult> {
     const base = await this.findRuntime({ providerType: this.providerType });
     if (!base.found) return base;
 
     const working = await this.detectWorkingState(sessionId);
-    const completion = await this.detectCompletionState(sessionId);
+    const completion = await this.detectCompletionState(sessionId, dispatchBoundary);
 
     return {
       ...base,
@@ -596,7 +618,7 @@ export abstract class BaseMacOSProvider implements IRuntimeProvider {
     };
   }
 
-  async detectCompletionState(sessionId: RuntimeSessionId): Promise<{ isComplete: boolean; responseSummary?: string; evidence?: ObservableEvidence }> {
+  async detectCompletionState(sessionId: RuntimeSessionId, dispatchBoundary?: { afterCreatedAt?: number; afterMessageId?: string | null; sessionId?: string | null; expectedInstructionSnippet?: string | null }): Promise<{ isComplete: boolean; responseSummary?: string; evidence?: ObservableEvidence }> {
     return {
       isComplete: false,
       evidence: {
@@ -640,50 +662,6 @@ export function escapeAppleScriptStringLiteral(source: string): string {
     .replace(/\r/g, '\\r')
     .replace(/\n/g, '\\n')
     .replace(/\t/g, '\\t');
-}
-
-/**
- * Recognizes ChatGPT PROJECT links (as opposed to chats, custom GPTs, or generic
- * navigation anchors). Used by the injected discovery JavaScript to identify
- * project results only, so unrelated DOM anchors cannot be treated as projects.
- */
-export function isChatGPTProjectHref(href: string): boolean {
-  return (
-    href.includes('/projects/') ||
-    href.startsWith('/p/') ||
-    href.includes('/g/g-p-')
-  );
-}
-
-export interface ProjectCandidate {
-  name: string;
-  href: string;
-}
-
-export interface ProjectMatchClassification {
-  results: ProjectCandidate[];
-  exact: ProjectCandidate[];
-  exactMatchCount: number;
-  status: 'SINGLE' | 'NONE' | 'MULTIPLE';
-}
-
-/**
- * Centralized exact-match rule for ChatGPT project discovery.
- * - exactly one case-insensitive exact name match -> SINGLE
- * - zero exact matches                          -> NONE
- * - more than one exact match                   -> MULTIPLE
- * Similar-but-not-exact names are never treated as matches.
- */
-export function classifyProjectMatches(
-  candidates: ProjectCandidate[],
-  normalizedTarget: string,
-): ProjectMatchClassification {
-  const results = candidates.filter((c) => c.name.trim().length > 0);
-  const exact = results.filter((c) => c.name.trim().toLowerCase() === normalizedTarget);
-  const exactMatchCount = exact.length;
-  const status: ProjectMatchClassification['status'] =
-    exactMatchCount === 1 ? 'SINGLE' : exactMatchCount === 0 ? 'NONE' : 'MULTIPLE';
-  return { results, exact, exactMatchCount, status };
 }
 
 /**
@@ -850,497 +828,8 @@ export function buildChatGPTReadyCheckJavaScript(): string {
 }
 
 /**
- * Builds the JS that opens the ChatGPT project/search navigation UI
- * (the sidebar "Search chats", "Projects" entry, or search modal)
- * in the discovery tab.
- */
-export function buildChatGPTProjectsOpenJavaScript(): string {
-  return `(() => {
-  const STAGE = "__relay_stage_open_projects__";
-
-  // 1. If search input or project index route is already open, succeed immediately
-  const existingSearchInput = document.querySelector(
-    '[role="dialog"] input, [role="dialog"] [role="searchbox"], input[placeholder*="Search" i], input[aria-label*="search" i], input[type="search"], [role="searchbox"], [role="combobox"][placeholder*="Search" i]'
-  );
-  if (existingSearchInput || location.pathname === '/projects' || location.pathname.startsWith('/projects/')) {
-    return JSON.stringify({
-      clicked: true,
-      alreadyOpen: true,
-      clickedInfo: { selector: 'already_visible', text: 'Search UI already open' },
-      url: location.href
-    });
-  }
-
-  // 2. If sidebar is collapsed, expand it first
-  const sidebarToggle = document.querySelector(
-    'button[aria-label*="Open sidebar" i], button[data-testid*="open-sidebar" i]'
-  );
-  if (sidebarToggle && !document.querySelector('nav, [data-testid*="sidebar" i]')) {
-    sidebarToggle.click();
-  }
-
-  let clickedInfo = null;
-
-  // 3. Search / Search chats button in sidebar (opens command palette / search dialog)
-  const searchSels = [
-    'button[data-testid*="search" i]',
-    '[data-testid="search-button"]',
-    'button[aria-label*="Search" i]',
-    '[aria-label*="Search chats" i]',
-    'a[href*="/search"]'
-  ];
-  for (let i = 0; i < searchSels.length; i++) {
-    const el = document.querySelector(searchSels[i]);
-    if (el) {
-      clickedInfo = {
-        selector: searchSels[i],
-        text: (el.innerText || el.textContent || '').trim(),
-        href: null
-      };
-      el.click();
-      break;
-    }
-  }
-
-  // 4. Look for clickable element with "search chats" or "search" text
-  if (!clickedInfo) {
-    const clickables = [...document.querySelectorAll('a, button, [role="button"]')];
-    for (let i = 0; i < clickables.length; i++) {
-      const e = clickables[i];
-      const t = (e.innerText || e.textContent || '').trim().toLowerCase();
-      if (t === 'search chats' || t === 'search') {
-        clickedInfo = {
-          selector: 'text:' + t,
-          text: (e.innerText || e.textContent || '').trim(),
-          href: null
-        };
-        e.click();
-        break;
-      }
-    }
-  }
-
-  // 5. Look for explicit "Projects" section link or button (NOT individual project links)
-  if (!clickedInfo) {
-    const projectSels = [
-      'a[href="/projects"]',
-      'a[href*="/projects"]',
-      '[aria-label="Projects"]',
-      '[aria-label="Projects" i]'
-    ];
-    for (let i = 0; i < projectSels.length; i++) {
-      const el = document.querySelector(projectSels[i]);
-      if (el) {
-        clickedInfo = {
-          selector: projectSels[i],
-          text: (el.innerText || el.textContent || '').trim(),
-          href: (el.getAttribute && el.getAttribute('href')) || null
-        };
-        el.click();
-        break;
-      }
-    }
-  }
-
-  // 6. Exact text match for "Projects" (never substring/regex to avoid clicking individual projects)
-  if (!clickedInfo) {
-    const candidates = [...document.querySelectorAll('a, button, [role="button"], [role="tab"], [role="menuitem"]')];
-    for (let i = 0; i < candidates.length; i++) {
-      const e = candidates[i];
-      const t = (e.innerText || e.textContent || '').trim().toLowerCase();
-      if (t === 'projects') {
-        clickedInfo = {
-          selector: 'text:Projects',
-          text: (e.innerText || e.textContent || '').trim(),
-          href: (e.getAttribute && e.getAttribute('href')) || null
-        };
-        e.click();
-        break;
-      }
-    }
-  }
-
-  return JSON.stringify({ clicked: !!clickedInfo, clickedInfo: clickedInfo, url: location.href });
-})();`;
-}
-
-/**
- * Builds the JS that checks whether the projects search UI is visible
- * (route path and/or search input and/or project list present).
- */
-export function buildChatGPTProjectsVisibleCheckJavaScript(): string {
-  return `(() => {
-  const STAGE = "__relay_stage_projects_visible__";
-  const path = location.pathname;
-  const hasSearchInput = !!document.querySelector(
-    '[role="dialog"] input, [role="dialog"] [role="searchbox"], input[placeholder*="Search" i], input[aria-label*="search" i], input[type="search"], [role="searchbox"], input[data-testid*="search" i], [role="combobox"][placeholder*="Search" i]'
-  );
-  const activeEl = document.activeElement;
-  const isActiveSearch = !!(activeEl && (
-    activeEl.tagName === 'INPUT' ||
-    activeEl.getAttribute('role') === 'searchbox' ||
-    activeEl.getAttribute('role') === 'combobox'
-  ) && !activeEl.closest('form[class*="composer" i]'));
-
-  const hasProjectList = !!document.querySelector(
-    'a[href*="/projects/"], [data-testid*="project-list" i]'
-  );
-  const isProjectsRoute = path === '/projects' || path.startsWith('/projects/');
-
-  // If search modal is open, attempt to select "Projects" tab/pill if available
-  if (hasSearchInput || isActiveSearch) {
-    const pills = [...document.querySelectorAll('[role="dialog"] button, [role="dialog"] [role="tab"], [role="dialog"] [role="radio"], button, [role="tab"]')];
-    for (let i = 0; i < pills.length; i++) {
-      const t = (pills[i].innerText || pills[i].textContent || '').trim().toLowerCase();
-      if (t === 'projects') {
-        const isSelected = pills[i].getAttribute('aria-selected') === 'true' ||
-                           pills[i].getAttribute('data-state') === 'active' ||
-                           pills[i].getAttribute('aria-checked') === 'true';
-        if (!isSelected) {
-          pills[i].click();
-        }
-        break;
-      }
-    }
-  }
-
-  return JSON.stringify({
-    visible: isProjectsRoute || hasSearchInput || isActiveSearch || hasProjectList,
-    path: path,
-    hasSearchInput: hasSearchInput || isActiveSearch,
-    hasProjectList: hasProjectList
-  });
-})();`;
-}
-
-/**
- * Builds the JS that enters the project name into the projects search input.
- * Uses the native value setter plus bubbling input/change events so React-style
- * controlled inputs filter as the value is applied. Project names with spaces,
- * quotes, or backslashes are carried as a JSON.stringified JS literal.
- */
-export function buildChatGPTEnterSearchJavaScript(targetProjectName: string): string {
-  const targetLiteral = JSON.stringify(targetProjectName);
-  return `(() => {
-  const STAGE = "__relay_stage_enter_search__";
-  const target = ${targetLiteral};
-  const sels = [
-    '[role="dialog"] input',
-    '[role="dialog"] [role="searchbox"]',
-    '[role="dialog"] [role="combobox"] input',
-    '[role="dialog"] [role="combobox"]',
-    'input[placeholder*="Search" i]',
-    'input[aria-label*="search" i]',
-    'input[type="search"]',
-    'input[data-testid*="search" i]',
-    '[role="searchbox"]',
-    '[role="combobox"][placeholder*="Search" i]',
-    'input#search',
-    'input[name*="search" i]',
-    '[role="dialog"] [contenteditable="true"]'
-  ];
-
-  let input = null;
-
-  // 1. Check if activeElement is an input/searchbox (e.g. focused by Cmd+K)
-  const active = document.activeElement;
-  if (active && (active.tagName === 'INPUT' || active.getAttribute('role') === 'searchbox' || active.getAttribute('role') === 'combobox')) {
-    if (!active.closest('form[class*="composer" i], [data-testid*="composer" i]')) {
-      input = active;
-    }
-  }
-
-  // 2. Query candidates and pick the first visible element
-  if (!input) {
-    for (let i = 0; i < sels.length; i++) {
-      const els = document.querySelectorAll(sels[i]);
-      for (let j = 0; j < els.length; j++) {
-        const el = els[j];
-        if (el && (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0)) {
-          if (el.tagName === 'TEXTAREA' && !el.closest('[role="dialog"]')) continue;
-          input = el;
-          break;
-        }
-      }
-      if (input) break;
-    }
-  }
-
-  // 3. Fallback: any visible input inside a dialog
-  if (!input) {
-    const dialogInputs = document.querySelectorAll('[role="dialog"] input, div[data-state="open"] input');
-    for (let k = 0; k < dialogInputs.length; k++) {
-      const el = dialogInputs[k];
-      if (el && (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0)) {
-        input = el;
-        break;
-      }
-    }
-  }
-
-  if (!input) {
-    return JSON.stringify({ found: false, value: null, url: location.href });
-  }
-
-  input.focus();
-  const proto = (window.HTMLTextAreaElement && input instanceof window.HTMLTextAreaElement)
-    ? window.HTMLTextAreaElement.prototype
-    : window.HTMLInputElement.prototype;
-  const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-  const setter = desc && desc.set;
-  if (setter) {
-    setter.call(input, target);
-  } else {
-    input.value = target;
-  }
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-  input.dispatchEvent(new Event('change', { bubbles: true }));
-  input.dispatchEvent(new KeyboardEvent('input', { bubbles: true }));
-
-  // Step 3 (DOM equivalent of 7 tabs + Enter): switch to "Projects" section
-  const pills = [...document.querySelectorAll('[role="dialog"] button, [role="dialog"] [role="tab"], [role="dialog"] [role="radio"]')];
-  for (let i = 0; i < pills.length; i++) {
-    const t = (pills[i].innerText || pills[i].textContent || '').trim().toLowerCase();
-    if (t === 'projects') {
-      const isSelected = pills[i].getAttribute('aria-selected') === 'true' ||
-                         pills[i].getAttribute('data-state') === 'active' ||
-                         pills[i].getAttribute('aria-checked') === 'true';
-      if (!isSelected) {
-        pills[i].click();
-      }
-      break;
-    }
-  }
-
-  return JSON.stringify({ found: true, value: input.value || target, url: location.href });
-})();`;
-}
-
-/**
- * Builds the native macOS AppleScript that performs the user's exact keyboard-driven
- * ChatGPT project search flow:
- *   1. command + K for search
- *   2. paste project name copied from folder name
- *   3. 7 tabs then enter to go to project section and enter
- *   4. PAUSE 1.2s to let project filter results load
- *   5. 2 tabs goes to target project then enter - loads the project
- *   6. then copy the url (read tab URL from Chrome)
- */
-export function buildChatGPTKeyboardProjectNavigationAppleScript(projectName: string): string {
-  const escapedName = escapeAppleScriptStringLiteral(projectName);
-  return `
-    tell application "Google Chrome" to activate
-    delay 0.3
-    tell application "System Events"
-      -- 1. Command + K for search
-      keystroke "k" using command down
-      delay 0.5
-
-      -- 2. Paste project name copied from folder name
-      set the clipboard to "${escapedName}"
-      delay 0.1
-      keystroke "v" using command down
-      delay 0.6
-
-      -- 3. 7 tabs then enter to go to project section and enter
-      repeat 7 times
-        key code 48
-        delay 0.08
-      end repeat
-      delay 0.15
-      key code 36
-
-      -- Essential pause: allow ChatGPT to load and render the filtered project results
-      delay 1.2
-
-      -- 4. 2 tabs goes to target project then enter - loads the project
-      repeat 2 times
-        key code 48
-        delay 0.15
-      end repeat
-      delay 0.2
-      key code 36
-      delay 2.0
-    end tell
-  `;
-}
-
-/**
- * Builds the native AppleScript that advances 2 tabs into the filtered project list
- * and hits Enter to load the project when the user is already on the Projects filter tab.
- */
-export function buildChatGPTTwoTabsEnterAppleScript(): string {
-  return `
-    tell application "Google Chrome" to activate
-    delay 0.2
-    tell application "System Events"
-      -- Wait briefly for list to be interactive
-      delay 0.3
-      -- 2 tabs to target project then enter
-      repeat 2 times
-        key code 48
-        delay 0.15
-      end repeat
-      delay 0.2
-      key code 36
-      delay 2.0
-    end tell
-  `;
-}
-
-/**
- * Builds the JS that inspects the filtered results: isolates PROJECT results
- * only (project-type hrefs), computes exact case-insensitive matches against the
- * normalized target (treating spaces, hyphens, and underscores as equivalent),
- * and reports counts/candidates for diagnostics.
- */
-export function buildChatGPTInspectResultsJavaScript(targetProjectName: string): string {
-  const targetLiteral = JSON.stringify(targetProjectName);
-  return `(() => {
-  const STAGE = "__relay_stage_inspect_results__";
-  const target = ${targetLiteral};
-  const normalize = function (str) {
-    return (str || '').toLowerCase().trim().replace(/[-_\\s]+/g, ' ');
-  };
-  const normTarget = normalize(target);
-  const isProjectHref = function (href) {
-    return href.indexOf('/projects/') !== -1 || href.indexOf('/p/') === 0 || href.indexOf('/g/g-p-') !== -1;
-  };
-
-  // Helper to extract clean project title from a card item.
-  // In ChatGPT search results, a card often contains:
-  // "OdareHub\\nProject\\nSep 6"
-  // We extract the primary title line and filter out metadata.
-  const extractTitle = function (el) {
-    // 1. Check for dedicated heading/title elements inside the card
-    const titleEl = el.querySelector('h1, h2, h3, h4, [class*="title"], [class*="name"], div:first-child');
-    let raw = '';
-    if (titleEl && (titleEl.innerText || titleEl.textContent || '').trim()) {
-      raw = (titleEl.innerText || titleEl.textContent || '').trim();
-    } else {
-      raw = (el.innerText || el.textContent || '').trim();
-    }
-    // Take the first non-empty line
-    const lines = raw.split(/\\r?\\n/).map(function (s) { return s.trim(); }).filter(Boolean);
-    if (lines.length > 0) {
-      // If line 1 is literally "Project" (sometimes a badge precedes the title), check next line
-      if (lines[0].toLowerCase() === 'project' && lines.length > 1) {
-        return lines[1];
-      }
-      return lines[0];
-    }
-    return raw;
-  };
-
-  // 1. Find all project links or search result option cards
-  let items = [...document.querySelectorAll('a[href]')].filter(function (a) {
-    const href = a.getAttribute('href') || '';
-    return isProjectHref(href);
-  });
-
-  // If no <a> hrefs found (e.g. ChatGPT modal using div/button items in search palette)
-  if (items.length === 0) {
-    const modalItems = [...document.querySelectorAll('[role="option"], [role="button"], li')].filter(function (el) {
-      const txt = (el.innerText || el.textContent || '').toLowerCase();
-      return txt.includes('project') || txt.includes(normTarget);
-    });
-    if (modalItems.length > 0) {
-      items = modalItems;
-    }
-  }
-
-  const candidates = items.map(function (el) {
-    const title = extractTitle(el);
-    const href = el.getAttribute('href') || el.href || '';
-    return { name: title, href: href };
-  }).filter(function (c) { return c.name.length > 0; });
-
-  const exact = candidates.filter(function (c) {
-    const normCand = normalize(c.name);
-    return normCand === normTarget || c.name.trim().toLowerCase() === target;
-  });
-
-  return JSON.stringify({
-    resultCount: items.length,
-    projectResultCount: candidates.length,
-    exactMatchCount: exact.length,
-    exactMatches: exact.map(function (c) { return c.name; }),
-    candidates: candidates,
-    exact: exact,
-    status: exact.length === 1 ? 'SINGLE' : exact.length === 0 ? 'NONE' : 'MULTIPLE'
-  });
-})();`;
-}
-
-/**
- * Builds the JS that opens the single exact-matching ChatGPT Project.
- * Reapplies the exact-match rule at click time; never clicks a non-exact result.
- */
-export function buildChatGPTClickExactJavaScript(targetProjectName: string): string {
-  const targetLiteral = JSON.stringify(targetProjectName);
-  return `(() => {
-  const STAGE = "__relay_stage_click_exact__";
-  const target = ${targetLiteral};
-  const normalize = function (str) {
-    return (str || '').toLowerCase().trim().replace(/[-_\\s]+/g, ' ');
-  };
-  const normTarget = normalize(target);
-  const isProjectHref = function (href) {
-    return href.indexOf('/projects/') !== -1 || href.indexOf('/p/') === 0 || href.indexOf('/g/g-p-') !== -1;
-  };
-
-  const extractTitle = function (el) {
-    const titleEl = el.querySelector('h1, h2, h3, h4, [class*="title"], [class*="name"], div:first-child');
-    let raw = '';
-    if (titleEl && (titleEl.innerText || titleEl.textContent || '').trim()) {
-      raw = (titleEl.innerText || titleEl.textContent || '').trim();
-    } else {
-      raw = (el.innerText || el.textContent || '').trim();
-    }
-    const lines = raw.split(/\\r?\\n/).map(function (s) { return s.trim(); }).filter(Boolean);
-    if (lines.length > 0) {
-      if (lines[0].toLowerCase() === 'project' && lines.length > 1) {
-        return lines[1];
-      }
-      return lines[0];
-    }
-    return raw;
-  };
-
-  let items = [...document.querySelectorAll('a[href]')].filter(function (a) {
-    const href = a.getAttribute('href') || '';
-    return isProjectHref(href);
-  });
-
-  if (items.length === 0) {
-    const modalItems = [...document.querySelectorAll('[role="option"], [role="button"], li')].filter(function (el) {
-      const txt = (el.innerText || el.textContent || '').toLowerCase();
-      return txt.includes('project') || txt.includes(normTarget);
-    });
-    if (modalItems.length > 0) {
-      items = modalItems;
-    }
-  }
-
-  const exact = items.filter(function (el) {
-    const title = extractTitle(el);
-    return normalize(title) === normTarget || title.toLowerCase() === target;
-  });
-
-  if (exact.length !== 1) {
-    return JSON.stringify({ clicked: false, exactCount: exact.length, url: location.href });
-  }
-
-  const targetEl = exact[0];
-  const clickedHref = targetEl.getAttribute('href') || targetEl.href || '';
-  targetEl.click();
-  return JSON.stringify({ clicked: true, clickedHref: clickedHref, urlBeforeClick: location.href });
-})();`;
-}
-
-/**
- * Builds the JS that reads the current tab location (used to poll for
- * navigation completion and to verify the final URL).
+ * Builds the JS that reads the current tab location. Used by Project discovery
+ * to poll for navigation completion and to verify the final URL.
  */
 export function buildChatGPTLocationJavaScript(): string {
   return `(() => {
@@ -1355,19 +844,145 @@ export function buildChatGPTLocationJavaScript(): string {
 }
 
 /**
- * Builds the JS that dispatches an Enter key on the focused element, used when
- * filtered results have not appeared yet (some UIs only commit on Enter).
+ * Builds the JS that waits for the Projects route to be interactive and focuses
+ * the Projects search field so the RelayX project name can be typed/pasted into
+ * it. This replaces the obsolete Cmd+K project-search dialog path.
+ *
+ * Reports whether a Projects search field was found AND focused, so the caller
+ * can distinguish "field missing" from "field present but unfocusable".
  */
-export function buildChatGPTEnterKeyJavaScript(): string {
+export function buildChatGPTProjectsSearchFocusJavaScript(): string {
   return `(() => {
-  const STAGE = "__relay_stage_enter_key__";
-  const el = document.activeElement;
-  if (!el) return JSON.stringify({ dispatched: false });
-  el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter', code: 'Enter' }));
-  el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Enter', code: 'Enter' }));
-  return JSON.stringify({ dispatched: true });
+  const STAGE = "__relay_stage_projects_search_focus__";
+  const sels = [
+    'main input[placeholder*="Search" i]',
+    'main input[aria-label*="search" i]',
+    'main input[type="search"]',
+    'main [role="searchbox"]',
+    'main [role="combobox"]',
+    'input[placeholder*="Search" i]',
+    'input[aria-label*="search" i]',
+    'input[type="search"]',
+    '[role="searchbox"]',
+    '[role="combobox"]'
+  ];
+
+  // The Projects page search field is not the composer.
+  const isComposer = function (el) {
+    return !!(el && el.closest('form[class*="composer" i], [data-testid*="composer" i], [data-testid="composer-parent"]'));
+  };
+
+  let input = null;
+  for (let i = 0; i < sels.length; i++) {
+    const els = document.querySelectorAll(sels[i]);
+    for (let j = 0; j < els.length; j++) {
+      const el = els[j];
+      if (!el || isComposer(el)) continue;
+      if (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0) {
+        input = el;
+        break;
+      }
+    }
+    if (input) break;
+  }
+
+  if (!input) {
+    return JSON.stringify({
+      found: false,
+      focused: false,
+      path: location.pathname,
+      url: location.href
+    });
+  }
+
+  input.focus();
+  const focused = document.activeElement === input;
+  return JSON.stringify({
+    found: true,
+    focused: focused,
+    path: location.pathname,
+    url: location.href
+  });
 })();`;
 }
+
+/**
+ * Builds the JS that reports a signature of the currently rendered Projects list.
+ *
+ * Used as the evidence for the "wait for results/UI transition" step. Live
+ * observation showed the Projects list re-renders after the search Return, and
+ * tabbing before it settles walks focus through a stale tab order — so the
+ * caller waits for two consecutive identical signatures instead of sleeping an
+ * arbitrary amount.
+ */
+export function buildChatGPTProjectsResultsSignatureJavaScript(): string {
+  return `(() => {
+  const STAGE = "__relay_stage_projects_results_signature__";
+  const rendered = function (e) {
+    return e && e.offsetParent !== null && e.getClientRects().length > 0;
+  };
+
+  // Visible project rows, in DOM order.
+  const actions = [].slice.call(document.querySelectorAll('[aria-label^="Project actions for"]'))
+    .filter(rendered);
+  const names = actions.map(function (e) {
+    return (e.getAttribute('aria-label') || '').replace('Project actions for ', '');
+  });
+
+  // The number of tabbable controls in the page. Live verification showed this
+  // is the signal that actually tracks the filtered state: after the search
+  // Return it grows by the newly-rendered result controls and only then holds
+  // steady. Tabbing before it stabilises walks a stale tab order, so this value
+  // is part of the signature precisely because it is the late-changing signal.
+  const focusables = [].slice.call(
+    document.querySelectorAll('a[href], button, [role="button"], input')
+  ).filter(function (e) {
+    return rendered(e) && e.tabIndex >= 0;
+  }).length;
+
+  return JSON.stringify({
+    count: names.length,
+    names: names.slice(0, 25),
+    focusables: focusables,
+    url: location.href
+  });
+})();`;
+}
+
+/**
+ * Builds the JS that reads the Projects search field's current value. Used after
+ * the project name is pasted and Return is pressed, so the caller can verify the
+ * search was actually accepted instead of blindly continuing.
+ */
+export function buildChatGPTProjectsSearchValueJavaScript(): string {
+  return `(() => {
+  const STAGE = "__relay_stage_projects_search_value__";
+  const sels = [
+    'main input[placeholder*="Search" i]',
+    'main input[aria-label*="search" i]',
+    'main input[type="search"]',
+    'main [role="searchbox"]',
+    'main [role="combobox"]',
+    'input[placeholder*="Search" i]',
+    'input[aria-label*="search" i]',
+    'input[type="search"]',
+    '[role="searchbox"]',
+    '[role="combobox"]'
+  ];
+  for (let i = 0; i < sels.length; i++) {
+    const els = document.querySelectorAll(sels[i]);
+    for (let j = 0; j < els.length; j++) {
+      const el = els[j];
+      if (!el) continue;
+      if (el.closest('form[class*="composer" i], [data-testid*="composer" i], [data-testid="composer-parent"]')) continue;
+      const value = el.value !== undefined ? String(el.value || '') : (el.innerText || el.textContent || '');
+      return JSON.stringify({ found: true, value: value, url: location.href });
+    }
+  }
+  return JSON.stringify({ found: false, value: null, url: location.href });
+})();`;
+}
+
 
 /**
  * Stage A: short-lived ChatGPT discovery tab.
@@ -1385,14 +1000,61 @@ export const DISCOVERY_TAB_ACTIVE_READ_DELAY_MS = 350;
 export const DISCOVERY_TAB_ACTIVE_READ_TIMEOUT_MS = 4000;
 
 /**
+ * AppleScript budget for stages 3-4 (paste the project name + Return). Only
+ * bounded intra-script delays live here; the outer waits are polled by the
+ * stage helpers, so this is never a "sleep long enough and hope" value.
+ */
+export const CHATGPT_PROJECT_SEARCH_INPUT_TIMEOUT_MS = 12000;
+
+/** AppleScript budget for stages 6-7 (Tab x N + Return). */
+export const CHATGPT_PROJECT_RESULT_NAVIGATION_TIMEOUT_MS = 15000;
+
+/**
+ * Minimum observation window for the filtered Projects list before focus is
+ * walked.
+ *
+ * Live measurement against the real ChatGPT Projects UI: the search Return
+ * commits the query immediately, but the filtered rows' tabbable controls only
+ * appear ~2s later. Tabbing during that window walks a stale tab order and
+ * Return lands on nothing, so the walk waits for the list's own signature to
+ * hold steady across at least this window.
+ *
+ * This is a bound derived from observed UI behaviour, not an arbitrary sleep:
+ * the wait still ends early when the signature settles sooner, and it fails
+ * rather than proceeding when the list never settles.
+ */
+export const CHATGPT_PROJECT_RESULTS_MIN_SETTLE_MS = 2500;
+
+/**
+ * Flattens and truncates a host/driver error before it is recorded on
+ * diagnostics. Stage diagnostics must stay readable and must not carry raw
+ * automation script internals.
+ */
+export function sanitizeHostDiagnostic(value: unknown, maxLength = 300): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const flat = String(value)
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  if (!flat) return undefined;
+  return flat.length > maxLength ? `${flat.slice(0, maxLength)}…` : flat;
+}
+
+/**
  * CREATE (single AppleScript execution):
  *   1. activate Chrome; ensure at least one window exists
- *   2. create ONE new tab at https://chatgpt.com in the front window
+ *   2. create ONE new tab at `url` in the front window
  *      (Chrome makes the newly-created tab the active tab)
+ *
+ * Project discovery opens https://chatgpt.com/projects here — the discovery tab
+ * IS the Projects page, so no in-page navigation (and no Cmd+K) is needed.
  *
  * Returns "CREATE_OK" or "TAB_CREATE_FAIL|||<error message>".
  */
-export function buildCreateDiscoveryTabAppleScript(): string {
+export function buildCreateDiscoveryTabAppleScript(
+  url: string = 'https://chatgpt.com',
+): string {
+  const escapedUrl = escapeAppleScriptStringLiteral(url);
   return `
     tell application "Google Chrome"
       activate
@@ -1400,7 +1062,7 @@ export function buildCreateDiscoveryTabAppleScript(): string {
         make new window
       end if
       try
-        make new tab at end of tabs of front window with properties {URL:"https://chatgpt.com"}
+        make new tab at end of tabs of front window with properties {URL:"${escapedUrl}"}
       on error errMsg
         return "TAB_CREATE_FAIL|||" & errMsg
       end try
@@ -1673,6 +1335,7 @@ export class ChatGPTProvider extends BaseMacOSProvider {
 
   override async detectCompletionState(
     sessionId: RuntimeSessionId,
+    dispatchBoundary?: { afterCreatedAt?: number; afterMessageId?: string | null; sessionId?: string | null; expectedInstructionSnippet?: string | null },
   ): Promise<{ isComplete: boolean; responseSummary?: string; evidence?: ObservableEvidence }> {
     const workingState = await this.detectWorkingState(sessionId);
     if (workingState.isWorking) {
@@ -1684,37 +1347,37 @@ export class ChatGPTProvider extends BaseMacOSProvider {
       return { isComplete: false };
     }
 
+    // Observation metadata (window state, UI activity) is evidence only,
+    // never semantic planner output. Without verified assistant message
+    // content from a ChatGPT session transcript, do not fabricate a
+    // response summary that could become a worker Assignment instruction.
     return {
-      isComplete: true,
-      responseSummary: `ChatGPT planner generated plan in window "${probe.windowTitle || 'ChatGPT'}"`,
+      isComplete: false,
+      responseSummary: undefined,
       evidence: {
         id: `ev_chatgpt_comp_${Date.now()}`,
         timestamp: Date.now(),
         source: 'macos_system_events',
         runtimeSessionId: sessionId,
         responseActivityObserved: true,
+        details: {
+          executionState: 'observed',
+          targetSideRole: 'planner',
+          note: 'Planner observation exists (window active) but no verifiable assistant message content retrieved from ChatGPT session; automatic semantic continuation prevented.',
+          windowTitle: probe.windowTitle || 'ChatGPT',
+        },
       },
     };
   }
 
   /**
    * Helper to extract stable ChatGPT project ID (g-p-...) from URL.
-   * Centralized parsing rules:
-   * - Supports project root: https://chatgpt.com/g/g-p-xxxxx-slug/project or https://chatgpt.com/g/g-p-xxxxx-slug
-   * - Supports conversation inside project: https://chatgpt.com/g/g-p-xxxxx-slug/c/conv-id
-   * - Rejects unrelated /g/ URLs (e.g. custom GPTs or standard chat) and malformed URLs.
+   * Delegates to the single shared ChatGPT Project URL parser
+   * (`chatgptProjectUrl.ts`) so this method, the provider's project discovery
+   * flow, and the manual pasted-URL path can never disagree.
    */
   public extractChatGPTProjectId(url: string): string | null {
-    if (!url || typeof url !== 'string') return null;
-    try {
-      const parsed = new URL(url);
-      if (!parsed.hostname.endsWith('chatgpt.com')) return null;
-      const match = parsed.pathname.match(/\/g\/(g-p-[^/]+)(?:\/|$)/);
-      return match?.[1] ?? null;
-    } catch {
-      const match = url.match(/\/g\/(g-p-[^/]+)(?:\/|$)/);
-      return match?.[1] ?? null;
-    }
+    return extractChatGPTProjectIdFromUrl(url);
   }
 
   /**
@@ -1731,29 +1394,11 @@ export class ChatGPTProvider extends BaseMacOSProvider {
   /**
    * Canonicalizes a ChatGPT project URL to its standard project root form.
    * e.g. https://chatgpt.com/g/g-p-123-abc/c/999 -> https://chatgpt.com/g/g-p-123-abc/project
+   *
+   * Delegates to the single shared ChatGPT Project URL parser.
    */
   public canonicalizeChatGPTProjectUrl(url: string): string | null {
-    const projectId = this.extractChatGPTProjectId(url);
-    if (!projectId) return null;
-    try {
-      const parsed = new URL(url);
-      const parts = parsed.pathname.split('/');
-      const gIndex = parts.indexOf('g');
-      if (gIndex !== -1 && parts[gIndex + 1]) {
-        const segment = parts[gIndex + 1];
-        if (segment.startsWith('g-p-')) {
-          return `${parsed.protocol}//${parsed.host}/g/${segment}/project`;
-        }
-      }
-    } catch {
-      // ignore
-    }
-    const match = url.match(/\/g\/(g-p-[^/]+)/);
-    if (match) {
-      const segment = match[1];
-      return `https://chatgpt.com/g/${segment}/project`;
-    }
-    return null;
+    return canonicalizeChatGPTProjectUrlFromUrl(url);
   }
 
   /**
@@ -2450,23 +2095,69 @@ export class ChatGPTProvider extends BaseMacOSProvider {
     };
   }
 
+/**
+   * The editable ChatGPT PROJECT discovery script.
+   *
+   * Seeded from the ChatGPT integration configuration
+   * (`scripts.discoverProjectScript`) and repairable from the Integration page.
+   * The UI-specific `Tab x N` count lives here — never in domain logic — because
+   * ChatGPT changes its Projects UI without notice.
+   */
+  private projectDiscoveryScript: string = DEFAULT_CHATGPT_PROJECT_DISCOVERY_SCRIPT;
+
+  /** Visible Projects rows observed by the most recent results-signature read. */
+  private lastProjectsResultsCount = 0;
+
   /**
-   * macOS Automation: Deterministic ChatGPT project discovery via the Chrome UI.
+   * Applies an edited discovery script. An unusable script is retained (so the
+   * operator can see what they typed) but rejected on the next discovery run
+   * with a precise stage error instead of silently running a wrong sequence.
+   */
+  public applyProjectDiscoveryScript(script?: string | null): void {
+    this.projectDiscoveryScript =
+      script && String(script).trim()
+        ? String(script)
+        : DEFAULT_CHATGPT_PROJECT_DISCOVERY_SCRIPT;
+  }
+
+  /** The discovery script currently in effect (as stored on the integration). */
+  public getProjectDiscoveryScript(): string {
+    return this.projectDiscoveryScript;
+  }
+
+  /** Normalizes the configured script into a usable profile, or explains why not. */
+  private resolveProjectDiscoveryProfile():
+    | { ok: true; profile: ChatGPTProjectDiscoveryProfile }
+    | { ok: false; error: string } {
+    const parsed = parseChatGPTProjectDiscoveryScript(this.projectDiscoveryScript);
+    return parsed.ok ? { ok: true, profile: parsed.profile } : { ok: false, error: parsed.error };
+  }
+
+  /**
+   * macOS Automation: deterministic ChatGPT PROJECT discovery via the Chrome UI.
    *
    * This runner is ONLY responsible for navigating Chrome into the correct
-   * ChatGPT Project and returning the resulting browser URL. It performs no
-   * project-ID parsing and no URL canonicalization — the final URL is returned
-   * exactly as reported by Chrome so that URL parsing can be handled separately.
+   * ChatGPT Project and returning the resulting browser URL. It returns the URL
+   * exactly as reported by Chrome; canonicalization is applied by the shared
+   * parser (`chatgptProjectUrl.ts`) at binding time, so both the automatic and
+   * manual paths agree.
    *
-   * Staged flow (each stage reports distinct diagnostics):
-   *   A. open a dedicated discovery tab       -> https://chatgpt.com
-   *   B. wait for the ChatGPT page readiness  (polling, not fixed sleeps)
-   *   C. open the projects/search navigation UI
-   *   D. enter the project name into search
-   *   E. inspect filtered results (PROJECT results only) and classify exact matches
-   *   F. open the single exact match
-   *   G. wait for browser navigation to leave the search/root state (polling)
-   *   H. read the ACTUAL final URL from the Chrome tab (returned unchanged)
+   * The obsolete flow — `chatgpt.com -> Cmd+K -> search -> navigate result` —
+   * has been REMOVED. The verified current GUI flow is:
+   *
+   *   1. open/focus  https://chatgpt.com/projects
+   *   2. wait for the Projects page to be ready        (polled, not a big sleep)
+   *   3. type/paste the RelayX project name
+   *   4. press Return
+   *   5. wait for the UI to accept the search
+   *   6. press Tab exactly 7 times, then Return         (Tab count from the profile)
+   *   7. wait for the Project page to open              (polled)
+   *   8. copy/read the current browser URL             (existing URL-read mechanism)
+   *   9. parse the Project identity; fail closed if absent
+   *
+   * Every failure reports a distinct stage so the operator knows where the
+   * sequence broke. Diagnostics carry the stage and safe summaries only — never
+   * raw automation script text.
    */
   public async resolveChatGPTProject(name: string): Promise<{
     success: boolean;
@@ -2477,281 +2168,376 @@ export class ChatGPTProvider extends BaseMacOSProvider {
     foundMultiple?: Array<{ name: string; url: string }>;
     diagnostics?: any;
   }> {
-    const normalizedTarget = name.toLowerCase().trim();
+    const targetName = (name || '').trim();
     const diag: any = {
       targetName: name,
+      discoveryStage: undefined,
       chromeActivated: false,
       tabOpened: false,
       chatgptLoaded: false,
-      searchOpened: false,
+      projectsPageReady: false,
+      searchFieldFocused: false,
       searchValue: undefined,
-      projectsFilterSelected: false,
-      projectResultCount: 0,
-      exactMatchCount: 0,
-      selectedProject: undefined,
+      searchSubmitted: false,
+      resultTabCount: undefined,
+      resultNavigationDispatched: false,
+      projectOpened: false,
       finalUrl: undefined,
+      parsedProjectId: undefined,
       discoveryError: undefined,
       chromeJavaScriptFromAppleEvents: undefined,
       chromeJavascriptToggleAttempted: false,
       chromeJavascriptToggleError: undefined,
+      projectDiscoveryScriptError: undefined,
+    };
+
+    const fail = (stage: ChatGPTProjectDiscoveryStage, detail?: string) => {
+      const error = chatgptProjectDiscoveryError(stage, detail);
+      diag.discoveryStage = stage;
+      diag.discoveryError = error;
+      return { success: false as const, error, diagnostics: diag };
     };
 
     if (typeof process === 'undefined' || process.platform !== 'darwin') {
-      diag.discoveryError = 'macOS automation required';
-      return { success: false, error: 'macOS automation required', diagnostics: diag };
+      return fail('OPEN_PROJECTS_PAGE_FAILED', 'macOS automation required');
     }
 
-    // Activate Chrome before opening the tab (best-effort; the tab-open step
-    // itself also activates Chrome, so a failed activate here is not fatal).
-    const activateResult = this.runAppleScript('tell application "Google Chrome" to activate', 1500);
-    diag.chromeActivated = activateResult.success;
+    const resolved = this.resolveProjectDiscoveryProfile();
+    if (!resolved.ok) {
+      diag.projectDiscoveryScriptError = resolved.error;
+      return fail('OPEN_PROJECTS_PAGE_FAILED', resolved.error);
+    }
+    const profile = resolved.profile;
+    // Safe, script-free summary only.
+    diag.discoveryProfile = describeChatGPTProjectDiscoveryProfile(profile);
+    diag.resultTabCount = profile.resultTabCount;
 
-    // A. Open one discovery tab in the front Chrome window.
-    const opened = await this.openDiscoveryTab();
+    // Activate Chrome before opening the tab (best-effort; the tab-open step also
+    // activates Chrome, so a failed activate here is not fatal).
+    diag.chromeActivated = this.runAppleScript(
+      'tell application "Google Chrome" to activate',
+      1500,
+    ).success;
+
+    // ---- Stage 1: open/focus https://chatgpt.com/projects --------------------
+    const opened = await this.openDiscoveryTab(profile.projectsUrl);
     diag.tabOpened = opened.tabOpened;
     if (!opened.ok) {
-      diag.discoveryError = opened.error || 'Failed to open ChatGPT discovery tab';
-      return { success: false, error: diag.discoveryError, diagnostics: diag };
+      return fail('OPEN_PROJECTS_PAGE_FAILED', sanitizeHostDiagnostic(opened.error));
     }
 
-    // Wait approx 2 seconds for ChatGPT to load.
-    await this.sleep(2000);
-
-    // B. Wait for the ChatGPT page readiness (poll briefly).
     const ready = await this.waitForChatGPTReady(diag);
     diag.chatgptLoaded = ready;
     if (!ready) {
-      diag.discoveryError = buildChatGPTReadyFailureMessage(diag);
-      return { success: false, error: diag.discoveryError, diagnostics: diag };
+      return fail('OPEN_PROJECTS_PAGE_FAILED', buildChatGPTReadyFailureMessage(diag));
     }
 
-    // C. Open the ChatGPT projects/search navigation UI.
-    const searchUiFound = await this.openProjectsNav(diag);
-    diag.searchOpened = searchUiFound;
-    diag.projectsFilterSelected = searchUiFound; // filtering to projects
-    if (!searchUiFound) {
-      diag.discoveryError = 'Could not open ChatGPT projects search UI';
-      return { success: false, error: diag.discoveryError, diagnostics: diag };
+    // Confirm we are actually on the Projects route before typing anything.
+    const onProjectsRoute = await this.waitForProjectsPage(diag);
+    diag.projectsPageReady = onProjectsRoute;
+    if (!onProjectsRoute) {
+      const detail =
+        diag.chromeJavaScriptFromAppleEvents && diag.chromeJavaScriptFromAppleEvents !== 'auto-enabled'
+          ? buildChatGPTReadyFailureMessage(diag)
+          : 'the Projects route did not load';
+      return fail('OPEN_PROJECTS_PAGE_FAILED', detail);
     }
 
-    // D. Enter the project name into the search input.
-    const searchValue = await this.enterProjectSearch(normalizedTarget, diag);
-    if (searchValue === null) {
-      // Fallback: execute user's exact keyboard workflow (Cmd+K -> Paste -> 7 tabs + Enter -> 2 tabs + Enter)
-      const kbNav = await this.executeKeyboardProjectNavigation(name, diag);
-      if (kbNav.success && kbNav.url) {
-        diag.selectedProject = name.trim();
-        diag.finalUrl = kbNav.url;
-        diag.searchValue = name.trim();
-        return {
-          success: true,
-          projectName: name.trim(),
-          finalUrl: kbNav.url,
-          projectUrl: kbNav.url,
-          diagnostics: diag,
-        };
-      }
-      diag.discoveryError = 'ChatGPT projects search input not found';
-      return { success: false, error: diag.discoveryError, diagnostics: diag };
-    }
-    diag.searchValue = searchValue;
-
-    // Essential 1.2s pause: allow ChatGPT to filter and render project results after switching tab
-    await this.sleep(1200);
-
-    // E. Inspect the filtered results and classify exact matches.
-    const inspected = await this.inspectProjectResults(normalizedTarget, diag);
-    if (!inspected) {
-      diag.discoveryError = 'Failed to inspect ChatGPT project results';
-      return { success: false, error: diag.discoveryError, diagnostics: diag };
-    }
-    diag.projectResultCount = inspected.projectResultCount ?? 0;
-    diag.exactMatchCount = inspected.exactMatchCount ?? 0;
-
-    if (inspected.status === 'NONE') {
-      // If candidates were found in the UI but none was an exact match,
-      // do not blindly select an unrelated project.
-      if (
-        (inspected.projectResultCount && inspected.projectResultCount > 0) ||
-        (inspected.candidates && inspected.candidates.length > 0)
-      ) {
-        diag.selectedProject = undefined;
-        diag.discoveryError = 'Project not found';
-        return { success: false, error: 'Project not found', diagnostics: diag };
-      }
-
-      // If 0 results were found in DOM (e.g. DOM selector mismatch or rendering delay),
-      // try 2 tabs + Enter directly since the 7 tabs + Enter already switched to Projects tab
-      const twoTabNav = await this.executeTwoTabsEnterNavigation(diag);
-      if (twoTabNav.success && twoTabNav.url) {
-        diag.selectedProject = name.trim();
-        diag.finalUrl = twoTabNav.url;
-        diag.searchValue = name.trim();
-        return {
-          success: true,
-          projectName: name.trim(),
-          finalUrl: twoTabNav.url,
-          projectUrl: twoTabNav.url,
-          diagnostics: diag,
-        };
-      }
-
-      // 2. Try the full keyboard workflow (Cmd+K -> paste -> 7 tabs -> 1.2s pause -> 2 tabs -> Enter)
-      const kbNav = await this.executeKeyboardProjectNavigation(name, diag);
-      if (kbNav.success && kbNav.url) {
-        diag.selectedProject = name.trim();
-        diag.finalUrl = kbNav.url;
-        diag.searchValue = name.trim();
-        return {
-          success: true,
-          projectName: name.trim(),
-          finalUrl: kbNav.url,
-          projectUrl: kbNav.url,
-          diagnostics: diag,
-        };
-      }
-
-      diag.selectedProject = undefined;
-      diag.discoveryError = 'Project not found';
-      return { success: false, error: 'Project not found', diagnostics: diag };
-    }
-    if (inspected.status === 'MULTIPLE') {
-      diag.selectedProject = undefined;
-      diag.discoveryError = 'Multiple projects found';
-      return {
-        success: false,
-        error: 'Multiple projects found',
-        foundMultiple: inspected.exact.map((c: ProjectCandidate) => ({ name: c.name, url: c.href })),
-        diagnostics: diag,
-      };
+    // ---- Stage 2: focus the Projects search field ---------------------------
+    const focused = await this.focusProjectsSearchField(diag);
+    diag.searchFieldFocused = focused;
+    if (!focused) {
+      return fail('PROJECT_SEARCH_INPUT_FAILED');
     }
 
-    // Exactly one exact case-insensitive match.
-    diag.selectedProject = inspected.exact[0].name;
+    // ---- Stages 3-4: input the RelayX project name, then press Return -------
+    const input = this.runAppleScript(
+      buildChatGPTProjectSearchInputAppleScript(profile, targetName),
+      CHATGPT_PROJECT_SEARCH_INPUT_TIMEOUT_MS,
+    );
+    if (!input.success) {
+      return fail('PROJECT_SEARCH_SUBMIT_FAILED', sanitizeHostDiagnostic(input.error));
+    }
+    diag.searchSubmitted = true;
 
-    // F. Open the single exact match.
-    const clicked = await this.clickProjectExact(normalizedTarget, diag);
-    if (!clicked.clicked) {
-      // Fallback: execute keyboard selection
-      const kbNav = await this.executeKeyboardProjectNavigation(name, diag);
-      if (kbNav.success && kbNav.url) {
-        diag.selectedProject = name.trim();
-        diag.finalUrl = kbNav.url;
-        return {
-          success: true,
-          projectName: name.trim(),
-          finalUrl: kbNav.url,
-          projectUrl: kbNav.url,
-          diagnostics: diag,
-        };
-      }
-      diag.discoveryError = `Exact match click failed (count=${clicked.exactCount})`;
-      return { success: false, error: diag.discoveryError, diagnostics: diag };
+    // ---- Stage 5: wait for the UI to accept the search ----------------------
+    const acceptedValue = await this.waitForProjectsSearchAccepted(targetName, diag);
+    if (acceptedValue === null) {
+      return fail('PROJECT_SEARCH_SUBMIT_FAILED');
+    }
+    diag.searchValue = acceptedValue;
+
+    // ---- Stage 5b: wait for the results list to finish re-rendering ----------
+    // Live verification showed the Projects list re-renders asynchronously after
+    // the search Return. Tabbing into a stale list walks focus through the wrong
+    // order and Enter lands on nothing, so this waits on the list's own signature
+    // settling instead of sleeping an arbitrary amount.
+    const resultsSettled = await this.waitForProjectsResultsSettled(diag);
+    if (!resultsSettled) {
+      return fail('PROJECT_SEARCH_SUBMIT_FAILED', 'the filtered Projects list did not settle');
     }
 
-    // G. Wait briefly for navigation.
-    const nav = await this.waitForNavigation(clicked.urlBeforeClick, diag);
-    if (!nav.changed) {
-      diag.discoveryError = 'ChatGPT project navigation did not complete';
-      return { success: false, error: diag.discoveryError, diagnostics: diag };
+    // ---- Stages 6-7: Tab x N, then Return -----------------------------------
+    // The Tab count comes from the configurable discovery profile.
+    const navigation = this.runAppleScript(
+      buildChatGPTProjectResultNavigationAppleScript(profile),
+      CHATGPT_PROJECT_RESULT_NAVIGATION_TIMEOUT_MS,
+    );
+    diag.resultNavigationDispatched = navigation.success;
+    if (!navigation.success) {
+      return fail('PROJECT_RESULT_NAVIGATION_FAILED', sanitizeHostDiagnostic(navigation.error));
     }
 
-    // H. Read the ACTUAL final URL from the active tab of the front window; return unchanged.
-    const finalUrl = await this.readTabUrl();
-    if (finalUrl === null) {
-      diag.discoveryError = 'Could not read final Chrome tab URL';
-      return { success: false, error: diag.discoveryError, diagnostics: diag };
+    // ---- Stage 8: wait for the Project page to open (polled) ---------------
+    const settled = await this.waitForProjectPageSettled(diag);
+    diag.projectOpened = settled.changed;
+    if (!settled.changed) {
+      return fail(
+        'PROJECT_OPEN_FAILED',
+        `Tab x ${profile.resultTabCount} + Return left the browser on a non-Project page`,
+      );
+    }
+
+    // ---- Stage 9: copy/read the current URL via the existing mechanism ------
+    const finalUrl = settled.url ?? (await this.readTabUrl());
+    if (!finalUrl) {
+      return fail('PROJECT_URL_READ_FAILED');
     }
     diag.finalUrl = finalUrl;
 
-    // Optional: close temporary discovery tab after capturing URL.
-    try {
-      this.runAppleScript('tell application "Google Chrome" to close active tab of front window', 3000);
-    } catch {
-      // best-effort close; not required for success
+    // ---- Fail closed unless the URL carries a real Project identity ---------
+    // A URL with no `/g/<g-p-…>` identity — including a standalone
+    // `/c/<conversationId>` conversation URL — must NEVER be bound as a Project.
+    const identity = parseChatGPTProjectUrl(finalUrl);
+    if (!identity) {
+      diag.parsedProjectId = null;
+      return fail(
+        isChatGPTProjectLessUrl(finalUrl) ? 'PROJECT_ID_PARSE_FAILED' : 'INVALID_PROJECT_URL',
+        finalUrl,
+      );
     }
+    diag.parsedProjectId = identity.projectId;
 
     return {
       success: true,
-      projectName: name.trim(),
+      projectName: targetName,
       finalUrl,
       projectUrl: finalUrl,
       diagnostics: diag,
     };
   }
 
-  /**
-   * Executes 2 tabs then Enter to select the project item in the filtered list,
-   * then waits and captures the URL from Chrome.
-   */
-  public async executeTwoTabsEnterNavigation(
-    diag?: any,
-  ): Promise<{ success: boolean; url?: string; error?: string }> {
-    if (typeof process === 'undefined' || process.platform !== 'darwin') {
-      return { success: false, error: 'macOS automation required' };
-    }
-
-    const script = buildChatGPTTwoTabsEnterAppleScript();
-    const res = this.runAppleScript(script, 8000);
-    if (!res.success) {
-      if (diag) diag.twoTabsError = res.error;
-      return { success: false, error: res.error };
-    }
-
-    // Poll for the URL to change to the project URL (up to 5 seconds)
-    for (let poll = 0; poll < 10; poll++) {
-      await this.sleep(500);
-      const url = await this.readTabUrl();
-      if (url && (url.includes('/g/g-p-') || url.includes('/projects') || url.includes('/p/'))) {
-        if (diag) {
-          diag.finalUrl = url;
-          diag.twoTabsSuccess = true;
+  /** Stage 1b: poll until the discovery tab is actually on the Projects route. */
+  private async waitForProjectsPage(diag: any): Promise<boolean> {
+    const maxAttempts = 10;
+    let gatePersistChecks = 0;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const res = this.executeTabJavaScript(buildChatGPTLocationJavaScript(), 2500);
+      if (isChromeJavaScriptFromAppleEventsBlocked(res)) {
+        diag.chromeJavaScriptFromAppleEvents = diag.chromeJavaScriptFromAppleEvents || 'blocked';
+        const hadToggle = diag.chromeJavascriptToggleAttempted;
+        await this.ensureChromeJavaScriptFromAppleEvents(diag);
+        const enableInFlight =
+          diag.chromeJavaScriptFromAppleEvents === 'auto-enabled' ||
+          diag.chromeJavaScriptFromAppleEvents === 'already-enabled';
+        if (hadToggle && !enableInFlight) {
+          gatePersistChecks++;
+          if (gatePersistChecks >= 3) return false;
         }
-        return { success: true, url };
+        await this.sleep(700);
+        continue;
       }
+
+      const url = this.parseLocationUrl(res);
+      if (url) {
+        diag.projectsPageUrl = url;
+        if (this.isProjectsRouteUrl(url)) return true;
+      } else if (!res.success) {
+        diag.appleScriptError = sanitizeHostDiagnostic(res.error);
+      }
+      await this.sleep(600);
     }
-    return { success: false, error: 'URL did not navigate to a project after 2 tabs + enter' };
+    return false;
+  }
+
+  /** Stage 2: poll until the Projects search field is present AND focused. */
+  private async focusProjectsSearchField(diag: any): Promise<boolean> {
+    const maxAttempts = 8;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const res = this.executeTabJavaScript(buildChatGPTProjectsSearchFocusJavaScript(), 3000);
+      if (res.success && res.output && !res.output.startsWith('ERR::')) {
+        try {
+          const parsed = JSON.parse(res.output);
+          if (parsed.found && parsed.focused) return true;
+          if (parsed.found && !parsed.focused) diag.searchFieldFocusRejected = true;
+        } catch {
+          diag.jsError = 'Projects search focus parse error';
+        }
+      } else if (!res.success) {
+        diag.appleScriptError = sanitizeHostDiagnostic(res.error);
+      }
+      await this.sleep(600);
+    }
+    return false;
   }
 
   /**
-   * Executes the exact keyboard-driven ChatGPT project search sequence:
-   * 1. command + K for search
-   * 2. paste project name copied from folder name
-   * 3. 7 tabs then enter to go to project section and enter
-   * 4. pause 1.2s to let project filter results load
-   * 5. 2 tabs goes to target project then enter - loads the project
-   * 6. then copy / read the URL from the active Chrome tab
+   * Stage 5: wait until the Projects search field actually carries the RelayX
+   * project name. This proves the paste landed before focus is walked onto the
+   * results, rather than tabbing blindly.
    */
-  public async executeKeyboardProjectNavigation(
-    projectName: string,
-    diag?: any,
-  ): Promise<{ success: boolean; url?: string; error?: string }> {
-    if (typeof process === 'undefined' || process.platform !== 'darwin') {
-      return { success: false, error: 'macOS automation required' };
-    }
-
-    const script = buildChatGPTKeyboardProjectNavigationAppleScript(projectName);
-    const res = this.runAppleScript(script, 12000);
-    if (!res.success) {
-      if (diag) diag.keyboardNavError = res.error;
-      return { success: false, error: res.error };
-    }
-
-    // Poll for the URL to change to the project URL (up to 6 seconds)
-    for (let poll = 0; poll < 12; poll++) {
-      await this.sleep(500);
-      const url = await this.readTabUrl();
-      if (url && (url.includes('/g/g-p-') || url.includes('/projects') || url.includes('/p/'))) {
-        if (diag) {
-          diag.finalUrl = url;
-          diag.keyboardNavSuccess = true;
+  private async waitForProjectsSearchAccepted(
+    targetName: string,
+    diag: any,
+  ): Promise<string | null> {
+    const expected = targetName.trim().toLowerCase();
+    if (!expected) return null;
+    const maxAttempts = 8;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const res = this.executeTabJavaScript(buildChatGPTProjectsSearchValueJavaScript(), 3000);
+      if (res.success && res.output && !res.output.startsWith('ERR::')) {
+        try {
+          const parsed = JSON.parse(res.output);
+          const value = typeof parsed.value === 'string' ? parsed.value.trim() : '';
+          if (value && value.toLowerCase() === expected) return value;
+        } catch {
+          diag.jsError = 'Projects search value parse error';
         }
-        return { success: true, url };
+      } else if (!res.success) {
+        diag.appleScriptError = sanitizeHostDiagnostic(res.error);
       }
+      await this.sleep(600);
     }
-    return { success: false, error: 'URL did not navigate to a project after keyboard navigation' };
+    return null;
   }
 
+  /**
+   * Stage 5b: wait for the filtered Projects list to settle.
+   *
+   * Two consecutive identical render signatures mean the list has finished
+   * re-rendering and focus order is stable, so the Tab walk is meaningful. A
+   * timeout here is not fatal on its own — the list may legitimately be
+   * unchanged — so this reports whether it settled and lets the caller decide.
+   */
+  private async waitForProjectsResultsSettled(diag: any): Promise<boolean> {
+    const maxAttempts = 12;
+    // Live measurement: the filtered tab order only becomes walkable ~2s after
+    // the search Return, and the tabbable-control count is the signal that
+    // reflects it. So the signature is required to be stable across
+    // `minStableReads` reads AND across a minimum observation window, rather
+    // than accepting the first coincidental match.
+    const minStableReads = 3;
+    const minObserveMs = CHATGPT_PROJECT_RESULTS_MIN_SETTLE_MS;
+    const startedAt = Date.now();
+    let previous: string | null = null;
+    let stableSeen = 0;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const res = this.executeTabJavaScript(buildChatGPTProjectsResultsSignatureJavaScript(), 3000);
+      const signature = this.parseResultsSignature(res);
+      if (signature) {
+        diag.projectsResultsCount = this.lastProjectsResultsCount;
+        if (signature === previous) {
+          stableSeen += 1;
+        } else {
+          previous = signature;
+          stableSeen = 1;
+        }
+        const observedLongEnough = Date.now() - startedAt >= minObserveMs;
+        if (stableSeen >= minStableReads && observedLongEnough) {
+          diag.projectsResultsSettledAttempts = attempt;
+          diag.projectsResultsSettleMs = Date.now() - startedAt;
+          return true;
+        }
+      } else if (!res.success) {
+        diag.appleScriptError = sanitizeHostDiagnostic(res.error);
+      }
+      await this.sleep(500);
+    }
+    diag.projectsResultsSettledAttempts = maxAttempts;
+    // A list that never held still is treated as unsettled.
+    return false;
+  }
+
+  /**
+   * Reduces the injected results-signature payload to a comparable string, and
+   * reports the visible row count for diagnostics.
+   */
+  private parseResultsSignature(res: { success: boolean; output?: string }): string | null {
+    if (!res.success || !res.output || res.output.startsWith('ERR::')) return null;
+    try {
+      const parsed = JSON.parse(res.output);
+      const count = Number(parsed.count ?? 0);
+      if (Number.isFinite(count)) this.lastProjectsResultsCount = count;
+      // `focusables` is deliberately part of the compared signature: it is the
+      // signal that tracks when the filtered rows actually become tabbable.
+      return JSON.stringify({ count: parsed.count, names: parsed.names, focusables: parsed.focusables });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Stage 8: poll until the browser has settled somewhere OTHER than the Projects
+   * route. Two consecutive stable reads are required, so a transient
+   * mid-navigation URL can never be mistaken for the destination.
+   *
+   * "Settled" deliberately means only "navigation left /projects". Whether the
+   * destination is a real Project is decided afterwards by the Project identity
+   * parse, so landing on (say) a conversation URL is reported as a parse failure
+   * instead of being masked as a navigation failure.
+   */
+  private async waitForProjectPageSettled(diag: any): Promise<{ changed: boolean; url?: string }> {
+    const maxAttempts = 16;
+    let stableSeen = 0;
+    let lastUrl: string | undefined;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const res = this.executeTabJavaScript(buildChatGPTLocationJavaScript(), 2500);
+      const url = this.parseLocationUrl(res);
+      if (url) {
+        const leftProjectsRoute = !this.isProjectsRouteUrl(url);
+        if (leftProjectsRoute) {
+          if (url === lastUrl) {
+            stableSeen += 1;
+          } else {
+            lastUrl = url;
+            stableSeen = 1;
+          }
+          if (stableSeen >= 2) {
+            diag.navigationAttempts = attempt;
+            return { changed: true, url };
+          }
+        } else {
+          lastUrl = url;
+          stableSeen = 0;
+        }
+      } else if (!res.success) {
+        diag.appleScriptError = sanitizeHostDiagnostic(res.error);
+      }
+      await this.sleep(600);
+    }
+    return { changed: false };
+  }
+
+  /** True when a URL is still the ChatGPT Projects listing route. */
+  private isProjectsRouteUrl(url: string): boolean {
+    try {
+      const path = new URL(url).pathname;
+      return path === '/projects' || path.startsWith('/projects/');
+    } catch {
+      return false;
+    }
+  }
+
+  /** Reads `location.href` out of an injected `__relay_stage_read_url__` result. */
+  private parseLocationUrl(res: { success: boolean; output?: string; error?: string }): string | null {
+    if (!res.success || !res.output || res.output.startsWith('ERR::')) return null;
+    try {
+      const parsed = JSON.parse(res.output);
+      return typeof parsed.url === 'string' && parsed.url ? parsed.url : null;
+    } catch {
+      return null;
+    }
+  }
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
@@ -2784,11 +2570,14 @@ export class ChatGPTProvider extends BaseMacOSProvider {
   }
 
   /**
-   * Stage A: open one discovery tab in the front Chrome window, then — after a
-   * short bounded delay — read the URL of the active tab (the tab just created,
-   * which Chrome makes active). No window IDs, no tab indices, no tab counting.
+   * Stage A: open one discovery tab at `url` in the front Chrome window, then —
+   * after a short bounded delay — read the URL of the active tab (the tab just
+   * created, which Chrome makes active). No window IDs, no tab indices, no tab
+   * counting.
    */
-  private async openDiscoveryTab(): Promise<{
+  private async openDiscoveryTab(
+    url: string = 'https://chatgpt.com',
+  ): Promise<{
     ok: boolean;
     tabCreateSucceeded: boolean;
     tabOpened: boolean;
@@ -2796,7 +2585,7 @@ export class ChatGPTProvider extends BaseMacOSProvider {
     error?: string;
   }> {
     // 1. Activate Chrome and create the tab (Chrome makes it active).
-    const createRes = this.runAppleScript(buildCreateDiscoveryTabAppleScript(), DISCOVERY_TAB_CREATE_TIMEOUT_MS);
+    const createRes = this.runAppleScript(buildCreateDiscoveryTabAppleScript(url), DISCOVERY_TAB_CREATE_TIMEOUT_MS);
     const createRaw = (createRes.output || '').trim();
     if (!createRes.success) {
       return { ok: false, tabCreateSucceeded: false, tabOpened: false, error: createRes.error };
@@ -2896,7 +2685,7 @@ export class ChatGPTProvider extends BaseMacOSProvider {
         diag.chromeJavaScriptFromAppleEvents = diag.chromeJavaScriptFromAppleEvents || 'blocked';
         const hadToggle = diag.chromeJavascriptToggleAttempted;
         await this.ensureChromeJavaScriptFromAppleEvents(diag);
-        diag.appleScriptError = res.error || res.output;
+        diag.appleScriptError = sanitizeHostDiagnostic(res.error || res.output);
 
         // If the toggle reports success, keep polling so the next execute can
         // confirm; otherwise only give a brief manual-fix window then stop.
@@ -2923,209 +2712,11 @@ export class ChatGPTProvider extends BaseMacOSProvider {
           diag.jsError = `Ready check parse error: ${e}`;
         }
       } else {
-        diag.appleScriptError = res.error || res.output;
+        diag.appleScriptError = sanitizeHostDiagnostic(res.error || res.output);
       }
       await this.sleep(700);
     }
     return false;
-  }
-
-  /** Stage C: open the ChatGPT projects/search navigation UI and confirm it is visible. */
-  private async openProjectsNav(diag: any): Promise<boolean> {
-    const res = this.executeTabJavaScript(buildChatGPTProjectsOpenJavaScript(), 3000);
-    if (!res.success || !res.output || res.output.startsWith('ERR::')) {
-      diag.appleScriptError = res.error || res.output;
-    } else {
-      try {
-        const parsed = JSON.parse(res.output);
-        diag.projectsClickInfo = parsed.clickedInfo;
-      } catch (e) {
-        diag.jsError = `Open projects parse error: ${e}`;
-      }
-    }
-
-    // Also trigger native macOS Command+K shortcut via System Events
-    // (This is the universal ChatGPT shortcut to open Search Chats & Projects modal)
-    try {
-      this.runAppleScript(`
-        tell application "Google Chrome" to activate
-        tell application "System Events"
-          try
-            keystroke "k" using command down
-          end try
-        end tell
-      `, 1500);
-    } catch {
-      // ignore
-    }
-
-    const maxAttempts = 12;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const vres = this.executeTabJavaScript(buildChatGPTProjectsVisibleCheckJavaScript(), 2500);
-      if (vres.success && vres.output && !vres.output.startsWith('ERR::')) {
-        try {
-          const v = JSON.parse(vres.output);
-          diag.projectsViewPath = v.path;
-          if (v.visible) return true;
-        } catch {
-          // retry
-        }
-      }
-      // If still not visible after 2 or 5 attempts, re-run open script & retry native Cmd+K
-      if (attempt === 2 || attempt === 5) {
-        try {
-          this.runAppleScript(`
-            tell application "Google Chrome" to activate
-            tell application "System Events"
-              try
-                keystroke "k" using command down
-              end try
-            end tell
-          `, 1500);
-        } catch {}
-        const retryOpen = this.executeTabJavaScript(buildChatGPTProjectsOpenJavaScript(), 2500);
-        if (retryOpen.success && retryOpen.output && !retryOpen.output.startsWith('ERR::')) {
-          try {
-            const parsedRetry = JSON.parse(retryOpen.output);
-            if (parsedRetry.clickedInfo) diag.projectsClickInfo = parsedRetry.clickedInfo;
-          } catch {
-            // ignore
-          }
-        }
-      }
-      await this.sleep(600);
-    }
-    return false;
-  }
-
-  /** Stage D: enter the (normalized) project name into the projects search input. */
-  private async enterProjectSearch(
-    normalizedTarget: string,
-    diag: any,
-  ): Promise<string | null> {
-    const maxAttempts = 4;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const res = this.executeTabJavaScript(buildChatGPTEnterSearchJavaScript(normalizedTarget), 3000);
-      if (res.success && res.output && !res.output.startsWith('ERR::')) {
-        try {
-          const parsed = JSON.parse(res.output);
-          if (parsed.found) return parsed.value;
-        } catch (e) {
-          diag.jsError = `Enter search parse error: ${e}`;
-        }
-      } else if (!res.success) {
-        diag.appleScriptError = res.error || res.output;
-      }
-      if (attempt < maxAttempts) {
-        // Retry native Cmd+K in case the search dialog lost focus or didn't finish opening
-        if (attempt === 2) {
-          try {
-            this.runAppleScript(`
-              tell application "Google Chrome" to activate
-              tell application "System Events"
-                try
-                  keystroke "k" using command down
-                end try
-              end tell
-            `, 1500);
-          } catch {}
-        }
-        await this.sleep(400);
-      }
-    }
-    return null;
-  }
-
-  /** Stage E: poll the filtered results and classify exact matches. */
-  private async inspectProjectResults(
-    normalizedTarget: string,
-    diag: any,
-  ): Promise<any | null> {
-    const maxAttempts = 4;
-    let enterDispatched = false;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const res = this.executeTabJavaScript(buildChatGPTInspectResultsJavaScript(normalizedTarget), 3000);
-      if (res.success && res.output && !res.output.startsWith('ERR::')) {
-        try {
-          const parsed = JSON.parse(res.output);
-          if (parsed.resultCount === 0 && !enterDispatched && attempt < maxAttempts) {
-            // Some UIs only commit the filter on Enter; dispatch once, then re-scan.
-            this.executeTabJavaScript(buildChatGPTEnterKeyJavaScript(), 2500);
-            enterDispatched = true;
-            await this.sleep(800);
-            continue;
-          }
-          return parsed;
-        } catch (e) {
-          diag.jsError = `Inspect results parse error: ${e}`;
-        }
-      } else {
-        diag.appleScriptError = res.error || res.output;
-      }
-      await this.sleep(650);
-    }
-    return null;
-  }
-
-  /** Stage F: click the single exact-matching project (re-applies the exact rule). */
-  private async clickProjectExact(
-    normalizedTarget: string,
-    diag: any,
-  ): Promise<{ clicked: boolean; exactCount: number; urlBeforeClick?: string; clickedHref?: string }> {
-    const res = this.executeTabJavaScript(buildChatGPTClickExactJavaScript(normalizedTarget), 3000);
-    if (!res.success || !res.output || res.output.startsWith('ERR::')) {
-      diag.appleScriptError = res.error || res.output;
-      return { clicked: false, exactCount: 0 };
-    }
-    try {
-      const parsed = JSON.parse(res.output);
-      return {
-        clicked: !!parsed.clicked,
-        exactCount: parsed.exactCount ?? 0,
-        urlBeforeClick: parsed.urlBeforeClick,
-        clickedHref: parsed.clickedHref,
-      };
-    } catch (e) {
-      diag.jsError = `Click exact parse error: ${e}`;
-      return { clicked: false, exactCount: 0 };
-    }
-  }
-
-  /** Stage G: poll until the tab URL leaves the search/root state (2 stable reads). */
-  private async waitForNavigation(
-    urlBeforeClick: string | undefined,
-    diag: any,
-  ): Promise<{ changed: boolean; url?: string }> {
-    const maxAttempts = 14;
-    let lastUrl = urlBeforeClick;
-    let stableSeen = 0;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const res = this.executeTabJavaScript(buildChatGPTLocationJavaScript(), 2500);
-      if (res.success && res.output && !res.output.startsWith('ERR::')) {
-        try {
-          const parsed = JSON.parse(res.output);
-          const url = parsed.url || '';
-          if (url && url !== urlBeforeClick) {
-            if (url === lastUrl) stableSeen += 1;
-            else {
-              lastUrl = url;
-              stableSeen = 1;
-            }
-            if (stableSeen >= 2) {
-              diag.navigationAttempts = attempt;
-              return { changed: true, url };
-            }
-          } else {
-            lastUrl = url;
-            stableSeen = 0;
-          }
-        } catch {
-          // retry
-        }
-      }
-      await this.sleep(700);
-    }
-    return { changed: false };
   }
 
   /** Stage H: read the ACTUAL final URL from the active tab, returned unchanged. */
@@ -3157,25 +2748,6 @@ export class ChatGPTProvider extends BaseMacOSProvider {
  * The returned projectId/conversationId are returned verbatim (no decoding),
  * so any caller can compare the slug against a stored project reference.
  */
-export function parseChatGPTConversationUrl(url: string): {
-  projectId: string;
-  conversationId: string;
-} | null {
-  if (!url || typeof url !== 'string') return null;
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return null;
-  }
-  if (!(parsed.hostname === 'chatgpt.com' || parsed.hostname.endsWith('.chatgpt.com'))) return null;
-  const match = parsed.pathname.match(/^\/g\/(g-p-[^/]+)\/c\/([^/?#]+)$/);
-  if (!match) return null;
-  const conversationId = match[2];
-  if (!conversationId) return null;
-  return { projectId: match[1], conversationId };
-}
-
 /**
  * Semantic identity states for a ChatGPT conversation URL.
  *
@@ -3462,7 +3034,7 @@ export async function settleChatGPTConversationIdentity(
 export class OpenCodeProvider extends BaseMacOSProvider {
   readonly providerType: ProviderType = 'opencode';
   readonly defaultBundleId = 'dev.opencode.desktop';
-  readonly defaultProcessName = 'opencode';
+  readonly defaultProcessName = 'OpenCode';
   readonly candidateProcessNames = ['OpenCode', 'opencode', 'opencode-desktop'];
   readonly defaultWindowTitle = 'OpenCode';
 
@@ -3737,40 +3309,62 @@ export class OpenCodeProvider extends BaseMacOSProvider {
         ? buildWatermark(externalId, preRead.messages, Date.now())
         : null;
 
-      // ---- Step 3: the transport, run WITHOUT throwing ----
-      //
-      // `spawnSync` is used precisely because it does not throw on a non-zero exit. The
-      // exit code is captured as evidence and is never consulted to classify. Instruction
-      // text is passed as a single argv element, so it is never shell-interpreted.
-      // ---- Step 3: the transport via AppleScript GUI injection (activate -> paste instruction -> delay 2s -> Return key) ----
-      const sessionTitle = request.externalSessionId; // or resolved title
-      const procName = this.probeMacOSProcess(this.defaultProcessName).details?.matchedProcessName as string || this.defaultProcessName;
-      const escapedInstruction = escapeAppleScriptStringLiteral(request.instructionText);
-
-      const guiScript = `
-        tell application "${procName}" to activate
-        delay 0.5
-        tell application "System Events"
-          tell process "${procName}"
-            -- Ensure we are in the session (open session via Cmd+K if needed or assume already active)
-            -- Type or paste instruction into composer
-            set the clipboard to "${escapedInstruction}"
-            keystroke "v" using command down
-            delay 0.8
-            
-            -- Wait 2 sec as requested before pressing return/enter key
-            delay 2.0
-            
-            -- Press Return key to submit
-            key code 36
-          end tell
-        end tell
-        return "ok"
-      `;
-
-      const scriptRes = this.runAppleScript(guiScript, 10000);
-      const transportExitCode = scriptRes.success ? 0 : 1;
-      const transportError = scriptRes.success ? null : (scriptRes.error || 'AppleScript GUI injection failed');
+      // ---- Step 3: try deterministic free-model candidates ----
+      const { spawnSync } = await import('child_process');
+      // Narrow fallback: preferred free model first; if rejected for a
+      // MODEL-SPECIFIC reason (unavailable/not found/unsupported), advance
+      // to next free candidate. Do NOT retry for generic failure.
+      const skipForcedModel = !!externalId && !!sessionDirFromRecord && sessionWorkspaceMatch;
+      const freeCandidates = [
+        request.modelOverride ?? 'opencode-zen/free-default',
+        'opencode-zen/free-default',
+        'openrouter/free',
+        'thinking-machines/inkling:free',
+      ];
+      const triedModels = new Set<string>();
+      let transportResult: ReturnType<typeof spawnSync> | null = null;
+      let selectedModel: string | null = null;
+      for (const model of freeCandidates) {
+        if (triedModels.has(model)) continue;
+        triedModels.add(model);
+        const trialArgs = ['run', '--session', externalId, '--continue'];
+        if (!skipForcedModel) trialArgs.push('--model', model);
+        trialArgs.push(request.instructionText);
+        const trial = spawnSync(cliPath, trialArgs, {
+          cwd: sessionDirFromRecord ?? process.cwd(),
+          encoding: 'utf8',
+          timeout: 120_000,
+          maxBuffer: 4 * 1024 * 1024,
+        });
+        const trialStderr = trial.stderr?.trim() || '';
+        const modelSpecificRejection = /(?:model unavailable|model not found|unsupported model|provider\/model unavailable|free-model quota unavailable)/i.test(trialStderr);
+        if (trial.status === 0 || !modelSpecificRejection) {
+          // Success or non-model-specific failure: stop trying.
+          transportResult = trial;
+          selectedModel = model;
+          break;
+        }
+        // Model-specific failure: continue to next candidate.
+      }
+      if (!transportResult) {
+        // All candidates exhausted or no trial produced a result.
+        // Preserve failure evidence using the last attempt.
+        const lastModel = Array.from(triedModels).pop() ?? request.modelOverride ?? 'unknown';
+        transportResult = spawnSync(cliPath, ['run', '--session', externalId, '--continue', '--model', lastModel, request.instructionText], {
+          cwd: sessionDirFromRecord ?? process.cwd(),
+          encoding: 'utf8',
+          timeout: 120_000,
+          maxBuffer: 4 * 1024 * 1024,
+        });
+        selectedModel = lastModel;
+      }
+      const transportExitCode = transportResult.status;
+      const transportStderrStr = typeof transportResult.stderr === 'string' ? transportResult.stderr : (transportResult.stderr ? Buffer.from(transportResult.stderr).toString() : '');
+      const transportError = transportResult.error
+        ? transportResult.error.message
+        : transportStderrStr.trim() || null;
+      const transportStdoutStr = typeof transportResult.stdout === 'string' ? transportResult.stdout : (transportResult.stdout ? Buffer.from(transportResult.stdout).toString() : '');
+      const transportStdout = transportStdoutStr.trim() || null;
 
       // ---- Step 4: reconcile against the EXACT session, on EVERY exit path ----
       //
@@ -3778,18 +3372,43 @@ export class OpenCodeProvider extends BaseMacOSProvider {
       // execution facts that say nothing about whether the instruction landed, and the one
       // case that motivated this rewrite is precisely "the instruction landed and the
       // process then failed".
-      const postRead = await this.readExactSessionMessages(externalId);
-      const reconciliation = reconcileTransportOutcome({
+      const effectiveWatermark = request.preDispatchWatermark ?? preWatermark;
+      let postRead = await this.readExactSessionMessages(externalId);
+      let reconciliation = reconcileTransportOutcome({
         expectedText: request.instructionText,
         // The caller's watermark wins when it supplied one; otherwise this adapter's own
         // pre-send read is used. Either way the boundary predates the send.
-        watermark: request.preDispatchWatermark ?? preWatermark,
+        watermark: effectiveWatermark,
         messages: postRead.readable ? postRead.messages : [],
         transcriptReadable: postRead.readable,
         transcriptReadFailure: postRead.readable ? null : postRead.failure,
         transportExitCode,
         transportError,
       });
+
+      // The OpenCode service persists the submitted user turn asynchronously after the UI
+      // accepts Return. A single immediate read can therefore observe the exact pre-send
+      // transcript and falsely conclude `not_delivered`. Re-read for a short bounded window;
+      // only provider transcript evidence can end the wait early, and the final verdict is
+      // still derived solely from that transcript rather than the AppleScript exit status.
+      const reconciliationDeadline = Date.now() + 15_000;
+      while (
+        transportResult.error === undefined &&
+        reconciliation.classification !== 'delivered' &&
+        Date.now() < reconciliationDeadline
+      ) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 500));
+        postRead = await this.readExactSessionMessages(externalId);
+        reconciliation = reconcileTransportOutcome({
+          expectedText: request.instructionText,
+          watermark: effectiveWatermark,
+          messages: postRead.readable ? postRead.messages : [],
+          transcriptReadable: postRead.readable,
+          transcriptReadFailure: postRead.readable ? null : postRead.failure,
+          transportExitCode,
+          transportError,
+        });
+      }
 
       // ---- Step 5: two verdicts, one return value ----
       const outcome: DeliveryInstructionResult['outcome'] =
@@ -3849,11 +3468,13 @@ export class OpenCodeProvider extends BaseMacOSProvider {
           chronologicalOrder: reconciliation.chronologicalOrder,
           // Process facts, recorded because they were the wrong basis and must stay visible
           // as evidence of what the process did.
-          transportExitCode: 0,
-          transportStderrExcerpt: null,
-          transportStdoutExcerpt: null,
-          modelOverride: null,
-          modelSelectionSource: 'opencode_default_model',
+          transportExitCode,
+          transportStderrExcerpt: transportError?.slice(0, 1000) ?? null,
+          transportStdoutExcerpt: transportStdout?.slice(0, 1000) ?? null,
+          modelOverride: request.modelOverride ?? null,
+          selectedModel: selectedModel ?? null,
+          modelSelectionSource: request.modelOverride ? 'relay_override' : 'opencode_default_model',
+          fallbackUsed: selectedModel !== (request.modelOverride ?? null),
           authorizationCheck: 'externalSessionId_present',
         },
       };
@@ -4066,6 +3687,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
    */
   override async detectCompletionState(
     sessionId: RuntimeSessionId,
+    dispatchBoundary?: { afterCreatedAt?: number; afterMessageId?: string | null; sessionId?: string | null; expectedInstructionSnippet?: string | null },
   ): Promise<{ isComplete: boolean; responseSummary?: string; evidence?: ObservableEvidence }> {
     // Phase F exact-session response extraction requires the authoritative
     // bound external OpenCode session (`ses_*`) to provide the completed
@@ -4122,6 +3744,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
     let latestAssistantOrdinal: number | null = null;
     let latestAssistantRef: string | null = null;
     let sessionWorkspaceVerified = false;
+    let correlationEvidence: any = null;
 
     if (transcriptCheckOutput) {
       const parsedPost = JSON.parse(transcriptCheckOutput);
@@ -4137,15 +3760,73 @@ export class OpenCodeProvider extends BaseMacOSProvider {
           // The adapter uses the provider's own message classification and
           // filters only assistant-role turns (user, system excluded from response).
           const messages = item.messages ?? item.transcript ?? item.data ?? [];
-          const assistantTurns = messages.filter(
+          let assistantTurns = messages.filter(
             (m: any) => m.role === 'assistant' || m.messageRole === 'assistant' || m.type === 'assistant',
           );
+          // Strongest correlation: find exact current dispatched user turn.
+          let matchedUserTurn: any = null;
+          let matchedUserCreatedAt: number | null = null;
+          if (dispatchBoundary?.expectedInstructionSnippet) {
+            const snippet = dispatchBoundary.expectedInstructionSnippet.trim();
+            const userTurns = messages.filter(
+              (m: any) => m.role === 'user' || m.messageRole === 'user' || m.type === 'user',
+            );
+            for (const ut of userTurns) {
+              const text = (ut.text || ut.messageText || ut.content || '').trim();
+              if (snippet.length > 10 && text.includes(snippet.substring(0, Math.min(40, snippet.length))) || (snippet.length <= 10 && text === snippet)) {
+                matchedUserTurn = ut;
+                matchedUserCreatedAt = ut.time?.created ?? ut.created ?? ut.timestamp ?? ut.createdAt ?? null;
+                if (typeof matchedUserCreatedAt === 'number') break;
+              }
+            }
+          }
+          // Determine correlation boundary source and timestamp.
+          let boundarySource = 'delivery_timestamp_fallback';
+          let afterTimestamp = dispatchBoundary?.afterCreatedAt ?? 0;
+          if (matchedUserTurn && typeof matchedUserCreatedAt === 'number') {
+            afterTimestamp = matchedUserCreatedAt;
+            boundarySource = 'matched_dispatched_user_turn';
+          } else if (dispatchBoundary?.afterMessageId) {
+            // Try to locate message by id as secondary exact correlation.
+            const boundaryMsg = messages.find((m: any) => (m.id || m.ref || m.messageId) === dispatchBoundary!.afterMessageId);
+            if (boundaryMsg) {
+              const t = boundaryMsg.time?.created ?? boundaryMsg.created ?? boundaryMsg.timestamp ?? boundaryMsg.createdAt ?? 0;
+              if (typeof t === 'number') {
+                afterTimestamp = t;
+                boundarySource = 'pre_dispatch_watermark_message_id';
+              }
+            }
+          }
+          // Filter assistant turns: only after the strongest boundary.
+          assistantTurns = messages.filter(
+            (m: any) => m.role === 'assistant' || m.messageRole === 'assistant' || m.type === 'assistant',
+          );
+          assistantTurns = assistantTurns.filter((m: any) => {
+            const t = m.time?.created ?? m.created ?? m.timestamp ?? m.createdAt ?? 0;
+            return typeof t === 'number' && t > afterTimestamp;
+          });
           if (assistantTurns.length > 0) {
-            const latestTurn = assistantTurns[assistantTurns.length - 1];
+            // Select latest turn strictly after the current dispatch user turn.
+            const sorted = assistantTurns.sort((a: any, b: any) => {
+              const ta = a.time?.created ?? a.created ?? a.timestamp ?? a.createdAt ?? 0;
+              const tb = b.time?.created ?? b.created ?? b.timestamp ?? b.createdAt ?? 0;
+              return (ta as number) - (tb as number);
+            });
+            const latestTurn = sorted[sorted.length - 1];
             latestAssistantText = latestTurn.text || latestTurn.messageText || latestTurn.response || null;
             latestAssistantOrdinal = latestTurn.ordinal || latestTurn.providerOrdinal || latestTurn.messageOrdinal || null;
             latestAssistantRef = latestTurn.ref || latestTurn.messageId || latestTurn.id || null;
             assistantMessageFound = true;
+            // Persist correlation evidence for external verification.
+            correlationEvidence = {
+              matchedUserMessageId: matchedUserTurn ? (matchedUserTurn.id || matchedUserTurn.ref || matchedUserTurn.messageId) : null,
+              matchedUserCreatedAt: matchedUserCreatedAt,
+              assistantMessageId: latestAssistantRef,
+              assistantCreatedAt: (latestTurn.time?.created ?? latestTurn.created ?? latestTurn.timestamp ?? latestTurn.createdAt ?? null),
+              boundarySource,
+              afterTimestamp,
+            };
+            // Attach to evidence details (will be merged below).
             break;
           }
         }
@@ -4165,6 +3846,7 @@ export class OpenCodeProvider extends BaseMacOSProvider {
         assistantOrdinal: latestAssistantOrdinal,
         assistantRef: latestAssistantRef,
         sessionScopedEvidence: true,
+        correlationEvidence: correlationEvidence ?? null,
       },
     };
 

@@ -112,6 +112,26 @@ export interface UIAssignment {
   activeHandoffStatus?: HandoffStatus;
   createdAt: number;
   completedAt?: number;
+  updatedAt?: number;
+  targetSideRole?: 'planner' | 'worker';
+  source?: 'manual' | 'handoff' | 'other';
+  currentAttemptId?: string;
+  currentAttemptStatus?: 'prepared' | 'running' | 'completed_physical' | 'interrupted';
+  currentAttemptStartedAt?: number;
+  currentAttemptFinishedAt?: number;
+  currentAttemptFailureReason?: string;
+  currentAttemptEvidence?: ObservableEvidence;
+  deliveryStatus?: DeliveryStatus;
+  deliveryEvidence?: ObservableEvidence;
+  deliveryFailureReason?: string;
+  attentionStatus?: 'open' | 'acknowledged' | 'resolved';
+  attentionCount?: number;
+  attentionTitle?: string;
+  attentionMessage?: string;
+  pairStatus?: string;
+  pairOperationalState?: 'IDLE' | 'ACTIVE';
+  pairRelayState?: 'STOPPED' | 'RUNNING' | 'PAUSED';
+  blockerReason?: string;
 }
 
 export interface UIEvent {

@@ -167,3 +167,93 @@ Current `AttemptStatus` is likely `'running' | 'completed' | 'failed' | 'interru
 - No `dispatch_uncertain` exists
 
 The architecture (section 12, 13, 23) requires separation; current entity is simplified. Freeze the domain separation here; physical schema can migrate.
+
+---
+
+## 7. Create & Dispatch transaction boundary — FROZEN
+
+**Status: FROZEN.** Do NOT "simplify" this back into `createAssignment()` → `dispatchAssignment()`.
+
+Implemented by:
+- `RelayEngine.createAssignmentAndClaimExecutionSlot()` — DB-only (create + claim the slot).
+- `RelayApiService.createAndDispatchAssignment()` — application orchestration.
+- `RelayEngine.dispatchAssignment()` — unchanged ordinary execution path.
+
+Regression: `tests/create_and_dispatch_atomic.test.ts`.
+
+### The rule
+
+Creating an Assignment and dispatching it are **not** one transaction. External
+provider contact cannot be inside a SQLite transaction. The boundary is:
+
+```text
+application command: createAndDispatchAssignment(pairId, title, instruction)
+    │
+    ├─ DB-only, one transaction:
+    │    createAssignmentAndClaimExecutionSlot()
+    │      • assertContactPermitted           (I-2: an IDLE Pair creates nothing)
+    │      • assertExecutionSlotAvailable      (an occupied slot creates nothing)
+    │      • save Assignment (pending)
+    │      • pair.assignWork(assignment.id)    ← claim the slot ATOMICALLY with create
+    │      • emit assignment.created
+    │
+    └─ ordinary execution path:
+         dispatchAssignment()
+           • Phase 1: durable intent (transaction)
+           • Phase 2: external provider contact (OUTSIDE any transaction)
+```
+
+### Why (the defect this prevents)
+
+`createAssignment` alone must keep its **backlog** semantics — a Pair may
+legitimately queue work, and globally forbidding creation would destroy the
+distinction between queued work and execution-slot ownership. But the
+Create & Dispatch *intent* must never durably create an Assignment that cannot
+obtain the slot. Running `createAssignment` → `dispatchAssignment` sequentially
+produced a durable `pending` **orphan** and only then hit the execution-slot
+guard. The claim is therefore atomic with creation, and the slot gates run
+**before** anything is durable.
+
+### The intermediate state is intentional, not accidental
+
+```text
+no active assignment
+    → atomic create + claim slot
+    → pending Assignment owning the slot, no Attempt, no Delivery   ← crash boundary
+    → dispatchAssignment Phase 1: active + Attempt(prepared) + Delivery(delivering)
+    → Phase 2 external send
+    → delivered | ambiguous | failed
+```
+
+The `pending + owns slot + no Attempt/Delivery` state is a legitimate crash
+boundary:
+- `recoverOnStartup` sees it (`findActive` includes `pending`) and **must not**
+  create a handoff without a `currentAttemptId` — a handoff for never-sent work is
+  a false completion;
+- `reconcilePairAssignmentAuthority` keeps it as the slot holder;
+- it resumes through the ordinary `dispatchAssignment(holder)`.
+
+### Outcome semantics (never conflate)
+
+```text
+PRE-CLAIM refusal   → created:false → nothing durable → preserve draft, retry
+POST-CLAIM failure  → created:true  → Assignment exists + owns slot → refresh,
+                                       recover/retry THAT Assignment
+DELIVERY outcome    → created:true  → delivered | ambiguous | failed
+                                       → normal delivery/reconciliation
+```
+
+A claimed Assignment is **never rolled back** because external delivery failed. A
+post-claim dispatch failure is **not** "assignment creation failed".
+
+### Frozen sub-rules
+
+- `createAssignment` keeps backlog semantics; do not add an unconditional
+  "no active Assignment" guard to it.
+- `dispatchAssignment` and its execution-slot guard are unchanged; the command
+  reuses them.
+- No DB transaction spans provider contact.
+- The renderer closes the Create Assignment modal **iff `created === true`**;
+  `created:false` and unexpected errors keep it open with the draft preserved.
+- Re-clicking Create & Dispatch in a post-claim state must not create a second
+  Assignment (the slot guard refuses it).

@@ -151,6 +151,17 @@ export interface AppAutomationScripts {
   launchScript?: string;
   /** Script / command to create a new session. Placeholders: {projectPath}, {projectName}, {sessionTitle}. */
   createSessionScript?: string;
+  /**
+   * Editable ChatGPT-style Project discovery profile. Describes the exact GUI
+   * sequence used to resolve an external Project identity, e.g.
+   * `open https://chatgpt.com/projects` / `input {{projectName}}` / `Enter` /
+   * `Tab x 7` / `Enter` / `capture current URL`.
+   *
+   * The Tab count is UI-dependent and changes without notice when the host app
+   * ships a new UI, so it belongs here — in the integration configuration —
+   * rather than in domain logic.
+   */
+  discoverProjectScript?: string;
   /** Script / command to focus or open an existing session. Placeholders: {externalSessionId}, {sessionTitle}, {projectPath}. */
   openSessionScript?: string;
   /** Script / command to send an instruction or message. Placeholders: {externalSessionId}, {instruction}, {idempotencyKey}. */
@@ -278,6 +289,12 @@ export interface IntegrationTestResult {
 
 export interface IAppIntegrationHandler extends RelayIntegration {
   openSession(sessionId: string, externalSessionId?: string | null, windowTitle?: string): Promise<boolean>;
+  /**
+   * Optional: re-push `config.scripts` onto the live runtime provider after the
+   * configuration is edited. Implemented by handlers whose provider behaviour is
+   * script-driven (e.g. ChatGPT Project discovery).
+   */
+  refreshProviderScripts?(): void;
 }
 
 /** Pre-configured templates for quick app onboarding via + Add App */

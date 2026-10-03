@@ -183,6 +183,7 @@ async function markWorkerFinished(
   assert.ok(assignment?.currentAttemptId, 'assignment must have a current attempt');
   const attempt = await db.attempts.findById(assignment.currentAttemptId);
   assert.ok(attempt, 'attempt must exist');
+  attempt.startRunning();
   attempt.completePhysical({
     id: `ev_done_${attempt.id}`,
     timestamp: Date.now(),
@@ -254,7 +255,7 @@ describe('Plan-First Operational Qualification (PLAN_FIRST_DOMAIN_FREEZE.md §H)
       const attempts = await db.attempts.findByAssignmentId(wu1AssignmentId);
       assert.strictEqual(attempts.length, 1, 'exactly one Attempt for the WU1 dispatch');
       assert.strictEqual(attempts[0].attemptNumber, 1);
-      assert.strictEqual(attempts[0].status, 'running');
+      assert.strictEqual(attempts[0].status, 'prepared');
       assert.strictEqual(attempts[0].sessionPairId, fx.pairId);
       assert.strictEqual(attempts[0].workerSessionId, fx.workerId);
       assert.strictEqual(attempts[0].externalSessionId, fx.workerExternalId);

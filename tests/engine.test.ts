@@ -36,13 +36,13 @@ describe('RelayX Engine Application Lifecycle & Supervision', () => {
     // Dispatch assignment
     const { assignment: activeAsgn, attempt, delivery } = await engine.dispatchAssignment(assignment.id);
     assert.strictEqual(activeAsgn.status, 'active');
-    assert.strictEqual(attempt.status, 'running');
+    assert.strictEqual(attempt.status, 'prepared');
     assert.strictEqual(delivery.status, 'delivered');
     assert.ok(delivery.evidence, 'Confirmed delivery must record observable evidence');
 
     // Worker runtime status updated
     const updatedWorker = await db.runtimes.findById(worker.id);
-    assert.strictEqual(updatedWorker?.status, 'working');
+    assert.strictEqual(updatedWorker?.status, 'available');
 
     // Events emitted
     const events = await db.events.findRecent();
@@ -52,7 +52,7 @@ describe('RelayX Engine Application Lifecycle & Supervision', () => {
     assert.ok(eventTypes.includes('assignment.created'));
     assert.ok(eventTypes.includes('delivery.started'));
     assert.ok(eventTypes.includes('delivery.confirmed'));
-    assert.ok(eventTypes.includes('worker.started'));
+    assert.ok(!eventTypes.includes('worker.started'), 'delivery evidence alone must not assert execution started');
   });
 
   it('marks uncertain delivery as ambiguous and blocks automated resend', async () => {

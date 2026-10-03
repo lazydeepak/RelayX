@@ -171,7 +171,7 @@ export interface IRuntimeProvider {
   readonly integrationStatus: ProviderIntegrationStatus;
   findRuntime(descriptor: RuntimeTargetDescriptor): Promise<RuntimeInspectionResult>;
   findAllRuntimes(): Promise<RuntimeInspectionResult[]>;
-  inspectRuntime(sessionId: RuntimeSessionId): Promise<RuntimeInspectionResult>;
+  inspectRuntime(sessionId: RuntimeSessionId, dispatchBoundary?: { afterCreatedAt?: number; afterMessageId?: string | null; sessionId?: string | null; expectedInstructionSnippet?: string | null }): Promise<RuntimeInspectionResult>;
   activateRuntime(sessionId: RuntimeSessionId, windowTitle?: string): Promise<boolean>;
   deliverInstruction(request: DeliveryInstructionRequest): Promise<DeliveryInstructionResult>;
   /**
@@ -199,7 +199,7 @@ export interface IRuntimeProvider {
     failure: string | null;
   }>;
   detectWorkingState(sessionId: RuntimeSessionId): Promise<{ isWorking: boolean; evidence?: ObservableEvidence }>;
-  detectCompletionState(sessionId: RuntimeSessionId): Promise<{ isComplete: boolean; responseSummary?: string; evidence?: ObservableEvidence }>;
+  detectCompletionState(sessionId: RuntimeSessionId, dispatchBoundary?: { afterCreatedAt?: number; afterMessageId?: string | null; sessionId?: string | null; expectedInstructionSnippet?: string | null }): Promise<{ isComplete: boolean; responseSummary?: string; evidence?: ObservableEvidence }>;
   captureEvidence(sessionId: RuntimeSessionId, action: string): Promise<ObservableEvidence>;
   /**
    * Optional reconciliation of an uncertain delivery.

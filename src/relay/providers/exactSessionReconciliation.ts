@@ -91,8 +91,8 @@ export type TransportReconciliationClassification =
  *
  * `completed`       an assistant turn caused by the instruction finished without a provider error
  * `terminal_error`  the assistant turn terminated with a provider error (quota, auth, crash)
- * `in_progress`     an assistant turn exists but has not finished, or none exists yet
- * `not_started`     no assistant turn was caused by the instruction at all
+ * `in_progress`     an assistant turn exists but has not finished
+ * `not_started`     no assistant turn was observed after the instruction
  *
  * This NEVER changes `TransportReconciliationClassification`. Transport and execution are
  * separate facts with separate owners (Delivery vs Attempt).
@@ -378,8 +378,14 @@ export function reconcileTransportOutcome(
   const normalizedExpected = normalizeInstructionText(input.expectedText);
   const watermark = input.watermark;
   const priorIds = new Set(watermark?.messageIds ?? []);
+  // A successful pre-dispatch read establishes a boundary even when the session is empty.
+  // The empty set is still an exact set of every message id that existed before dispatch;
+  // requiring at least one prior message made the first instruction in a fresh session
+  // permanently ambiguous, even when its new user turn was plainly present afterward.
   const boundaryEstablished =
-    input.transcriptReadable && watermark !== null && watermark.messageIds.length > 0;
+    input.transcriptReadable &&
+    watermark !== null &&
+    (watermark.provenance === 'captured_pre_dispatch' || watermark.messageIds.length > 0);
 
   // Everything downstream reasons about "what came after", so it MUST reason about a
   // chronological array, never about the provider's newest-first response order.
@@ -446,12 +452,11 @@ export function reconcileTransportOutcome(
       `whose current contents RelayX cannot see.`;
   } else if (!boundaryEstablished) {
     classification = 'ambiguous';
-    reason =
-      watermark === null
-        ? 'No pre-dispatch watermark was captured for the exact session, so no user turn can ' +
-          'be shown to be post-boundary. Delivery is neither confirmed nor refuted.'
-        : 'The pre-dispatch watermark recorded no existing messages, so no post-boundary claim ' +
-          'can be made. Delivery is neither confirmed nor refuted.';
+    reason = watermark === null
+      ? 'No pre-dispatch watermark was captured for the exact session, so no user turn can ' +
+        'be shown to be post-boundary. Delivery is neither confirmed nor refuted.'
+      : 'The reconstructed boundary contains no provider message ids, so it cannot establish ' +
+        'a post-boundary turn or authorize a resend. Delivery is neither confirmed nor refuted.';
   } else if (matchingUserTurn) {
     classification = 'delivered';
     const how =
@@ -536,7 +541,9 @@ function classifyWorkerExecution(
   const assistantTurns = after.filter((message) => message.role === 'assistant');
   const assistant = assistantTurns[assistantTurns.length - 1];
   if (!assistant) {
-    return { classification: 'in_progress', evidence };
+    // A delivered user turn is transport evidence only. Until the provider creates an
+    // assistant turn, RelayX has no independent evidence that execution began.
+    return { classification: 'not_started', evidence };
   }
   evidence.assistantTurnCount = assistantTurns.length;
 

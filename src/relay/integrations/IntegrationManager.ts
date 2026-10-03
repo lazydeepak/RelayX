@@ -521,6 +521,15 @@ export class IntegrationManager {
     this.ensureDefaultInvariants();
     await this.persist();
 
+    // Script-driven providers (ChatGPT Project discovery) must pick up the
+    // edited scripts immediately — this is what makes the flow repairable from
+    // the Integration page without a domain-layer change.
+    try {
+      handler.refreshProviderScripts?.();
+    } catch (err) {
+      console.warn(`[IntegrationManager] Failed to refresh scripts for "${id}":`, err);
+    }
+
     if (this.engine) {
       this.engine.registerProvider(handler.asRuntimeProvider());
     }

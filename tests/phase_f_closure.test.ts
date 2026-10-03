@@ -34,6 +34,7 @@ describe('Phase F Closure — Causal Extraction & Boundary Integrity', () => {
     const pair = await engine.createPair(project.id, 'Phase F Pair', planner.id, worker.id);
 
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine.startPair(pair.id);
 
     const assignment = await engine.createAssignment(pair.id, 'Task 1', 'Implement feature');
     await engine.dispatchAssignment(assignment.id);
@@ -128,6 +129,7 @@ describe('Phase F Closure — Causal Extraction & Boundary Integrity', () => {
     const pair = await engine1.createPair(project.id, 'Restart Pair', planner.id, worker.id);
 
     assert.strictEqual((await engine1.loadAndActivate(pair.id)).outcome, 'activated');
+    await engine1.startPair(pair.id);
 
     const assignment = await engine1.createAssignment(pair.id, 'Task 4', 'Persistence restart test');
     await engine1.dispatchAssignment(assignment.id);

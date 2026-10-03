@@ -27,6 +27,8 @@ import {
   Link2,
 } from 'lucide-react';
 import { UIPair, UIProject, UIRuntimeSession, ObservableEvidence } from '../types/ui.ts';
+import { WorkerModelControl } from './WorkerModelControl.tsx';
+import { resolvePairDispatchEligibility } from './pairDispatchEligibility.ts';
 
 interface PairViewProps {
   pairs: UIPair[];
@@ -53,6 +55,7 @@ interface PairViewProps {
   onUpdatePlannerUrl?: (pairId: string, url: string) => Promise<void>;
   onStartPair?: (pairId: string) => void;
   onPausePair?: (pairId: string) => void;
+  onOpenAttentionRecovery?: () => void;
 }
 
 export function resolvePlannerSessionUrl(
@@ -119,6 +122,7 @@ export const PairView: React.FC<PairViewProps> = ({
   onUpdatePlannerUrl,
   onStartPair,
   onPausePair,
+  onOpenAttentionRecovery,
 }) => {
   const [selectedProjectId, setSelectedProjectId] = useState<string>('all');
   const [showArchived, setShowArchived] = useState<boolean>(false);
@@ -332,6 +336,7 @@ export const PairView: React.FC<PairViewProps> = ({
             const workerSession = sessions.find((s) => s.id === pair.workerSessionId);
             const pairProject = projects.find((p) => p.id === pair.projectId);
             const plannerUrl = resolvePlannerSessionUrl(plannerSession, pairProject);
+            const dispatchEligibility = resolvePairDispatchEligibility(pair);
 
             return (
               <div
@@ -391,7 +396,7 @@ export const PairView: React.FC<PairViewProps> = ({
                       }`}
                       title={
                         pair.operationalState === 'ACTIVE'
-                          ? 'Pair is ACTIVE: provider contact permitted'
+                          ? 'Pair is ACTIVE: provider contact authorized (authority only; reachability verified separately via RuntimeSession evidence)'
                           : 'Pair is IDLE: provider contact forbidden until activated'
                       }
                     >
@@ -404,7 +409,7 @@ export const PairView: React.FC<PairViewProps> = ({
                       <button
                         onClick={() => onActivatePair(pair.id)}
                         className="px-2 py-1 rounded-lg bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-600/40 transition-colors flex items-center gap-1 text-xs font-medium"
-                        title="Load & Activate: verify both runtime sessions and switch operational state to ACTIVE"
+                        title="Load & Activate: verify session identity and grant ACTIVE authority (contact permitted)"
                       >
                         <Zap className="w-3 h-3 text-amber-400" />
                         <span className="hidden sm:inline">Activate</span>
@@ -426,7 +431,7 @@ export const PairView: React.FC<PairViewProps> = ({
                       <button
                         onClick={() => onStartPair(pair.id)}
                         className="p-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition-colors"
-                        title="Start / Resume Pair (Auto-activates if IDLE)"
+                        title="Start / Resume orchestration (selects and dispatches the next executable Assignment)"
                       >
                         <Play className="w-3.5 h-3.5" />
                       </button>
@@ -673,6 +678,8 @@ export const PairView: React.FC<PairViewProps> = ({
                             </span>
                           )}
                         </div>
+                        {/* Pair-scoped worker model: persistent configuration, no provider contact. */}
+                        {pair?.workerSessionId && <WorkerModelControl pair={pair} />}
                       </div>
                     </div>
 
@@ -740,12 +747,27 @@ export const PairView: React.FC<PairViewProps> = ({
                       <div className="flex items-center gap-2">
                         <button
                           onClick={() => onDispatchAssignment(pair.id)}
-                          disabled={pair.status === 'archived' || pair.status === 'paused'}
+                          disabled={
+                            !dispatchEligibility.eligible ||
+                            pair.status === 'archived' ||
+                            pair.status === 'paused'
+                          }
+                          title={dispatchEligibility.reason}
                           className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
                         >
                           <Send className="w-3.5 h-3.5" />
                           <span>Dispatch Assignment</span>
                         </button>
+                        {dispatchEligibility.ambiguous && (
+                          <button
+                            onClick={() => onOpenAttentionRecovery?.()}
+                            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-600 hover:bg-amber-500 text-white transition-colors"
+                            title="Open Attention & Recovery to reconcile the ambiguous delivery"
+                          >
+                            <ShieldAlert className="w-3.5 h-3.5" />
+                            <span>Reconcile in Attention &amp; Recovery</span>
+                          </button>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-2">
@@ -770,6 +792,9 @@ export const PairView: React.FC<PairViewProps> = ({
                         )}
                       </div>
                     </div>
+                    {!dispatchEligibility.eligible && dispatchEligibility.reason && (
+                      <p className="w-full text-[11px] text-amber-300">{dispatchEligibility.reason}</p>
+                    )}
                   </div>
                 )}
               </div>

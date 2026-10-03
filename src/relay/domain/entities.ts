@@ -1,8 +1,27 @@
 /**
  * ============================================================================
- * RELAY CORE DOMAIN ENTITIES & RELATIONSHIP ARCHITECTURE
+ * RELAY CORE DOMAIN ENTITIES — FROZEN SEMANTIC MODEL (§SEMANTIC_FREEZE)
  * ============================================================================
  *
+ * Five independent dimensions must never be conflated:
+ *   A. Authority        (operationalState: IDLE | ACTIVE) — permission only
+ *   B. Relay enable     (relayState: STOPPED | PAUSED | RUNNING) — loop enabled
+ *   C. Durable intent   (Attempt: prepared | running | completed_physical | interrupted)
+ *   D. Delivery lifecycle (pending | delivering | delivered | ambiguous | failed)
+ *   E. Provider evidence (ObservableEvidence + RuntimeSession.lastEvidence)
+ *
+ * Critical invariants:
+ *   - ACTIVE grants provider-contact authority; it does NOT prove verification or reachability.
+ *   - RUNNING enables automated relay; it does NOT prove an assignment/attempt is executing.
+ *   - prepared = durable intent committed (before external send); no provider evidence required.
+ *   - delivering = durable dispatch committed; does NOT mean external send is in progress.
+ *   - delivered = provider confirmed delivery with ObservableEvidence; does NOT prove worker
+ *     execution began (Attempt.running requires execution evidence separately).
+ *   - No local control-state value (operationalState, relayState, pair.status) may be read
+ *     as proof of an external fact unless backed by ObservableEvidence.
+ */
+
+/**
  * This module defines the domain entities for the RelayX orchestration platform.
  * RelayX coordinates two-sided AI collaboration (a Planner like ChatGPT desktop
  * and a Worker like OpenCode or VS Code) over real macOS developer workspaces.
@@ -79,6 +98,7 @@ import {
   DEFAULT_PAIR_OPERATIONAL_STATE,
   isPairOperationalState,
   PairRelayState,
+  PairSideRole,
   DEFAULT_PAIR_RELAY_STATE,
   isPairRelayState,
   AuthorityContext,
@@ -370,7 +390,7 @@ export class Pair {
   public assertProviderContactPermitted(): void {
     if (!this.isProviderContactPermitted()) {
       throw new RelayDomainError(
-        `Pair is IDLE: provider contact is not permitted. Persisted provider information is ` +
+        `Pair is IDLE: provider contact is not permitted. Load & Activate the Pair to verify its sessions and grant contact permission. Persisted provider information is ` +
           'last-known evidence only (DESIGN_FREEZE I-2, I-3).',
         'PAIR_OPERATIONAL_STATE_IDLE',
       );
@@ -735,6 +755,8 @@ export class Delivery {
     });
   }
 
+  /** Durable dispatch intent committed — does NOT mean external send is in
+   *  progress. See SEMANTIC_FREEZE (§Durable Intent). */
   public startDelivering(): void {
     if (this.status !== 'pending') {
       throw new InvalidStateTransitionError(this.status, 'delivering', 'Delivery');
@@ -746,6 +768,9 @@ export class Delivery {
   /**
    * Section 5: Delivery requires verified observable evidence
    */
+  /** Confirmed delivery only — NOT execution proof. The provider returned delivered
+   *  with ObservableEvidence. Worker execution began only if Attempt.status moves
+   *  to `running` (requires separate execution evidence). See SEMANTIC_FREEZE. */
   public confirmDelivered(evidence: ObservableEvidence): void {
     if (!evidence) {
       throw new MissingEvidenceError('confirmDelivered');
@@ -1023,7 +1048,10 @@ export class Attempt {
     );
   }
 
-  /** confirmDispatch() — external delivery acknowledged; physical execution begins. */
+  /** `startRunning()` — requires execution evidence distinct from Delivery confirmation.
+   *  `running` means the target side has begun execution based on provider observation
+   *  or exact-session reconciliation; `Delivery.confirmDelivered()` alone is insufficient.
+   *  See SEMANTIC_FREEZE (§Durable Intent, §Execution State). */
   public startRunning(): void {
     if (this.status !== 'prepared') {
       throw new InvalidStateTransitionError(this.status, 'running', 'Attempt');
@@ -1068,6 +1096,10 @@ export interface AssignmentProps {
   projectId: ProjectId;
   title: string;
   instruction: string;
+  /** The Pair side that must execute this Assignment. Legacy rows default to worker. */
+  targetSideRole?: PairSideRole;
+  /** Present when this Assignment was deterministically derived from a Handoff. */
+  sourceHandoffId?: HandoffId;
   status: AssignmentStatus;
   currentAttemptId?: AttemptId;
   activeDeliveryId?: DeliveryId;
@@ -1083,6 +1115,8 @@ export class Assignment {
   public readonly projectId: ProjectId;
   public title: string;
   public instruction: string;
+  public readonly targetSideRole: PairSideRole;
+  public readonly sourceHandoffId?: HandoffId;
   public status: AssignmentStatus;
   public currentAttemptId?: AttemptId;
   public activeDeliveryId?: DeliveryId;
@@ -1097,6 +1131,8 @@ export class Assignment {
     this.projectId = props.projectId;
     this.title = props.title;
     this.instruction = props.instruction;
+    this.targetSideRole = props.targetSideRole ?? 'worker';
+    this.sourceHandoffId = props.sourceHandoffId;
     this.status = props.status;
     this.currentAttemptId = props.currentAttemptId;
     this.activeDeliveryId = props.activeDeliveryId;
@@ -1111,6 +1147,8 @@ export class Assignment {
     projectId: ProjectId,
     title: string,
     instruction: string,
+    targetSideRole: PairSideRole = 'worker',
+    sourceHandoffId?: HandoffId,
   ): Assignment {
     const now = Date.now();
     return new Assignment({
@@ -1119,6 +1157,8 @@ export class Assignment {
       projectId,
       title,
       instruction,
+      targetSideRole,
+      sourceHandoffId,
       status: 'pending',
       createdAt: now,
       updatedAt: now,

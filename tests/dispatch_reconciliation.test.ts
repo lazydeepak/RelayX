@@ -215,7 +215,7 @@ describe('Dispatch-intent reconciliation', () => {
     return (await db.attempts.findByAssignmentId(assignmentId)).length;
   }
 
-  it('R1 — confirmed delivered resolves the intent and resumes the SAME attempt as running', async () => {
+  it('R1 — confirmed delivered resolves the intent but keeps the SAME attempt prepared', async () => {
     const { assignment, attemptId, deliveryId } = await strandDispatch('R1');
     provider.outcome = 'delivered';
 
@@ -230,9 +230,9 @@ describe('Dispatch-intent reconciliation', () => {
     assert.strictEqual(delivery?.status, 'delivered');
     assert.ok(delivery?.evidence, 'delivered must carry observable evidence');
 
-    // The SAME attempt resumes as running. No new attempt, no new assignment, no resend.
+    // The SAME attempt stays prepared. No execution evidence, new attempt, assignment, or resend.
     const attempt = await db.attempts.findById(attemptId);
-    assert.strictEqual(attempt?.status, 'running');
+    assert.strictEqual(attempt?.status, 'prepared');
     assert.strictEqual(await countAttempts(assignment.id), 1);
     assert.strictEqual(await countDeliveries(assignment.id), 1);
     assert.strictEqual(provider.sendCount, 0, 'reconciliation must never dispatch');
@@ -417,7 +417,7 @@ describe('Dispatch-intent reconciliation', () => {
     assert.strictEqual(delivery?.status, 'delivered', 'terminal state must not regress');
     assert.strictEqual(delivery?.evidence?.id, evidenceId, 'evidence must not be rewritten');
     assert.strictEqual(delivery?.deliveredAt, deliveredAt);
-    assert.strictEqual((await db.attempts.findById(attemptId))?.status, 'running');
+    assert.strictEqual((await db.attempts.findById(attemptId))?.status, 'prepared');
   });
 
   it('R8 — real restart: stranded intent is resolved through the actual startup path', async () => {
@@ -492,7 +492,7 @@ describe('Dispatch-intent reconciliation', () => {
         const delivery = await db2.deliveries.findById(strandedIds.deliveryId as never);
         assert.strictEqual(delivery?.status, 'delivered');
         const attempt = await db2.attempts.findById(strandedIds.attemptId as never);
-        assert.strictEqual(attempt?.status, 'running', 'the ORIGINAL attempt resumes as running');
+        assert.strictEqual(attempt?.status, 'prepared', 'delivery recovery does not invent execution evidence');
         assert.strictEqual((await db2.attempts.findByAssignmentId(strandedIds.assignmentId)).length, 1);
         assert.strictEqual((await db2.deliveries.findByAssignmentId(strandedIds.assignmentId)).length, 1);
         db2.close();

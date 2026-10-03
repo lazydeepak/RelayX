@@ -51,12 +51,25 @@ describe('Phase 5 & Phase 6 — ChatGPT Planner & VS Code Provider', () => {
   });
 
   it('reports truthful unavailable state for ChatGPT when not running or unsupported', async () => {
-    const provider = new ChatGPTProvider();
+    // Deterministic: the host may or may not have ChatGPT running, so the probe is
+    // stubbed rather than reading the real machine state. This still exercises the
+    // real "not found" reporting path (evidence source reconciliation_probe).
+    class NotRunningChatGPTProvider extends ChatGPTProvider {
+      protected override probeMacOSProcess(_name: string) {
+        return { running: false, details: { reason: 'Process not running (deterministic test)' } };
+      }
+      override async findAllRuntimes() {
+        return [];
+      }
+    }
+
+    const provider = new NotRunningChatGPTProvider();
     const result = await provider.findRuntime({ providerType: 'chatgpt' });
 
     assert.equal(result.found, false);
     assert.equal(result.status, 'unavailable');
     assert.ok(result.evidence);
+    assert.equal(result.evidence.source, 'reconciliation_probe');
   });
 
   it('VS Code provider accurately parses active editor file and workspace folder from window title', () => {

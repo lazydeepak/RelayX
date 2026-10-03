@@ -22,6 +22,7 @@ import {
   APP_INTEGRATION_TEMPLATES,
   AppIntegrationTemplate,
 } from '../relay/integrations/types.ts';
+import { parseChatGPTProjectDiscoveryScript } from '../relay/providers/chatgptProjectDiscovery.ts';
 
 interface AddAppModalProps {
   isOpen: boolean;
@@ -55,6 +56,7 @@ export const AddAppModal: React.FC<AddAppModalProps> = ({
   // Scripts
   const [launchScript, setLaunchScript] = useState('');
   const [createSessionScript, setCreateSessionScript] = useState('');
+  const [discoverProjectScript, setDiscoverProjectScript] = useState('');
   const [openSessionScript, setOpenSessionScript] = useState('');
   const [sendMessageScript, setSendMessageScript] = useState('');
   const [inspectSessionScript, setInspectSessionScript] = useState('');
@@ -81,6 +83,14 @@ export const AddAppModal: React.FC<AddAppModalProps> = ({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // The Project discovery script is validated live so an unusable sequence is
+  // rejected before it can be saved and silently break discovery.
+  const discoverProjectScriptError = (() => {
+    if (!discoverProjectScript.trim()) return null;
+    const parsed = parseChatGPTProjectDiscoveryScript(discoverProjectScript);
+    return parsed.ok ? null : parsed.error;
+  })();
+
   useEffect(() => {
     if (editingApp) {
       setName(editingApp.name || '');
@@ -98,6 +108,7 @@ export const AddAppModal: React.FC<AddAppModalProps> = ({
 
       setLaunchScript(editingApp.scripts?.launchScript || '');
       setCreateSessionScript(editingApp.scripts?.createSessionScript || '');
+      setDiscoverProjectScript(editingApp.scripts?.discoverProjectScript || '');
       setOpenSessionScript(editingApp.scripts?.openSessionScript || '');
       setSendMessageScript(editingApp.scripts?.sendMessageScript || '');
       setInspectSessionScript(editingApp.scripts?.inspectSessionScript || '');
@@ -135,6 +146,7 @@ export const AddAppModal: React.FC<AddAppModalProps> = ({
 
       setLaunchScript('');
       setCreateSessionScript('');
+      setDiscoverProjectScript('');
       setOpenSessionScript('');
       setSendMessageScript('');
       setInspectSessionScript('');
@@ -200,6 +212,10 @@ export const AddAppModal: React.FC<AddAppModalProps> = ({
       setError('Application Name is required');
       return;
     }
+    if (discoverProjectScriptError) {
+      setError(`Project Discovery Script is invalid: ${discoverProjectScriptError}`);
+      return;
+    }
 
     setSaving(true);
     setError(null);
@@ -220,6 +236,7 @@ export const AddAppModal: React.FC<AddAppModalProps> = ({
         scripts: {
           launchScript: launchScript.trim() || undefined,
           createSessionScript: createSessionScript.trim() || undefined,
+          discoverProjectScript: discoverProjectScript.trim() || undefined,
           openSessionScript: openSessionScript.trim() || undefined,
           sendMessageScript: sendMessageScript.trim() || undefined,
           inspectSessionScript: inspectSessionScript.trim() || undefined,
@@ -604,6 +621,27 @@ export const AddAppModal: React.FC<AddAppModalProps> = ({
                   onChange={(e) => setCreateSessionScript(e.target.value)}
                   className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100 font-mono text-xs focus:outline-none focus:border-blue-500"
                 />
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-slate-300 font-semibold">Project Discovery Script</label>
+                <p className="text-[10px] text-slate-500">
+                  GUI sequence used to resolve an external Project identity. ChatGPT: open
+                  <code> https://chatgpt.com/projects</code>, <code>input {'{{projectName}}'}</code>,{' '}
+                  <code>Enter</code>, <code>Tab x N</code>, <code>Enter</code>,{' '}
+                  <code>capture current URL</code>. The Tab count is UI-dependent — edit it here when the host
+                  app changes its Projects UI.
+                </p>
+                <textarea
+                  rows={7}
+                  placeholder={'open https://chatgpt.com/projects\ninput {{projectName}}\nEnter\nTab x 7\nEnter\ncapture current URL'}
+                  value={discoverProjectScript}
+                  onChange={(e) => setDiscoverProjectScript(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100 font-mono text-[11px] focus:outline-none focus:border-blue-500 whitespace-pre"
+                />
+                {discoverProjectScriptError && (
+                  <p className="text-[10px] text-red-400 font-mono">{discoverProjectScriptError}</p>
+                )}
               </div>
 
               <div className="space-y-1.5">

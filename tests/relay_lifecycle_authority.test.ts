@@ -143,6 +143,7 @@ describe('Relay Lifecycle Authority (STOPPED | RUNNING | PAUSED)', () => {
     const attempt = Attempt.create(assignment.id, 1, {
       sessionPairId: pair.id,
       workerSessionId: worker.id,
+      externalSessionId: worker.externalSessionId ?? null,
     });
     assignment.startAttempt(attempt);
     pair.assignWork(assignment.id);

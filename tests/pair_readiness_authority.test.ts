@@ -123,7 +123,7 @@ describe('Readiness is derived, not authoritative', () => {
       'the dispatch precondition block must not consult readiness at all',
     );
     assert.ok(
-      assertBody.includes('assertProviderContactPermitted'),
+      assertBody.includes('assertContactPermitted(context)'),
       'I-2 (operational_state === ACTIVE) IS the dispatch gate, and it must be present',
     );
     assert.ok(

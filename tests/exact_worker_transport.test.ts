@@ -116,6 +116,6 @@ describe('Phase E — Exact Worker Transport', () => {
     assert.strictEqual(provider.dispatchedRequests[0].text, 'Implement feature X');
     assert.strictEqual(delivery.status, 'delivered');
     assert.ok(delivery.evidence);
-    assert.strictEqual(attempt.status, 'running');
+    assert.strictEqual(attempt.status, 'prepared');
   });
 });

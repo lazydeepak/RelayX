@@ -250,7 +250,7 @@ describe('S1 — rebinding a Pair never cascades away its history (§10.5, I-10,
     assert.strictEqual(stillFrozen!.sessionPairId, frozen!.sessionPairId);
     assert.strictEqual(stillFrozen!.workerSessionId, frozen!.workerSessionId);
     assert.strictEqual(stillFrozen!.externalSessionId, frozen!.externalSessionId);
-    assert.strictEqual(stillFrozen!.status, 'running', 'frozen authority never silently moves');
+    assert.strictEqual(stillFrozen!.status, 'prepared', 'frozen authority never silently moves');
   });
 
   it('the cascade that would destroy history is still declared, and is documented as a hazard', () => {

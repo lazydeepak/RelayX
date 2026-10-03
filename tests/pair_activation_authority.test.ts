@@ -422,11 +422,12 @@ describe('S1B/S6 group B — a persisted IDLE Pair survives close/reopen costing
         'an explicit grant must survive restart — the operator authorized it once',
       );
 
+      await engine.startPair(reopened.id);
       opencode.reset();
       await engine.runSupervisionTick();
       assert.ok(
         opencode.total > 0,
-        'an ACTIVE Pair is PERMITTED contact, and supervision must actually be able to use it',
+        'an ACTIVE and RUNNING Pair permits automated supervision contact',
       );
       db.close();
     } finally {
@@ -439,7 +440,7 @@ describe('S1B/S6 group B — a persisted IDLE Pair survives close/reopen costing
  * Group C — explicit activation is the only grantor
  * ======================================================================== */
 describe('S1B/S6 group C — Load & Activate is the ONLY `IDLE -> ACTIVE` grantor', () => {
-  it('C1: IDLE -> loadAndActivate -> ACTIVE persisted -> supervision reaches the provider', async () => {
+  it('C1: IDLE -> loadAndActivate -> Start -> supervision reaches the provider', async () => {
     const db = new SqliteRelayDatabase(':memory:');
     const opencode = new VerifyingProvider('opencode');
     const engine = new RelayEngine(db);
@@ -468,7 +469,8 @@ describe('S1B/S6 group C — Load & Activate is the ONLY `IDLE -> ACTIVE` granto
       'activation must have actually asked the worker provider',
     );
 
-    // After activation, permitted supervision reaches the provider.
+    // Activation grants contact authority; Start separately enables automation.
+    await engine.startPair(pair.id);
     opencode.reset();
     await engine.runSupervisionTick();
     assert.ok(opencode.total > 0, `permitted supervision must reach the provider, saw: ${opencode.calls.join(', ')}`);

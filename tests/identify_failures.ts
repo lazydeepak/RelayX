@@ -32,7 +32,7 @@ async function main() {
         // console.log(`[PASS] ${path.basename(file)}`);
       }
     } catch (err) {
-      console.log(`[ERROR] ${path.basename(file)}: ${err.message}`);
+      console.log(`[ERROR] ${path.basename(file)}: ${(err as Error).message}`);
     }
   }
 }

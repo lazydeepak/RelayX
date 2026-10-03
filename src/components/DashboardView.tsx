@@ -29,6 +29,7 @@ interface DashboardViewProps {
   onTriggerSupervision: () => void;
   onOpenNewAssignment: () => void;
   onViewEvidence: (ev: ObservableEvidence) => void;
+  onNavigateAssignments?: () => void;
   isSupervising: boolean;
 }
 
@@ -38,6 +39,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onTriggerSupervision,
   onOpenNewAssignment,
   onViewEvidence,
+  onNavigateAssignments,
   isSupervising,
 }) => {
   const isEmptyDatabase = metrics.totalProjects === 0 && metrics.totalPairs === 0;
@@ -129,14 +131,26 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </p>
         </div>
 
-        <div className="p-4 rounded-xl bg-slate-900/60 backdrop-blur-md border border-slate-800/80 shadow-lg">
+        <button
+          onClick={onNavigateAssignments}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onNavigateAssignments?.();
+            }
+          }}
+          className="p-4 rounded-xl bg-slate-900/60 backdrop-blur-md border border-slate-800/80 shadow-lg text-left cursor-pointer hover:border-blue-500/30 hover:bg-slate-900/80 focus:outline-none focus:ring-2 focus:ring-blue-500/40 transition-colors group"
+          aria-label={`Assignments Running: ${metrics.activeAssignments}. Press Enter to open assignments view.`}
+          role="button"
+          tabIndex={0}
+        >
           <div className="flex items-center justify-between text-slate-400 mb-2">
             <span className="text-xs font-medium uppercase tracking-wider">Assignments Running</span>
-            <ListTodo className="w-4 h-4 text-blue-400" />
+            <ListTodo className="w-4 h-4 text-blue-400 group-hover:scale-110 transition-transform" />
           </div>
           <div className="text-2xl font-bold text-slate-100">{metrics.activeAssignments}</div>
           <p className="text-[11px] text-slate-400 mt-1">Under active attempt execution</p>
-        </div>
+        </button>
 
         <div className="p-4 rounded-xl bg-slate-900/60 backdrop-blur-md border border-slate-800/80 shadow-lg">
           <div className="flex items-center justify-between text-slate-400 mb-2">

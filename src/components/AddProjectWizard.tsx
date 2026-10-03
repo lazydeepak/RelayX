@@ -46,6 +46,9 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
   const [opencode, setOpencode] = useState<OpenCodeDiscoveryState>(OPENCODE_IDLE_STATE);
 
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  // Raw text the operator typed/pasted. Kept separate from `planner.url`, which
+  // holds the validated canonical ChatGPT Project binding.
+  const [plannerUrlInput, setPlannerUrlInput] = useState('');
 
   useEffect(() => {
     if (isOpen) {
@@ -57,43 +60,28 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
       setGitRoot(undefined);
       setPlanner(PLANNER_IDLE_STATE);
       setOpencode(OPENCODE_IDLE_STATE);
+      setPlannerUrlInput('');
       setShowDiagnostics(false);
     }
   }, [isOpen]);
 
   if (!isOpen) return null;
 
-  const parseChatGPTUrl = (url: string): { projectUrl?: string; sessionId?: string; name?: string } => {
-    try {
-      const u = new URL(url);
-      const path = u.pathname;
-      // Extract project/session identifiers from common ChatGPT URL patterns
-      const projectIdMatch = url.match(/project[s\/\-]([a-zA-Z0-9\-]+)/i);
-      const sessionIdMatch = url.match(/session[s\/\-]([a-zA-Z0-9\-]+)/i);
-      const idMatch = url.match(/\/([a-f0-9]{24,})/);
-      return {
-        projectUrl: url,
-        sessionId: sessionIdMatch?.[1] || idMatch?.[1] || undefined,
-        name: path.split('/').pop() || undefined,
-      };
-    } catch {
-      return { projectUrl: url, sessionId: undefined };
-    }
-  };
-
+  /**
+   * Manual fallback for the Planner binding. Runs through the SAME shared ChatGPT
+   * Project URL parser as automatic GUI discovery, so a pasted URL and an
+   * automated run produce the identical canonical Project binding — and a URL
+   * with no `/g/<g-p-…>` Project identity (e.g. a bare `/c/<conversationId>`) is
+   * rejected rather than bound.
+   */
   const handleParsePlannerUrl = () => {
-    const current = planner.url;
+    const current = plannerUrlInput.trim() || planner.url;
     if (!current) {
       setError('Enter a URL or project/session ID before parsing');
       return;
     }
-    try {
-      const parsed = parseChatGPTUrl(current);
-      setPlanner((prev) => applyPlannerUrl(prev, parsed.projectUrl || current));
-      setError(null);
-    } catch {
-      setError('Failed to parse URL');
-    }
+    setPlanner((prev) => applyPlannerUrl(prev, current));
+    setError(null);
   };
 
   const handlePickFolder = async () => {
@@ -319,7 +307,12 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
                 {planner.status === 'discovered' && planner.evidence && (
                   <div className="p-2 rounded bg-emerald-950/30 border border-emerald-800/40 text-[10px] font-mono text-emerald-300 space-y-0.5">
                     <p className="truncate">✔ Validated URL: <span className="text-emerald-200">{planner.url}</span></p>
-                    {planner.evidence.projectName && (
+                    {planner.evidence?.projectId && (
+                      <p className="text-emerald-300/70">
+                        project id: <span className="text-emerald-200">{planner.evidence.projectId}</span>
+                      </p>
+                    )}
+                    {planner.evidence?.projectName && (
                       <p className="text-emerald-300/70">project: {planner.evidence.projectName}</p>
                     )}
                   </div>
@@ -337,18 +330,16 @@ export const AddProjectWizard: React.FC<AddProjectWizardProps> = ({
                 <div className="flex gap-1.5">
                   <input
                     type="text"
-                    value={planner.url || ''}
-                    onChange={(e) =>
-                      setPlanner((prev) => ({ ...prev, url: e.target.value || undefined, error: undefined }))
-                    }
-                    placeholder="Paste ChatGPT project URL or enter project/session ID..."
+                    value={plannerUrlInput}
+                    onChange={(e) => setPlannerUrlInput(e.target.value)}
+                    placeholder="Paste ChatGPT project URL (https://chatgpt.com/g/g-p-...)..."
                     className="flex-1 min-w-0 text-[11px] px-2 py-1 rounded bg-slate-950 border border-slate-700 text-slate-200 focus:outline-none focus:border-blue-500 font-mono truncate"
                     disabled={planner.status === 'discovering'}
                   />
                   <button
                     type="button"
                     onClick={handleParsePlannerUrl}
-                    disabled={planner.status === 'discovering' || !planner.url}
+                    disabled={planner.status === 'discovering' || !(plannerUrlInput || planner.url)}
                     className="text-[10px] px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-200 font-medium transition-colors shrink-0"
                   >
                     Apply URL

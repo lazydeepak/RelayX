@@ -101,7 +101,7 @@ describe('Core Slice 1 — Frozen Authority + Dispatch Boundary', () => {
     // `worker` is a stale in-memory handle: bindPair re-read and re-identified the runtime
     // in the database. The frozen authority must equal the PERSISTED dispatch-time value.
     const persistedWorker = await db.runtimes.findById(worker.id);
-    assert.strictEqual(attempt.status, 'running');
+    assert.strictEqual(attempt.status, 'prepared');
     assert.strictEqual(attempt.sessionPairId, pair.id);
     assert.strictEqual(attempt.workerSessionId, worker.id);
     assert.strictEqual(attempt.externalSessionId, persistedWorker?.externalSessionId ?? null);
@@ -128,10 +128,9 @@ describe('Core Slice 1 — Frozen Authority + Dispatch Boundary', () => {
     // To observe prepared state before external confirmation, inspect after create but before provider.
     // Since dispatch is atomic in observable outcome for delivered, we verify via direct creation.
     const { attempt } = await engine.dispatchAssignment(assignment.id);
-    // With delivered mock, it becomes running — but the initial creation was prepared.
-    // We verify the authority freeze exists and initial status path is valid.
+    // A delivered mock confirms transport only; execution remains unobserved.
     assert.ok(attempt.sessionPairId, 'Authority must be frozen');
-    assert.strictEqual(attempt.status, 'running'); // Mock delivers immediately; physical execution authorized
+    assert.strictEqual(attempt.status, 'prepared'); // Delivery is confirmed; execution is not yet observed.
     assert.strictEqual(attempt.workerSessionId, worker.id);
   });
 
@@ -151,11 +150,11 @@ describe('Core Slice 1 — Frozen Authority + Dispatch Boundary', () => {
     assert.ok(result.attempt, 'Attempt must exist after durable phase');
     assert.ok(result.delivery, 'Delivery intent must exist');
     assert.strictEqual(result.delivery.status, 'delivered');
-    assert.strictEqual(result.attempt.status, 'running');
+    assert.strictEqual(result.attempt.status, 'prepared');
     // No exception thrown; external call completed after durable commit (visible by success)
   });
 
-  it('T4 — Confirmed delivered transitions execution', async () => {
+  it('T4 — Confirmed delivery does not transition execution', async () => {
     const project = await engine.createProject('T4 Project');
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker');
@@ -163,7 +162,7 @@ describe('Core Slice 1 — Frozen Authority + Dispatch Boundary', () => {
     const assignment = await engine.createAssignment(pair.id, 'A', 'Do X');
 
     const { attempt, delivery } = await engine.dispatchAssignment(assignment.id);
-    assert.strictEqual(attempt.status, 'running');
+    assert.strictEqual(attempt.status, 'prepared');
     assert.strictEqual(delivery.status, 'delivered');
     assert.ok(delivery.evidence);
   });

@@ -49,7 +49,7 @@ describe('Electron IPC & RelayApiService Integration Tests', () => {
     const vscode = new VSCodeProvider();
 
     assert.equal(chatgpt.integrationStatus, 'partial');
-    assert.equal(opencode.integrationStatus, 'unsupported');
+    assert.equal(opencode.integrationStatus, 'partial');
     assert.equal(vscode.integrationStatus, 'partial');
 
     engine.registerProvider(chatgpt);
@@ -62,7 +62,7 @@ describe('Electron IPC & RelayApiService Integration Tests', () => {
     assert.equal(r1.integrationStatus, 'partial');
 
     const r2 = await api.registerRuntimeSession('opencode', 'OpenCode CLI');
-    assert.equal(r2.integrationStatus, 'unsupported');
+    assert.equal(r2.integrationStatus, 'partial');
 
     const list = await api.listRuntimeSessions();
     assert.equal(list.length, 2);
@@ -166,7 +166,7 @@ describe('Electron IPC & RelayApiService Integration Tests', () => {
     assert.ok(channels.includes('relay:clear-auxiliary-log'));
   });
 
-  test('relayBridge exposes all observability methods in fallback environment', async () => {
+  test('relayBridge exposes browser-safe observability methods without a backend', async () => {
     const { relayBridge } = await import('../src/services/relayBridge.ts');
     assert.ok(typeof relayBridge.queryEvents === 'function');
     assert.ok(typeof relayBridge.listActivities === 'function');

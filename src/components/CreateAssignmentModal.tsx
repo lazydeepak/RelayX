@@ -1,12 +1,28 @@
-import React, { useState } from 'react';
-import { X, Send, ListTodo } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { X, Send, ListTodo, FolderPlus, GitMerge, AlertTriangle, ShieldAlert } from 'lucide-react';
 import { UIPair } from '../types/ui.ts';
+import { resolveCreateAssignmentEligibility } from './pairDispatchEligibility.ts';
+import { shouldCloseCreateAssignmentModal } from './createAssignmentOutcome.ts';
 
 interface CreateAssignmentModalProps {
   pairs: UIPair[];
   isOpen: boolean;
   onClose: () => void;
-  onCreate: (pairId: string, title: string, instruction: string) => void;
+  /**
+   * Returns the durable creation outcome. The modal closes ONLY when
+   * `created === true`; a pre-claim refusal keeps it open with the draft intact.
+   */
+  onCreate: (pairId: string, title: string, instruction: string) => Promise<{ created: boolean }>;
+  /** Open the existing project creation flow (AddProjectWizard). */
+  onCreateProject: () => void;
+  /** Open the existing pair creation flow (PairModal). Receives the project context of the current selection, when available. */
+  onCreatePair: (projectId?: string) => void;
+  /** Pair id to auto-select once it appears in `pairs` (e.g. after creation elsewhere). */
+  pendingSelectedPairId?: string | null;
+  /** Clear the pending selection after it has been applied. */
+  onPendingSelectedPairIdConsumed?: () => void;
+  /** Route the operator to the existing Attention & Recovery surface. */
+  onOpenAttentionRecovery?: () => void;
 }
 
 export const CreateAssignmentModal: React.FC<CreateAssignmentModalProps> = ({
@@ -14,20 +30,60 @@ export const CreateAssignmentModal: React.FC<CreateAssignmentModalProps> = ({
   isOpen,
   onClose,
   onCreate,
+  onCreateProject,
+  onCreatePair,
+  pendingSelectedPairId,
+  onPendingSelectedPairIdConsumed,
+  onOpenAttentionRecovery,
 }) => {
   const [selectedPairId, setSelectedPairId] = useState<string>(pairs[0]?.id || '');
   const [title, setTitle] = useState<string>('');
   const [instruction, setInstruction] = useState<string>('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Apply a pending pair selection (e.g. a pair just created via the Create Pair
+  // shortcut) once the refreshed pair list contains it.
+  useEffect(() => {
+    if (!pendingSelectedPairId) return;
+    if (pairs.some((p) => p.id === pendingSelectedPairId)) {
+      setSelectedPairId(pendingSelectedPairId);
+      onPendingSelectedPairIdConsumed?.();
+    }
+  }, [pendingSelectedPairId, pairs, onPendingSelectedPairIdConsumed]);
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  // Authoritative projection: a Pair owns at most one unresolved active Assignment.
+  const selectedPair = pairs.find((p) => p.id === selectedPairId) ?? pairs[0];
+  const createEligibility = resolveCreateAssignmentEligibility(selectedPair);
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    // Prevent a second submit while the request is in flight.
+    if (isSubmitting) return;
+    // The application command re-checks this before anything is durable; this is
+    // convenience, never authority.
+    if (!createEligibility.eligible) return;
     if (!title.trim() || !instruction.trim()) return;
-    onCreate(selectedPairId || pairs[0]?.id, title, instruction);
-    setTitle('');
-    setInstruction('');
-    onClose();
+
+    setIsSubmitting(true);
+    try {
+      const result = await onCreate(selectedPairId || pairs[0]?.id, title, instruction);
+      if (shouldCloseCreateAssignmentModal(result)) {
+        // A durable Assignment exists (even if its dispatch later failed or is
+        // ambiguous). The draft is no longer a draft — close and let the user
+        // work from the Assignment/Pair.
+        setTitle('');
+        setInstruction('');
+        onClose();
+      }
+      // created: false → keep the modal open with the draft preserved for retry.
+    } catch {
+      // Unexpected error before a structured result: creation is unproven, so
+      // keep the modal open with the draft intact.
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -51,7 +107,7 @@ export const CreateAssignmentModal: React.FC<CreateAssignmentModalProps> = ({
 
         <form onSubmit={handleSubmit} className="p-5 space-y-4 text-xs">
           <div>
-            <label className="block text-slate-300 font-medium mb-1">Target Pair</label>
+            <label className="block text-slate-300 font-medium mb-1">Pair Name (Project)</label>
             <select
               value={selectedPairId}
               onChange={(e) => setSelectedPairId(e.target.value)}
@@ -59,10 +115,58 @@ export const CreateAssignmentModal: React.FC<CreateAssignmentModalProps> = ({
             >
               {pairs.map((pair) => (
                 <option key={pair.id} value={pair.id}>
-                  {pair.name} ({pair.workerName})
+                  {pair.name} ({pair.projectName})
                 </option>
               ))}
             </select>
+            <div className="mt-1.5 flex items-center gap-3">
+              <button
+                type="button"
+                onClick={onCreateProject}
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-blue-400 hover:text-blue-300 transition-colors"
+              >
+                <FolderPlus className="w-3 h-3" />
+                Create Project
+              </button>
+              <button
+                type="button"
+                onClick={() => onCreatePair(pairs.find((p) => p.id === selectedPairId)?.projectId)}
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-blue-400 hover:text-blue-300 transition-colors"
+              >
+                <GitMerge className="w-3 h-3" />
+                Create Pair
+              </button>
+            </div>
+
+            {!createEligibility.eligible && createEligibility.blockedByActiveAssignment && (
+              <div className="mt-2 p-3 rounded-lg bg-amber-950/40 border border-amber-500/40 text-amber-200 space-y-2">
+                <p className="flex items-start gap-2">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-300" />
+                  <span>{createEligibility.reason}</span>
+                </p>
+                {createEligibility.activeAssignmentId && (
+                  <p className="text-[11px] text-amber-300/80 pl-5">
+                    Active assignment:{' '}
+                    <span className="font-medium text-amber-100">
+                      {createEligibility.activeAssignmentTitle || '(untitled)'}
+                    </span>{' '}
+                    <span className="font-mono text-amber-300/70">
+                      {createEligibility.activeAssignmentId.slice(0, 12)}
+                    </span>
+                  </p>
+                )}
+                {onOpenAttentionRecovery && (
+                  <button
+                    type="button"
+                    onClick={onOpenAttentionRecovery}
+                    className="ml-5 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-semibold transition-colors"
+                  >
+                    <ShieldAlert className="w-3 h-3" />
+                    Open Attention &amp; Recovery
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           <div>
@@ -99,10 +203,12 @@ export const CreateAssignmentModal: React.FC<CreateAssignmentModalProps> = ({
             </button>
             <button
               type="submit"
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium transition-colors"
+              disabled={!createEligibility.eligible || isSubmitting}
+              title={createEligibility.reason}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium transition-colors"
             >
               <Send className="w-3.5 h-3.5" />
-              <span>Create & Dispatch</span>
+              <span>{isSubmitting ? 'Creating…' : 'Create & Dispatch'}</span>
             </button>
           </div>
         </form>

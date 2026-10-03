@@ -26,7 +26,18 @@ describe('Phase 2 — Real OpenCode Discovery', () => {
   });
 
   it('reports truthful unavailable state on non-macOS or when process is not running', async () => {
-    const provider = new OpenCodeProvider();
+    // Deterministic: stub the host probe instead of depending on whether OpenCode
+    // happens to be running. This still exercises the real "not found" path.
+    class NotRunningOpenCodeProvider extends OpenCodeProvider {
+      protected override probeMacOSProcess(_name: string) {
+        return { running: false, details: { reason: 'Process not running (deterministic test)' } };
+      }
+      override async findAllRuntimes() {
+        return [];
+      }
+    }
+
+    const provider = new NotRunningOpenCodeProvider();
     const result = await provider.findRuntime({ providerType: 'opencode' });
 
     assert.equal(result.found, false);

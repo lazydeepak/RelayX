@@ -129,7 +129,7 @@ describe('Relay Authority Realignment Hard Regression Proofs', () => {
     const attempt = Attempt.create(assignment.id, 1, {
       sessionPairId: pair.id,
       workerSessionId: worker.id,
-      externalSessionId: worker.externalSessionId,
+      externalSessionId: worker.externalSessionId ?? null,
     });
     assignment.startAttempt(attempt);
     updatedPair?.assignWork(assignment.id);
@@ -161,7 +161,7 @@ describe('Relay Authority Realignment Hard Regression Proofs', () => {
     const attempt = Attempt.create(assignment.id, 1, {
       sessionPairId: pair.id,
       workerSessionId: worker.id,
-      externalSessionId: worker.externalSessionId,
+      externalSessionId: worker.externalSessionId ?? null,
     });
     assignment.startAttempt(attempt);
     updatedPair?.assignWork(assignment.id);
@@ -194,7 +194,7 @@ describe('Relay Authority Realignment Hard Regression Proofs', () => {
     const attempt = Attempt.create(assignment.id, 1, {
       sessionPairId: pair.id,
       workerSessionId: worker.id,
-      externalSessionId: worker.externalSessionId,
+      externalSessionId: worker.externalSessionId ?? null,
     });
     assignment.startAttempt(attempt);
     updatedPair?.assignWork(assignment.id);

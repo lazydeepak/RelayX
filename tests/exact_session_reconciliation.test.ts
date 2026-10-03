@@ -208,6 +208,24 @@ describe('Exact-session reconciliation — the exit code is not the verdict', ()
     assert.strictEqual(result.boundaryEstablished, false);
   });
 
+  it('an EMPTY captured boundary is authoritative for the first turn in a fresh session', () => {
+    const result = reconcileTransportOutcome({
+      expectedText: INSTRUCTION,
+      watermark: boundaryOf(),
+      messages: [
+        userTurn('msg_first_user', INSTRUCTION, 2),
+        assistantOk('msg_first_answer', 'Fresh-session delivery confirmed.', 3),
+      ],
+      transcriptReadable: true,
+      transportExitCode: 0,
+    });
+
+    assert.strictEqual(result.boundaryEstablished, true);
+    assert.strictEqual(result.classification, 'delivered');
+    assert.strictEqual(result.workerExecution, 'completed');
+    assert.strictEqual(result.matchingUserTurn?.messageId, 'msg_first_user');
+  });
+
   it('a matching turn that PRE-DATES the boundary is not delivery of THIS Attempt', () => {
     // The same instruction was sent earlier by an earlier Attempt. Fingerprint matching
     // alone would call this delivered; the boundary is what distinguishes the two.
@@ -250,9 +268,9 @@ describe('Exact-session reconciliation — the exit code is not the verdict', ()
     assert.strictEqual(result.workerExecutionEvidence.modelId, 'space-bunny-free');
   });
 
-  it('a delivered instruction with no assistant turn at all is in_progress, not completed', () => {
-    // Text presence must never decide execution state. An empty assistant turn is not a
-    // completed response; it is an unfinished one.
+  it('an unfinished assistant turn is execution evidence but is not completion', () => {
+    // Text presence must never decide execution state. An empty assistant turn proves the
+    // provider began execution, but without a terminator it remains in progress.
     const result = reconcileTransportOutcome({
       expectedText: INSTRUCTION,
       watermark: boundaryOf('msg_pre'),
@@ -262,6 +280,18 @@ describe('Exact-session reconciliation — the exit code is not the verdict', ()
 
     assert.strictEqual(result.classification, 'delivered');
     assert.strictEqual(result.workerExecution, 'in_progress');
+  });
+
+  it('a delivered user turn with no assistant turn remains not_started', () => {
+    const result = reconcileTransportOutcome({
+      expectedText: INSTRUCTION,
+      watermark: boundaryOf('msg_pre'),
+      messages: [userTurn('msg_u1', INSTRUCTION, 10)],
+      transcriptReadable: true,
+    });
+
+    assert.strictEqual(result.classification, 'delivered');
+    assert.strictEqual(result.workerExecution, 'not_started');
   });
 
   it('an idle run-outcome marker of failed corroborates the terminal error', () => {

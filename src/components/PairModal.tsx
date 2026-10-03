@@ -38,7 +38,7 @@ interface PairModalProps {
   runtimes: UIRuntimeSession[];
   initialProjectId?: string;
   onClose: () => void;
-  onSuccess: (message: string) => void;
+  onSuccess: (message: string, createdPairId?: string) => void;
   onRefresh?: () => void;
 }
 
@@ -101,6 +101,8 @@ export const PairModal: React.FC<PairModalProps> = ({
   const [isAddProjectWizardOpen, setIsAddProjectWizardOpen] = useState(false);
   const [defaultPlannerApp, setDefaultPlannerApp] = useState<string>('ChatGPT');
   const [defaultWorkerApp, setDefaultWorkerApp] = useState<string>('OpenCode');
+  const [selectedWorkerModel, setSelectedWorkerModel] = useState<string>('Inkling Small (free)');
+  const [applyWorkerStatus, setApplyWorkerStatus] = useState<string | null>(null);
   const [integrations, setIntegrations] = useState<any[]>([]);
 
   useEffect(() => {
@@ -376,14 +378,14 @@ export const PairModal: React.FC<PairModalProps> = ({
       }
 
       if (mode === 'create') {
-        await relayBridge.createPair(
+        const created = await relayBridge.createPair(
           projectId,
           name.trim(),
           finalPlannerId,
           finalWorkerId,
           finalConvUrl || undefined,
         );
-        onSuccess(`Pair "${name.trim()}" created successfully`);
+        onSuccess(`Pair "${name.trim()}" created successfully`, created?.id);
       } else if (mode === 'edit' && pair) {
         await relayBridge.updatePair(pair.id, {
           name: name.trim(),

@@ -17,6 +17,12 @@
  */
 
 import type { IRelayApi } from '../../types/relayApi.ts';
+import {
+  isChatGPTProjectLessUrl,
+  parseChatGPTProjectUrl,
+  type ChatGPTProjectUrlIdentity,
+} from '../providers/chatgptProjectUrl.ts';
+import { chatgptProjectDiscoveryError } from '../providers/chatgptProjectDiscovery.ts';
 
 /** Independent lifecycle for a single provider's discovery stage. */
 export type DiscoveryStageStatus = 'idle' | 'discovering' | 'discovered' | 'failed';
@@ -24,6 +30,10 @@ export type DiscoveryStageStatus = 'idle' | 'discovering' | 'discovered' | 'fail
 export interface PlannerDiscoveryEvidence {
   finalUrl?: string;
   projectName?: string;
+  /** The stable external ChatGPT Project identity (`/g/<g-p-…>`). */
+  projectId?: string;
+  /** The canonical ChatGPT Project URL persisted as the project binding. */
+  canonicalProjectUrl?: string;
   recordedAt: number;
 }
 
@@ -37,6 +47,38 @@ export interface PlannerDiscoveryState {
   diagnostics?: unknown;
   /** Truthful evidence recorded for the confirmed binding. */
   evidence?: PlannerDiscoveryEvidence;
+}
+
+/**
+ * Resolves ANY ChatGPT Project URL — automatic GUI discovery output or manually
+ * pasted — into the one canonical Project binding.
+ *
+ * This is the shared gate that makes the manual and automatic paths equivalent:
+ * both call the same parser, both get the same Project identity, and both reject
+ * a URL that carries no Project identity (notably a standalone
+ * `/c/<conversationId>` conversation URL, which is SESSION identity).
+ */
+export function resolvePlannerProjectBinding(
+  url: string | null | undefined,
+): { ok: true; identity: ChatGPTProjectUrlIdentity } | { ok: false; error: string } {
+  const trimmed = (url || '').trim();
+  if (!trimmed) {
+    return {
+      ok: false,
+      error: chatgptProjectDiscoveryError('INVALID_PROJECT_URL', 'no URL was provided'),
+    };
+  }
+  const identity = parseChatGPTProjectUrl(trimmed);
+  if (!identity) {
+    return {
+      ok: false,
+      error: chatgptProjectDiscoveryError(
+        isChatGPTProjectLessUrl(trimmed) ? 'PROJECT_ID_PARSE_FAILED' : 'INVALID_PROJECT_URL',
+        trimmed,
+      ),
+    };
+  }
+  return { ok: true, identity };
 }
 
 export interface OpenCodeWorkerCandidate {
@@ -136,18 +178,33 @@ export function reducePlannerDiscovery(
   prev: PlannerDiscoveryState,
   result: PlannerDiscoveryResult,
 ): PlannerDiscoveryState {
-  const finalUrl = typeof result.finalUrl === 'string' ? result.finalUrl.trim() : '';
+  const observedUrl = typeof result.finalUrl === 'string' ? result.finalUrl.trim() : '';
 
-  if (result.success && finalUrl) {
+  if (result.success && observedUrl) {
+    // The automatic GUI path is validated through the SAME parser as the manual
+    // path, so a "success" that carries no Project identity cannot be confirmed.
+    const binding = resolvePlannerProjectBinding(observedUrl);
+    if (!binding.ok) {
+      return {
+        ...prev,
+        status: 'failed',
+        url: undefined,
+        multiple: undefined,
+        error: binding.error,
+        diagnostics: result.diagnostics,
+      };
+    }
     return {
       ...prev,
       status: 'discovered',
-      url: finalUrl,
+      url: binding.identity.canonicalProjectUrl,
       multiple: undefined,
       error: undefined,
       diagnostics: result.diagnostics,
       evidence: {
-        finalUrl,
+        finalUrl: observedUrl,
+        canonicalProjectUrl: binding.identity.canonicalProjectUrl,
+        projectId: binding.identity.projectId,
         projectName: result.projectName,
         recordedAt: Date.now(),
       },
@@ -267,14 +324,26 @@ export function selectPlannerCandidate(
   prev: PlannerDiscoveryState,
   candidate: { name: string; url: string },
 ): PlannerDiscoveryState {
+  const binding = resolvePlannerProjectBinding(candidate.url);
+  if (!binding.ok) {
+    return {
+      ...prev,
+      status: 'failed',
+      url: undefined,
+      multiple: prev.multiple,
+      error: binding.error,
+    };
+  }
   return {
     ...prev,
     status: 'discovered',
-    url: candidate.url,
+    url: binding.identity.canonicalProjectUrl,
     multiple: undefined,
     error: undefined,
     evidence: {
       finalUrl: candidate.url,
+      canonicalProjectUrl: binding.identity.canonicalProjectUrl,
+      projectId: binding.identity.projectId,
       projectName: candidate.name,
       recordedAt: Date.now(),
     },
@@ -301,7 +370,14 @@ export function selectOpenCodeWorker(
   };
 }
 
-/** Manually confirm a ChatGPT project URL entered by the user. */
+/**
+ * Manually confirm a ChatGPT project URL entered by the user.
+ *
+ * Runs through the same parser as automatic discovery, so a manual paste and an
+ * automated run produce the identical canonical Project binding — and an
+ * unbindable URL (no `/g/<g-p-…>`, e.g. a bare `/c/<conversationId>`) is
+ * rejected instead of being bound.
+ */
 export function applyPlannerUrl(
   prev: PlannerDiscoveryState,
   url: string,
@@ -315,13 +391,27 @@ export function applyPlannerUrl(
       error: 'Enter a ChatGPT project URL or session identifier.',
     };
   }
+  const binding = resolvePlannerProjectBinding(trimmed);
+  if (!binding.ok) {
+    return {
+      ...prev,
+      status: 'failed',
+      url: undefined,
+      error: binding.error,
+    };
+  }
   return {
     ...prev,
     status: 'discovered',
-    url: trimmed,
+    url: binding.identity.canonicalProjectUrl,
     multiple: undefined,
     error: undefined,
-    evidence: { finalUrl: trimmed, recordedAt: Date.now() },
+    evidence: {
+      finalUrl: trimmed,
+      canonicalProjectUrl: binding.identity.canonicalProjectUrl,
+      projectId: binding.identity.projectId,
+      recordedAt: Date.now(),
+    },
   };
 }
 
