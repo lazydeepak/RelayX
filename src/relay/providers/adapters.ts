@@ -3026,11 +3026,8 @@ export async function settleChatGPTConversationIdentity(
   };
 }
 
-/**
- * OpenCode macOS Application & Session Provider.
- * Status: Read-only process & window discovery via macOS System Events,
- * with graceful fallback and truthful missing-permission reporting.
- */
+
+
 export class OpenCodeProvider extends BaseMacOSProvider {
   readonly providerType: ProviderType = 'opencode';
   readonly defaultBundleId = 'dev.opencode.desktop';
