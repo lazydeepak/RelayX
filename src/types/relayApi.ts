@@ -360,17 +360,6 @@ export interface IRelayApi {
 
   openRuntimeSession(sessionId: string): Promise<OpenRuntimeSessionResult>;
   /**
-   * Opens the project's ChatGPT PROJECT URL (`/g/<g-p-…>/project`) in the browser.
-   *
-   * This is PROJECT identity, distinct from `openRuntimeSession`, which opens the
-   * exact conversation (`/c/<id>`) of a bound runtime. Both open in the browser and
-   * never activate the ChatGPT desktop app.
-   *
-   * Required, so a caller can rely on it existing rather than feature-detecting.
-   * The inert browser-preview implementation reports an explicit unsupported error.
-   */
-  openPlannerProject(projectId: string): Promise<OpenRuntimeSessionResult>;
-  /**
    * S6 CLOSURE — `error` is populated ONLY when the attempt was refused by the I-2
    * runtime->Pair governance guard (the owning Pair is IDLE, or its ownership is
    * ambiguous). It is absent for a genuine provider/transport failure, so "not

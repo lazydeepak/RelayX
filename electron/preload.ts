@@ -75,8 +75,6 @@ const relayApi: IRelayApi = {
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.ACTIVATE_RUNTIME, sessionId),
   openRuntimeSession: (sessionId: string) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.OPEN_RUNTIME_SESSION, sessionId),
-  openPlannerProject: (projectId: string) =>
-    ipcRenderer.invoke(RELAY_IPC_CHANNELS.OPEN_PLANNER_PROJECT, projectId),
   recoverRuntime: (sessionId: string) =>
     ipcRenderer.invoke(RELAY_IPC_CHANNELS.RECOVER_RUNTIME, sessionId),
   detachRuntime: (sessionId: string) =>

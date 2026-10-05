@@ -545,25 +545,14 @@ export const PairView: React.FC<PairViewProps> = ({
                               {pair.plannerStatus || 'unassigned'}
                             </span>
                             {/*
-                              "Open Project" — the primary planner Open. Opens the
-                              project's ChatGPT PROJECT page (`/g/<g-p-…>/project`) in
-                              the browser via RelayX's own opener. This MUST NOT be an
-                              <a target="_blank">: main.ts intercepts window.open with
-                              shell.openExternal(), which hands the URL to the OS. The
-                              app-handler also verifies the read-back URL and does not
-                              activate the ChatGPT desktop app.
+                              The planner Open. It targets the EXACT recorded
+                              conversation (`/c/<id>`) for this planner runtime —
+                              NOT the project's `/g/<g-p-…>/project` page. The project
+                              URL is a different identity and is shown as read-only
+                              text on its own row below; opening it here would send
+                              the operator to the project main page instead of the
+                              session they attached.
                             */}
-                            {plannerProjectUrl && onOpenPlannerProject && (
-                              <button
-                                type="button"
-                                onClick={() => onOpenPlannerProject(pair.projectId)}
-                                className="px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-semibold flex items-center gap-1 transition-colors"
-                                title={`Open the ChatGPT project page in your browser: ${plannerProjectUrl}`}
-                              >
-                                <ExternalLink className="w-3 h-3" />
-                                <span>Open Project</span>
-                              </button>
-                            )}
                             {pair.plannerSessionId && (
                               plannerUrl ? (
                                 <button

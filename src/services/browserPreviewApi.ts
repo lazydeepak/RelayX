@@ -64,7 +64,7 @@ export const browserPreviewApi = new Proxy({} as IRelayApi, {
       if (method === 'activateRuntime') return false;
       // Never claim a browser open succeeded here: this surface cannot open a tab,
       // so an explicit failure is the only honest answer.
-      if (method === 'openRuntimeSession' || method === 'openPlannerProject') {
+      if (method === 'openRuntimeSession') {
         return {
           success: false,
           error:

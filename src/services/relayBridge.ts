@@ -280,15 +280,6 @@ export const relayBridge: IRelayApi = {
     return getLocalFallbackService().openRuntimeSession(sessionId);
   },
 
-  openPlannerProject: async (projectId: string): Promise<OpenRuntimeSessionResult> => {
-    if (typeof window !== 'undefined' && (window.relayApi as any)?.openPlannerProject) {
-      return (window.relayApi as any).openPlannerProject(projectId);
-    }
-    const local: any = getLocalFallbackService();
-    if (typeof local?.openPlannerProject === 'function') return local.openPlannerProject(projectId);
-    return { success: false, error: 'Opening a planner project is not supported in this environment.' };
-  },
-
   recoverRuntime: async (sessionId: string) => {
     if (typeof window !== 'undefined' && window.relayApi) {
       return window.relayApi.recoverRuntime(sessionId);

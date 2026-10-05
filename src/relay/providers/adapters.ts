@@ -6725,58 +6725,23 @@ export interface ExactSessionOpenResult {
 }
 
 /**
- * The shared Chrome opener for BOTH ChatGPT navigation targets.
+ * The shared Chrome opener for the ChatGPT conversation target.
  *
- * `matchToken` is the authoritative substring the reused/created tab must contain:
- *   - exact-session open -> the conversation id (`/c/<id>` is SESSION identity)
- *   - project open        -> the stable project key (`g-p-<32-hex>` is PROJECT identity)
- *
- * Both are matched against the SAME Chrome handle and read back through the SAME
- * authority, so a project tab can never be verified by a conversation check or the
- * reverse. There is deliberately no `matchToken` fallback: a caller with no
- * authoritative identity fails closed rather than opening an unverified tab.
+ * `matchToken` is the authoritative conversation id the reused/created tab must
+ * contain. A `/c/<id>` segment appears only in that conversation's own URL, so the
+ * match is exact: one conversation's tab can never verify as another's.
+ * There is deliberately no `matchToken` fallback: a caller with no authoritative
+ * identity fails closed rather than opening an unverified tab.
  */
-/**
- * True when a URL carries the authoritative identity being opened.
- *
- * `conversation` — the URL contains the conversation id. This is exact: a `/c/<id>`
- * segment appears only in that conversation's URL.
- *
- * `project` — the URL contains `/g/<key>` as a path segment. NOT a bare `contains`:
- * the stable project key is a literal substring of every conversation URL inside that
- * project (`/g/g-p-<key>-name/c/<id>`), so a substring test would accept a
- * conversation tab as "the project". Live proof this mattered: "Open Project" focused
- * an existing conversation tab and reported success.
- */
-function urlMatchesIdentity(
-  url: string | null | undefined,
-  token: string,
-  identityKind: 'conversation' | 'project',
-): boolean {
-  if (!url || !token) return false;
-  if (identityKind === 'conversation') return url.includes(token);
-
-  // A project tab is the project ROOT. Match the pathname after `/g/`, allowing the
-  // optional `-<name>` slug spelling and the `/project` suffix, and requiring that
-  // nothing else follows. This rejects both a different project and a conversation
-  // inside this project (`…/c/<id>`), which a bare substring test would accept.
-  let pathname: string;
-  try {
-    pathname = new URL(url).pathname;
-  } catch {
-    return false;
-  }
-  const m = pathname.match(/^\/g\/(g-p-[^/?#]+)(?:\/project)?\/?$/i);
-  if (!m) return false;
-  const slug = toStableChatGPTProjectId(m[1]);
-  return !!slug && slug === token;
+function urlCarriesConversationId(url: string | null | undefined, conversationId: string): boolean {
+  if (!url || !conversationId) return false;
+  return url.includes(conversationId);
 }
 
 async function openChatGPTUrlInChrome(
   self: any,
   exactUrl: string,
   matchToken: string,
-  identityKind: 'conversation' | 'project',
 ): Promise<ExactSessionOpenResult> {
   const conversationId = matchToken;
   const diagnostics: string[] = [];
@@ -6788,34 +6753,27 @@ async function openChatGPTUrlInChrome(
     diagnostics,
   });
 
-  diagnostics.push(`opener:entered requestedUrl=${exactUrl} identityKind=${identityKind} matchToken=${conversationId || '(none)'}`);
+  diagnostics.push(`opener:entered requestedUrl=${exactUrl} matchToken=${conversationId || '(none)'}`);
   if (!exactUrl || !matchToken) {
     diagnostics.push('stage:authority-missing');
     return fail('No authoritative ChatGPT URL / identity token supplied.');
   }
 
-  // PROVEN BUG (live, 2026-10-05): a PROJECT open matched the token with a bare
-  // `contains`, and the stable project key `g-p-<32-hex>` is a literal substring of
-  // every conversation URL in that project (`/g/g-p-<key>-name/c/<id>`). The reuse
-  // search therefore focused an existing CONVERSATION tab and the read-back
-  // verification passed on the same substring, so "Open Project" reported success
-  // while showing a conversation. Match PROJECT identity on the full `/g/<key>`
-  // path segment instead, which only a URL carrying that project does.
   // The token is embedded in an AppleScript string literal, so it must be escaped: an
   // unescaped quote would terminate the literal early and osascript would fail to parse
   // the script.
   //
-  // This is the CANDIDATE search, deliberately broader than `urlMatchesIdentity`
-  // because AppleScript cannot parse a pathname: for a project it accepts any
-  // non-conversation URL in that project (`/g/<key>` prefix covers both the stable and
-  // the `-<name>` slug spelling, and `/c/` is excluded). `urlMatchesIdentity` is the
-  // authority that decides, and a candidate it rejects falls through to creating a
-  // fresh tab — a loose candidate filter can never manufacture a success.
+  // The conversation id is the match, and it is EXACT: a `/c/<id>` segment appears only
+  // in that conversation's own URL, so this substring can never select another
+  // conversation, another project, or the project main page.
+  //
+  // DO NOT widen this to a project-level token. That was tried and reverted: the stable
+  // project key `g-p-<32-hex>` is a literal substring of every conversation URL in that
+  // project (`/g/g-p-<key>-name/c/<id>`), so a project-keyed search focused an existing
+  // CONVERSATION tab and the read-back passed on the same substring — success reported
+  // while a different page was showing.
   const escapedToken = escapeAppleScriptStringLiteral(matchToken);
-  const matchExpression =
-    identityKind === 'project'
-      ? `((u contains "/g/${escapedToken}") and (u does not contain "/c/"))`
-      : `u contains "${escapedToken}"`;
+  const matchExpression = `u contains "${escapedToken}"`;
 
   // ---- Stage A: reuse search over live Chrome tabs -------------------------
   // Reuse enumeration.
@@ -6888,18 +6846,16 @@ async function openChatGPTUrlInChrome(
     const tabId = parseInt(parts[2], 10);
     const observedUrl = parts.slice(3, parts.length - 1).join('::');
     diagnostics.push(`stage:reuse-match handle=WIN:${windowId}|TAB:${tabId} observedUrl=${observedUrl}`);
-    // Verification uses the SAME identity rule as the search. For a project open that
-    // means the `/g/<key>` path segment, so a conversation tab in the same project can
-    // neither be selected nor accepted as "the project".
-    if (!urlMatchesIdentity(observedUrl, matchToken, identityKind)) {
-      diagnostics.push(`stage:verification-failed (reused tab is a different ${identityKind})`);
-      return fail(`Reused tab resolved to a different ${identityKind}: ${observedUrl}`);
+    // Verification uses the SAME identity rule as the search: the conversation id.
+    if (!urlCarriesConversationId(observedUrl, matchToken)) {
+      diagnostics.push('stage:verification-failed (reused tab is a different conversation)');
+      return fail(`Reused tab resolved to a different conversation: ${observedUrl}`);
     }
     // Read back through the SAME handle used for observation, so the focus result is
     // verified the same way a created tab is. An unverifiable focus is a failure.
     const readBack = self.readHandleUrl({ windowId, tabId });
     diagnostics.push(`stage:reuse-read-back observedUrl=${readBack ?? 'null'}`);
-    if (!readBack || !urlMatchesIdentity(readBack, matchToken, identityKind)) {
+    if (!readBack || !urlCarriesConversationId(readBack, matchToken)) {
       diagnostics.push('stage:verification-failed (reuse read-back mismatch)');
       return {
         success: false,
@@ -6908,7 +6864,7 @@ async function openChatGPTUrlInChrome(
         requestedUrl: exactUrl,
         conversationId,
         reason:
-          `Focused tab could not be verified as the exact ${identityKind} ${conversationId} ` +
+          `Focused tab could not be verified as the exact conversation ${conversationId} ` +
           `(read back: ${readBack ?? 'null'}).`,
         diagnostics,
       };
@@ -6941,8 +6897,8 @@ async function openChatGPTUrlInChrome(
       diagnostics,
     };
   }
-  if (!urlMatchesIdentity(observedUrl, conversationId, identityKind)) {
-    diagnostics.push(`stage:verification-failed (${identityKind} mismatch)`);
+  if (!urlCarriesConversationId(observedUrl, conversationId)) {
+    diagnostics.push('stage:verification-failed (conversation mismatch)');
     return {
       success: false,
       windowId: handle.windowId,
@@ -6951,7 +6907,7 @@ async function openChatGPTUrlInChrome(
       conversationId,
       observedUrl,
       reason:
-        `Opened tab does not represent the exact ${identityKind} ${conversationId} ` +
+        `Opened tab does not represent the exact conversation ${conversationId} ` +
         `(read back: ${observedUrl}). Not reported as success.`,
       diagnostics,
     };
@@ -6965,7 +6921,7 @@ async function openExactChatGPTSessionInChrome(
   exactUrl: string,
   conversationId: string,
 ): Promise<ExactSessionOpenResult> {
-  return openChatGPTUrlInChrome(self, exactUrl, conversationId, 'conversation');
+  return openChatGPTUrlInChrome(self, exactUrl, conversationId);
 }
 
 Object.assign(ChatGPTProvider.prototype, {
@@ -6974,21 +6930,7 @@ Object.assign(ChatGPTProvider.prototype, {
     return openExactChatGPTSessionInChrome(this, exactUrl, conversationId);
   },
   /**
-   * Public PROJECT opener: brings the ChatGPT Project tab itself to the front.
-   *
-   * Uses the same Chrome authority and the same read-back verification as the
-   * exact-session opener, matched on the stable PROJECT key rather than a
-   * conversation id — a Project tab is not a conversation and must not be
-   * verified as one.
-   *
-   * The URL is opened verbatim, never rebuilt: the caller supplies the canonical
-   * Project URL that was captured for the project.
-   */
-  async openChatGPTProjectInChrome(projectUrl: string): Promise<ExactSessionOpenResult> {
-    const projectId = toStableChatGPTProjectId(projectUrl);
-    return openChatGPTUrlInChrome(this, projectUrl, projectId ?? '', 'project');
-  },
-  /** Live probe used only for diagnostics; never a success signal. */
+   * Live probe used only for diagnostics; never a success signal. */
   async probeChromeTabEnumeration(this: any): Promise<{ success: boolean; windows?: number; error?: string }> {
     const res = this.runAppleScript(
       `tell application "Google Chrome" to return "PROBE::" & (count of windows)`,
