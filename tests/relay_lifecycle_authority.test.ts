@@ -50,6 +50,21 @@ class CountingProvider extends MockProvider {
     this.calls.push('inspectRuntime');
     return super.inspectRuntime(id);
   }
+
+  // The supervision tick resolves the relay baton from the last confirmed Delivery and then
+  // reads the baton owner's EXACT session, so these are the capabilities that actually
+  // constitute provider contact on that path. Counting only `inspectRuntime` would report
+  // zero contact for a tick that is demonstrably reading the provider, which would make the
+  // "permitted contact happens" assertion below untestable rather than meaningful.
+  async readExactSessionTurnsForReconciliation(externalSessionId: string): Promise<any> {
+    this.calls.push('readExactSessionTurnsForReconciliation');
+    return super.readExactSessionTurnsForReconciliation(externalSessionId);
+  }
+
+  async detectWorkingState(id: RuntimeSessionId): Promise<any> {
+    this.calls.push('detectWorkingState');
+    return super.detectWorkingState(id);
+  }
 }
 
 describe('Relay Lifecycle Authority (STOPPED | RUNNING | PAUSED)', () => {
@@ -133,6 +148,11 @@ describe('Relay Lifecycle Authority (STOPPED | RUNNING | PAUSED)', () => {
     await db.projects.save(project);
 
     const worker = RuntimeSession.create('opencode', 'Worker 2');
+    // The relay baton addresses ONE exact provider session, so a runtime RelayX is expected to
+    // supervise has to carry a provider-owned identity. Without one the tick correctly declines
+    // to contact anything, which would make the RUNNING & ACTIVE case below unable to observe
+    // the permission it exists to assert. I-11: a name is never a substitute for the id.
+    worker.updateExternalIdentity('ses_relay_lifecycle_worker2', '/path/2');
     await db.runtimes.save(worker);
 
     const pair = Pair.create(project.id, 'Pair 2', undefined, worker.id);

@@ -111,11 +111,16 @@ describe('Execution Authority Realignment — Hard Regression Proofs', () => {
     const assignment = await engine.createAssignment(pairId, 'Task', 'Instruction');
     await engine.dispatchAssignment(assignment.id);
 
+    // The supervision tick resolves the relay baton from the last confirmed Delivery and then
+    // reads the baton owner's EXACT session, so the capability that proves provider contact is
+    // the exact-session transcript read — not `inspectRuntime`, which was the runtime-window
+    // heuristic the tick used before the baton model existed. Counting the old capability
+    // would assert zero contact for a tick that is in fact reading the real conversation.
     let contactCount = 0;
-    const originalInspect = worker.inspectRuntime.bind(worker);
-    worker.inspectRuntime = async (id) => {
+    const originalRead = worker.readExactSessionTurnsForReconciliation.bind(worker);
+    worker.readExactSessionTurnsForReconciliation = async (externalSessionId: string) => {
       contactCount++;
-      return originalInspect(id);
+      return originalRead(externalSessionId);
     };
 
     const tick = await engine.runSupervisionTick();

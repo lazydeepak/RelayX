@@ -10,5 +10,16 @@
     <true/>
     <key>com.apple.security.automation.apple-events</key>
     <true/>
+    <!--
+      REQUIRED: the packaged main process reaches the OpenCode shared service
+      (registered in ~/.local/state/opencode/service.json) over loopback HTTP to
+      read the exact-session transcript. Without com.apple.security.network.client
+      the hardened-runtime signature denies that outbound TCP connect, so the
+      transcript read fails with "fetch failed" and every delivery is forced to
+      `ambiguous` even when the instruction was physically delivered.
+      Verified: ses_efb889309ffehTlDbrTHrPzewA / deliv_mut4orr7_bk4aud89.
+    -->
+    <key>com.apple.security.network.client</key>
+    <true/>
 </dict>
 </plist>

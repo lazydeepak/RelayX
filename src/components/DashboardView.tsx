@@ -120,7 +120,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
       {/* Primary KPI Metrics Grid */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <div className="p-4 rounded-xl bg-slate-900/60 backdrop-blur-md border border-slate-800/80 shadow-lg">
+        <div className="rx-card p-4 rounded-xl bg-slate-900/60 backdrop-blur-md border border-slate-800/80 shadow-lg">
           <div className="flex items-center justify-between text-slate-400 mb-2">
             <span className="text-xs font-medium uppercase tracking-wider">Active Workers</span>
             <Cpu className="w-4 h-4 text-emerald-400" />
@@ -139,7 +139,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               onNavigateAssignments?.();
             }
           }}
-          className="p-4 rounded-xl bg-slate-900/60 backdrop-blur-md border border-slate-800/80 shadow-lg text-left cursor-pointer hover:border-blue-500/30 hover:bg-slate-900/80 focus:outline-none focus:ring-2 focus:ring-blue-500/40 transition-colors group"
+          className="rx-card p-4 rounded-xl bg-slate-900/60 backdrop-blur-md border border-slate-800/80 shadow-lg text-left cursor-pointer hover:border-blue-500/30 hover:bg-slate-900/80 focus:outline-none focus:ring-2 focus:ring-blue-500/40 transition-colors group"
           aria-label={`Assignments Running: ${metrics.activeAssignments}. Press Enter to open assignments view.`}
           role="button"
           tabIndex={0}
@@ -152,7 +152,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <p className="text-[11px] text-slate-400 mt-1">Under active attempt execution</p>
         </button>
 
-        <div className="p-4 rounded-xl bg-slate-900/60 backdrop-blur-md border border-slate-800/80 shadow-lg">
+        <div className="rx-card p-4 rounded-xl bg-slate-900/60 backdrop-blur-md border border-slate-800/80 shadow-lg">
           <div className="flex items-center justify-between text-slate-400 mb-2">
             <span className="text-xs font-medium uppercase tracking-wider">Awaiting Review</span>
             <CheckCircle2 className="w-4 h-4 text-purple-400" />
@@ -161,7 +161,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <p className="text-[11px] text-slate-400 mt-1">Handoff ready for planner check</p>
         </div>
 
-        <div className="p-4 rounded-xl bg-slate-900/60 backdrop-blur-md border border-slate-800/80 shadow-lg">
+        <div className="rx-card p-4 rounded-xl bg-slate-900/60 backdrop-blur-md border border-slate-800/80 shadow-lg">
           <div className="flex items-center justify-between text-slate-400 mb-2">
             <span className="text-xs font-medium uppercase tracking-wider">Open Attention</span>
             <AlertTriangle className="w-4 h-4 text-amber-400" />
@@ -174,7 +174,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       {/* Two Column Layout: System Lineage & Recent Traceable Events */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left 2 Cols: Recent Traceable Event Timeline */}
-        <div className="lg:col-span-2 bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-xl p-5 shadow-lg">
+        <div className="rx-card lg:col-span-2 bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-xl p-5 shadow-lg">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
               <Activity className="w-4 h-4 text-blue-400" />
@@ -233,7 +233,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
 
         {/* Right 1 Col: Control Plane Invariants & Status */}
-        <div className="bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-xl p-5 space-y-4 shadow-lg">
+        <div className="rx-card bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-xl p-5 space-y-4 shadow-lg">
           <div className="flex items-center gap-2">
             <ShieldCheck className="w-4 h-4 text-emerald-400" />
             <h2 className="text-sm font-semibold text-slate-200">Engine Invariant Guard</h2>

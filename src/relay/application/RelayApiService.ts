@@ -35,6 +35,7 @@ import { parseChatGPTConversationUrl } from '../providers/chatgptConversationUrl
 import {
   isChatGPTProjectLessUrl,
   parseChatGPTProjectUrl,
+  toStableChatGPTProjectId,
 } from '../providers/chatgptProjectUrl.ts';
 import { chatgptProjectDiscoveryError } from '../providers/chatgptProjectDiscovery.ts';
 import { RuntimeSession, Project, RuntimeProjectAssociation, Assignment } from '../domain/entities.ts';
@@ -75,6 +76,7 @@ import {
   EffectiveModelConfig,
   ProviderSetting,
   CreateAndDispatchResult,
+  OpenRuntimeSessionResult,
 } from '../../types/relayApi.ts';
 import {
   UIPair,
@@ -117,13 +119,20 @@ import path from 'node:path';
  */
 export function normalizeChatProjectSlug(ref: string | null | undefined): string {
   if (!ref || typeof ref !== 'string') return '';
-  const match = ref.match(/(?:^|\/g\/)(g-p-[^/?#]+)/i);
-  const slug = (match?.[1] ?? ref).replace(/\/$/, '').toLowerCase();
   // Current ChatGPT links may append a human-readable project name to the
   // stable 32-hex project key (for example `g-p-<key>-odarehub`). Discovery
   // can return the bare key while a copied conversation URL includes the
   // suffix, so ownership must compare the stable key when it is present.
-  return slug.match(/^(g-p-[0-9a-f]{32})(?:-|$)/)?.[1] ?? slug;
+  //
+  // The stable-key rule itself lives in `chatgptProjectUrl.ts` so that WHAT gets
+  // persisted and WHAT gets compared can never drift apart — that drift is what
+  // let one project persist under two different-looking URLs.
+  const stable = toStableChatGPTProjectId(ref);
+  if (stable) return stable;
+  // Non-`g-p-` references (legacy `/p/<slug>`, or a bare path) carry no stable
+  // key; fall back to a trimmed, lowercased comparison form.
+  const match = ref.match(/(?:^|\/p\/)([^/?#]+)/i);
+  return (match?.[1] ?? ref).replace(/\/$/, '').toLowerCase();
 }
 
 /** Normalizes a workspace path reference for project-ownership comparison. */
@@ -590,6 +599,14 @@ export class RelayApiService implements IRelayApi {
           `Planner runtime is already bound to ChatGPT conversation '${planner.externalSessionId}'`,
         );
       }
+      // Pin the project id to its stable `g-p-<key>` form BEFORE it becomes the
+      // persisted project reference below. Without this, a conversation URL that
+      // carried the named slug (`…-test-project`) would persist a different-looking
+      // project reference than the project row's.
+      conversationBinding = {
+        projectId: normalizeChatRef(parsed.projectId) || parsed.projectId,
+        conversationId: parsed.conversationId,
+      };
       // Duplicate external identity: the exact conversation must not already be
       // bound to a DIFFERENT runtime (re-binding the same runtime is idempotent).
       const duplicate = await this.db.runtimes.findByExternalSessionId('chatgpt', parsed.conversationId);
@@ -598,7 +615,6 @@ export class RelayApiService implements IRelayApi {
           `ChatGPT conversation '${parsed.conversationId}' is already bound to runtime '${duplicate.id}'`,
         );
       }
-      conversationBinding = parsed;
     }
 
     // Project-ownership invariant runs before any write. Verified association
@@ -632,6 +648,12 @@ export class RelayApiService implements IRelayApi {
       if (conversationBinding && planner) {
         planner.updateExternalIdentity(
           conversationBinding.conversationId,
+          // Built from the CONVERSATION URL, not from the project's saved ref: the
+          // conversation URL is the authority for which project this conversation
+          // is in, so the pair's planner runtime and the project row cannot end up
+          // describing two different ChatGPT projects. `conversationBinding.projectId`
+          // is already the stable `g-p-<key>`, so this is the same canonical form the
+          // project row stores.
           `https://chatgpt.com/g/${conversationBinding.projectId}/project`,
           plannerConversationUrl,
         );
@@ -723,12 +745,22 @@ export class RelayApiService implements IRelayApi {
       conversationId = cMatch[1];
     }
 
+    // When the operator supplied a bare conversation ID, the exact URL is composed
+    // from the project's ChatGPT identity. The stable `g-p-<key>` form is used so the
+    // composed URL matches the project's canonical form rather than re-deriving a
+    // named-slug spelling from the saved ref.
+    const stableProjectId = toStableChatGPTProjectId(projectRef ?? null);
     const exactSessionUrl = trimmedUrl.startsWith('http')
       ? trimmedUrl
-      : projectRef?.match(/(?:^|\/g\/)(g-p-[^/?#]+)/i)
-        ? `https://chatgpt.com/g/${projectRef.match(/(?:^|\/g\/)(g-p-[^/?#]+)/i)![1]}/c/${conversationId}`
+      : stableProjectId
+        ? `https://chatgpt.com/g/${stableProjectId}/c/${conversationId}`
         : `https://chatgpt.com/c/${conversationId}`;
-    planner.updateExternalIdentity(conversationId, projectRef, exactSessionUrl);
+    // The persisted project ref is canonicalized too: this write is what a later
+    // reader compares against the project row, so it must not carry a stale spelling.
+    const canonicalProjectRef = stableProjectId
+      ? `https://chatgpt.com/g/${stableProjectId}/project`
+      : (projectRef ?? null);
+    planner.updateExternalIdentity(conversationId, canonicalProjectRef, exactSessionUrl);
     await this.db.runtimes.save(planner);
 
     // Record verified association evidence
@@ -1147,6 +1179,20 @@ export class RelayApiService implements IRelayApi {
     }
   }
 
+  /**
+   * Open/activate a runtime session.
+   *
+   * ## Why the OpenCode opener is invoked EXACTLY ONCE
+   *
+   * This used to run the provider opener twice per call: once through
+   * `integrationManager.getHandler(...)` -> `handler.openSession(...)` and then again
+   * directly through `provider.activateRuntime(...)`. For OpenCode both paths reach the SAME
+   * `OpenCodeProvider` instance and therefore fired the identical four-keystroke AppleScript
+   * sequence twice from one click. That doubled the window in which a focus steal could
+   * redirect a keystroke into an unrelated application, and let the second run overwrite the
+   * first run's navigation target. The handler is kept as the single entry point so
+   * integration-level configuration still owns the open, and it is now called once.
+   */
   public async activateRuntime(sessionId: string): Promise<boolean> {
     const runtime = await this.db.runtimes.findById(sessionId as RuntimeSessionId);
     if (!runtime) return false;
@@ -1158,25 +1204,65 @@ export class RelayApiService implements IRelayApi {
       return false;
     }
 
+    // OpenCode Desktop is the Worker surface, and it can only be navigated by TITLE. The
+    // title has to be the LIVE one: `runtime.name` is a RelayX-owned label that drifts the
+    // moment the session is renamed in OpenCode, and a stale title silently matches nothing
+    // or, worse, somebody else's session. So for OpenCode the authoritative `ses_…` id is
+    // resolved through the shared OpenCode service first and the refreshed title is used for
+    // navigation. The bound id is never changed by opening.
+    if (runtime.providerType === 'opencode') {
+      const provider = this.engine.getProvider('opencode') as any;
+      if (!provider || typeof provider.openExactWorkerSession !== 'function') {
+        return false;
+      }
+      const result = await provider.openExactWorkerSession({
+        externalSessionId: runtime.externalSessionId ?? '',
+        storedTitle: runtime.name,
+      });
+
+      if (!result?.ok) {
+        console.warn(
+          `[activateRuntime][opencode-exact-open-failed] runtimeId=${sessionId} ` +
+            `externalSessionId=${runtime.externalSessionId ?? 'none'} failure=${result?.failure ?? 'unknown'} ` +
+            `resolvedTitle=${JSON.stringify(result?.resolvedTitle ?? null)} ` +
+            `stepsSent=${JSON.stringify(result?.stepsSent ?? [])} ` +
+            `error=${result?.error ?? 'none'}`,
+        );
+        return false;
+      }
+
+      // Keep the stored display title aligned with what OpenCode actually calls this session.
+      // This is navigation metadata only. `externalSessionId` is the identity and is
+      // deliberately NOT touched here: a rename must never rebind the Worker.
+      if (result.storedTitleWasStale && result.resolvedTitle && runtime.name !== result.resolvedTitle) {
+        const before = runtime.name;
+        runtime.name = result.resolvedTitle;
+        runtime.updatedAt = Date.now();
+        await this.db.runtimes.save(runtime);
+        console.log(
+          `[activateRuntime][worker-title-refreshed] runtimeId=${sessionId} ` +
+            `externalSessionId=${runtime.externalSessionId} ` +
+            `"${before}" -> "${result.resolvedTitle}" (identity unchanged)`,
+        );
+      }
+
+      return true;
+    }
+
     try {
       const handler = await this.integrationManager.getHandler(runtime.providerType);
       if (handler && typeof handler.openSession === 'function') {
         const targetUrl = runtime.sessionUrl || runtime.externalSessionId;
-        // Phase 10: pass runtime.name as windowTitle for targeted Cmd+K opening
         await handler.openSession(runtime.id, targetUrl, runtime.name);
+        return true;
       }
-    } catch {}
-
-    try {
-      const provider = this.engine.getProvider(runtime.providerType);
-      if (provider && typeof provider.activateRuntime === 'function') {
-        return await provider.activateRuntime(runtime.id as RuntimeSessionId, runtime.name);
-      }
-    } catch {}
+    } catch (err: any) {
+      console.warn(`[activateRuntime] handler openSession failed for ${sessionId}:`, err?.message ?? err);
+    }
     return false;
   }
 
-  public async openRuntimeSession(sessionId: string): Promise<{ success: boolean; url?: string; error?: string }> {
+  public async openRuntimeSession(sessionId: string): Promise<OpenRuntimeSessionResult> {
     const runtime = await this.db.runtimes.findById(sessionId as RuntimeSessionId);
     if (!runtime) return { success: false, error: 'Session not found' };
 
@@ -1186,9 +1272,9 @@ export class RelayApiService implements IRelayApi {
     }
     if (!exactUrl && runtime.providerType === 'chatgpt') {
       const ext = runtime.externalSessionId?.trim();
-      const projRef = runtime.externalProjectRef;
-      const match = projRef?.match(/(?:^|\/g\/)(g-p-[^/?#]+)/i);
-      const slug = match ? match[1] : null;
+      // The stable `g-p-<key>` form, so a composed URL never re-derives a named-slug
+      // spelling from a stored project reference.
+      const slug = toStableChatGPTProjectId(runtime.externalProjectRef);
       if (ext && slug) {
         exactUrl = `https://chatgpt.com/g/${slug}/c/${ext}`;
       } else if (ext) {
@@ -1204,17 +1290,157 @@ export class RelayApiService implements IRelayApi {
     }
 
     try {
-      const handler = await this.integrationManager.getHandler(runtime.providerType);
-      if (handler && typeof handler.openSession === 'function') {
-        await handler.openSession(runtime.id, exactUrl || runtime.externalSessionId);
+      // Handlers are registered by IntegrationManager.initialize(). It is idempotent
+      // (`if (this.initialized) return`), so awaiting it here is safe. Without this,
+      // a caller that has not touched the Integrations tab resolves NO handler and every
+      // provider-bound operation silently degraded (observed: registryKeys=[] and
+      // getHandler('chatgpt') === undefined for a healthy, already-provisioned planner).
+      await this.integrationManager.initialize();
+
+      const handler: any = await this.integrationManager.getHandler(runtime.providerType);
+      // DIAGNOSTIC (handler resolution). No secrets, no full config: shape only.
+      {
+        const registryKeys: string[] = (() => {
+          try {
+            const reg: any = (this.integrationManager as any).registry;
+            const raw = reg?.integrations ?? reg?.entries ?? reg?.handlers ?? reg;
+            if (raw instanceof Map) return Array.from(raw.keys()).map(String);
+            if (Array.isArray(raw)) return raw.map((e: any) => String(e?.config?.id ?? e?.id ?? '?'));
+            if (raw && typeof raw === 'object') return Object.keys(raw);
+            return [];
+          } catch {
+            return [];
+          }
+        })();
+        console.warn(
+          `[openRuntimeSession][resolve] runtimeId=${sessionId} ` +
+            `providerType=${runtime.providerType} providerKey=${JSON.stringify(runtime.providerType)} ` +
+            `handlerFound=${handler !== undefined && handler !== null} ` +
+            `handlerCtor=${handler ? (handler.constructor?.name ?? 'unknown') : 'none'} ` +
+            `handlerConfigId=${handler ? JSON.stringify(handler?.config?.id ?? null) : 'none'} ` +
+            `hasOpenSession=${handler ? typeof handler.openSession === 'function' : false} ` +
+            `hasActivateRuntime=${handler ? typeof handler.activateRuntime === 'function' : false} ` +
+            `registryKeys=${JSON.stringify(registryKeys)}`,
+        );
       }
-      const provider = this.engine.getProvider(runtime.providerType);
-      if (provider && typeof provider.activateRuntime === 'function') {
-        await provider.activateRuntime(runtime.id as RuntimeSessionId);
+      if (!handler || typeof handler.openSession !== 'function') {
+        return {
+          success: false,
+          url: exactUrl || undefined,
+          error: 'No integration handler exposes an exact-session opener for this provider.',
+        };
       }
-      return { success: true, url: exactUrl || undefined };
+
+      // Run the opener, then judge success ONLY by the VERIFIED provider result.
+      // Absence of an exception is NOT success.
+      const opened: unknown = await handler.openSession(runtime.id, exactUrl || runtime.externalSessionId);
+      const verification: any =
+        handler.lastExactSessionOpenResult ?? (opened && typeof opened === 'object' ? opened : null);
+
+      if (!verification || verification.success !== true) {
+        return {
+          success: false,
+          url: exactUrl || undefined,
+          error:
+            verification?.reason ??
+            'Exact-session open did not return a verified handle; success cannot be claimed.',
+        };
+      }
+
+      // Deliberately NOT calling provider.activateRuntime() here.
+      //
+      // This method's contract is "open this URL in the browser", and the verified
+      // Chrome tab is already frontmost. activateRuntime() runs
+      // `tell application "ChatGPT" to activate`, which raised the ChatGPT DESKTOP APP
+      // over the tab — measured: frontmost went Google Chrome -> ChatGPT while RelayX
+      // still reported success. Second, redundant occurrence of that focus steal; the
+      // app-handler no longer does it either.
+      return {
+        success: true,
+        url: exactUrl || undefined,
+        observedUrl: verification.observedUrl,
+        reused: verification.reused === true,
+        windowId: verification.windowId,
+        tabId: verification.tabId,
+      };
     } catch (err: any) {
       return { success: false, url: exactUrl || undefined, error: err.message || String(err) };
+    }
+  }
+
+  /**
+   * Opens the ChatGPT PROJECT bound to a project, in the browser, verified.
+   *
+   * PROJECT identity, not SESSION identity: this opens
+   * `https://chatgpt.com/g/<g-p-…>/project` — the project URL captured when the
+   * project was added — rather than a conversation inside it. The generic OS opener
+   * is deliberately not used, and the ChatGPT desktop app is never activated, so the
+   * project opens in the browser and stays in front.
+   *
+   * Success is reported ONLY from the handler's verified read-back. A missing project
+   * URL, a conversation-only reference, or a missing opener are all failures — never a
+   * claim that the project was opened.
+   */
+  public async openPlannerProject(projectId: string): Promise<OpenRuntimeSessionResult> {
+    const project = await this.db.projects.findById(projectId as ProjectId);
+    if (!project) return { success: false, error: 'Project not found' };
+
+    const ref = project.plannerProjectUrl;
+    if (!ref?.trim()) {
+      return {
+        success: false,
+        error: `Project '${project.name}' has no recorded ChatGPT project URL to open.`,
+      };
+    }
+    const binding = this.validateChatGPTProjectBinding(ref);
+    if (!binding.ok) {
+      return { success: false, url: ref, error: binding.error };
+    }
+
+    // Resolve the runtime that carries this project's ChatGPT binding. The project row
+    // is the authority for WHICH project; the runtime supplies the opener.
+    const runtimes = await this.db.runtimes.findAll();
+    const planner = runtimes.find(
+      (r) => r.providerType === 'chatgpt' && normalizeChatProjectSlug(r.externalProjectRef) === normalizeChatProjectSlug(ref),
+    );
+    if (!planner) {
+      return {
+        success: false,
+        url: binding.canonicalProjectUrl,
+        error: `No ChatGPT planner runtime is bound to project '${project.name}'.`,
+      };
+    }
+
+    try {
+      await this.integrationManager.initialize();
+      const handler: any = await this.integrationManager.getHandler('chatgpt');
+      if (!handler || typeof handler.openProjectSession !== 'function') {
+        return {
+          success: false,
+          url: binding.canonicalProjectUrl,
+          error: 'No integration handler exposes a ChatGPT project opener.',
+        };
+      }
+
+      const res = await handler.openProjectSession(planner.id);
+      if (!res?.success) {
+        return {
+          success: false,
+          url: res?.requestedUrl ?? binding.canonicalProjectUrl,
+          error: res?.reason ?? 'Project open did not return a verified handle.',
+        };
+      }
+      return {
+        success: true,
+        url: res.observedUrl ?? res.requestedUrl ?? binding.canonicalProjectUrl,
+        observedUrl: res.observedUrl,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        url: binding.canonicalProjectUrl,
+        error: err.message || String(err),
+      };
     }
   }
 

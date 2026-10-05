@@ -251,7 +251,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
           {/* Appearance Setting */}
-          <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-3 flex flex-col justify-between">
+          <div className="rx-card p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-3 flex flex-col justify-between">
             <div className="space-y-2">
               <div className="flex items-center gap-2 text-indigo-300 font-semibold">
                 <Sun className="w-4 h-4" />
@@ -299,7 +299,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
 
           {/* Worker AI Model Configuration */}
-          <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-3 flex flex-col justify-between">
+          <div className="rx-card p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-3 flex flex-col justify-between">
             <div className="space-y-2">
               <div className="flex items-center gap-2 text-indigo-300 font-semibold">
                 <Sparkles className="w-4 h-4" />
@@ -315,7 +315,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <select
                   value={effectiveWorkerModel}
                   onChange={(e) => handleSaveDefaultModel(e.target.value)}
-                  className="px-2 py-1.5 rounded bg-slate-950 border border-slate-700 text-emerald-400 font-mono text-xs focus:outline-none focus:border-indigo-500"
+                  className="rx-control px-2 py-1.5 rounded bg-slate-950 border border-slate-700 text-emerald-400 font-mono text-xs focus:outline-none focus:border-indigo-500 w-full max-w-full"
                 >
                   {supportedWorkerModels.map((m) => (
                     <option key={m} value={m}>
@@ -333,7 +333,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
 
           {/* Logging & Archival Interval */}
-          <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-3 flex flex-col justify-between">
+          <div className="rx-card p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-3 flex flex-col justify-between">
             <div className="space-y-2">
               <div className="flex items-center gap-2 text-indigo-300 font-semibold">
                 <Archive className="w-4 h-4" />
@@ -349,7 +349,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <select
                   value={archiveInterval}
                   onChange={(e) => handleSaveArchiveInterval(e.target.value)}
-                  className="px-2 py-1.5 rounded bg-slate-950 border border-slate-700 text-slate-200 font-medium text-xs focus:outline-none focus:border-indigo-500"
+                  className="rx-control px-2 py-1.5 rounded bg-slate-950 border border-slate-700 text-slate-200 font-medium text-xs focus:outline-none focus:border-indigo-500 w-full max-w-full"
                 >
                   <option value="7d">7 Days (Default Standard)</option>
                   <option value="14d">14 Days</option>
@@ -376,7 +376,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
           {/* Host Runtime Info */}
-          <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
+          <div className="rx-card p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
             <div className="flex items-center gap-2 text-blue-400 font-semibold">
               <Monitor className="w-4 h-4" />
               <span>macOS Desktop Host &amp; Runtime</span>
@@ -413,7 +413,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
 
           {/* Persistence Engine */}
-          <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
+          <div className="rx-card p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
             <div className="flex items-center gap-2 text-emerald-400 font-semibold">
               <Database className="w-4 h-4" />
               <span>Durable Persistence Engine</span>
@@ -570,7 +570,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
 
           {/* macOS Accessibility Bindings */}
-          <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-3 md:col-span-2">
+          <div className="rx-card p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-3 md:col-span-2">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 text-purple-400 font-semibold">
                 <Cpu className="w-4 h-4" />

@@ -15,9 +15,12 @@ import {
 import { ChatGPTProvider } from '../../providers/adapters.ts';
 import { BrowserChatGPTProvider } from '../../providers/browserProviders.ts';
 import { DEFAULT_CHATGPT_PROJECT_DISCOVERY_SCRIPT } from '../../providers/chatgptProjectDiscovery.ts';
+import { parseChatGPTProjectUrl } from '../../providers/chatgptProjectUrl.ts';
 import { RuntimeSessionId, createId } from '../../domain/types.ts';
 
 export class ChatGPTAppHandler implements IAppIntegrationHandler {
+  /** Last structured exact-session open result (verification evidence). */
+  public lastExactSessionOpenResult: any = null;
   public readonly id = 'chatgpt';
   public readonly name = 'ChatGPT Desktop & Web';
   public readonly roles: AppRole[] = ['planner'];
@@ -322,26 +325,127 @@ export class ChatGPTAppHandler implements IAppIntegrationHandler {
       return false;
     }
 
-    try {
-      const isNode = typeof process !== 'undefined' && process.release?.name === 'node';
-      if (isNode) {
-        const { exec } = await import('node:child_process');
-        const cmd = process.platform === 'darwin'
-          ? `open "${targetUrl}"`
-          : process.platform === 'win32'
-            ? `start "" "${targetUrl}"`
-            : `xdg-open "${targetUrl}"`;
-        exec(cmd, (err) => {
-          if (err) console.warn('[ChatGPTAppHandler] open command error:', err);
-        });
+    // EXACT-SESSION OPEN.
+    // The generic OS opener (`open "<url>"`) is deliberately NOT used: the OS may route
+    // chatgpt.com to the ChatGPT desktop app, which produced success:true with ZERO Chrome
+    // tabs for the exact conversation, so no BrowserHandle existed for boundary capture.
+    // We now use the SAME Chrome AppleScript authority the provider already uses for
+    // provisioning and observation, so there is one browser authority rather than two.
+    //
+    // Success REQUIRES a verified window/tab whose read-back URL is still the exact
+    // conversation. An unverifiable open is a failure, never a success.
+    const conversationId =
+      externalSessionId && !/^https?:\/\//i.test(externalSessionId.trim())
+        ? externalSessionId.trim()
+        : (targetUrl.match(/\/c\/([^/?#]+)/)?.[1] ?? '');
+
+    const provider = this.getActiveProvider();
+    if (provider && typeof provider.openExactSessionInChrome === 'function') {
+      const res = await provider.openExactSessionInChrome(targetUrl, conversationId);
+      // Preserve the structured, VERIFIED result. Absence of an exception is NOT success.
+      this.lastExactSessionOpenResult = res;
+      if (!res.success) {
+        console.warn(
+          `[ChatGPTAppHandler] exact-session open FAILED requestedUrl=${targetUrl} ` +
+            `conversationId=${conversationId} reason=${res.reason}`,
+        );
+        (res.diagnostics ?? []).forEach((d: string) => console.warn(`[ChatGPTAppHandler][diag] ${d}`));
+        return false;
       }
-    } catch {}
+      console.warn(
+        `[ChatGPTAppHandler] exact-session open VERIFIED reused=${res.reused === true} ` +
+          `handle=WIN:${res.windowId}|TAB:${res.tabId} observedUrl=${res.observedUrl}`,
+      );
+      // Deliberately NOT calling provider.activateRuntime() here.
+      //
+      // The verified Chrome tab is the deliverable of this action, and it is already
+      // raised to the front by the opener. activateRuntime() runs
+      // `tell application "ChatGPT" to activate`, which raised the ChatGPT DESKTOP APP
+      // over the tab that had just been verified — so the operator saw "it opened ChatGPT"
+      // while RelayX reported a verified Chrome success. Opening in the browser must not
+      // hand focus to a different application.
+      return true;
+    }
 
+    // No exact-session opener on this provider: refuse rather than fall back to a generic
+    // OS open that cannot prove the exact conversation was opened.
+    console.warn(
+      '[ChatGPTAppHandler] provider exposes no exact-session Chrome opener; refusing to fall ' +
+        'back to a generic OS open.',
+    );
+    return false;
+  }
+
+  /**
+   * Opens the ChatGPT PROJECT for a runtime, in the browser, verified.
+   *
+   * This is PROJECT identity (`/g/<g-p-…>`), not SESSION identity (`/c/<id>`): the
+   * project URL captured at project-setup time is opened verbatim. It uses the same
+   * Chrome authority and the same read-back verification as the exact-session opener,
+   * and — like it — never activates the ChatGPT desktop app, so the browser stays in
+   * front.
+   *
+   * Returns the structured, VERIFIED result. A missing opener is a failure, never a
+   * silent fall back to an OS open.
+   */
+  public async openProjectSession(
+    sessionId: string,
+  ): Promise<{ success: boolean; requestedUrl?: string; observedUrl?: string; reason?: string }> {
+    const fail = (reason: string) => ({ success: false, reason });
+
+    let runtime: any = null;
     try {
-      await this.getActiveProvider().activateRuntime(sessionId as RuntimeSessionId, windowTitle);
+      runtime = (await (this.engine as any)?.repos?.runtimes?.findById(sessionId)) ?? null;
     } catch {}
 
-    return true;
+    // A recorded value qualifies as a PROJECT only if it points AT the project. A
+    // `/c/<conversationId>` URL is SESSION identity: it carries a project key but its
+    // target is a conversation, so it is not accepted here. A bare `/c/` URL carries no
+    // project identity at all and fails the parser outright.
+    const isProjectPage = (value: string) =>
+      parseChatGPTProjectUrl(value) !== null && !/\/c\/[^/?#]+/i.test(value);
+
+    const candidates = [runtime?.sessionUrl, runtime?.externalProjectRef];
+    let projectUrl: string | null = null;
+    for (const candidate of candidates) {
+      if (typeof candidate !== 'string' || !candidate.trim()) continue;
+      const trimmed = candidate.trim();
+      if (!isProjectPage(trimmed)) continue;
+      projectUrl = trimmed;
+      break;
+    }
+
+    if (!projectUrl) {
+      return fail(
+        `No ChatGPT Project URL is recorded for session ${sessionId}; a conversation URL ` +
+          'cannot stand in for a project.',
+      );
+    }
+
+    const provider = this.getActiveProvider();
+    if (!provider || typeof provider.openChatGPTProjectInChrome !== 'function') {
+      return fail('No provider exposes a ChatGPT Project opener for this integration.');
+    }
+
+    const res = await provider.openChatGPTProjectInChrome(projectUrl);
+    this.lastExactSessionOpenResult = res as any;
+    if (!res?.success) {
+      console.warn(
+        `[ChatGPTAppHandler] project open FAILED requestedUrl=${projectUrl} reason=${res?.reason}`,
+      );
+      (res?.diagnostics ?? []).forEach((d: string) => console.warn(`[ChatGPTAppHandler][diag] ${d}`));
+      return { success: false, requestedUrl: projectUrl, reason: res?.reason ?? 'unknown' };
+    }
+
+    console.warn(
+      `[ChatGPTAppHandler] project open VERIFIED reused=${res.reused === true} ` +
+        `handle=WIN:${res.windowId}|TAB:${res.tabId} observedUrl=${res.observedUrl}`,
+    );
+    return {
+      success: true,
+      requestedUrl: projectUrl,
+      observedUrl: res.observedUrl,
+    };
   }
 
   public async sendMessage(

@@ -231,6 +231,11 @@ describe('Phase H — End-to-End Exact-Session Pair Execution Proof', () => {
     const freshEngine = new RelayEngine(db);
     const freshPlannerProvider = new MockProvider('chatgpt');
     const freshWorkerProvider = new MockProvider('opencode');
+    // A process restart does not restart the provider's conversation. Handing the transcript
+    // across keeps the restart honest: the Worker session the Delivery was addressed to still
+    // holds the dispatched instruction, and the relay baton must find the completed response
+    // after the recorded boundary rather than an empty conversation.
+    freshWorkerProvider.adoptTranscript(workerProvider.messages);
     freshEngine.registerProvider(freshPlannerProvider);
     freshEngine.registerProvider(freshWorkerProvider);
 

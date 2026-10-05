@@ -31,6 +31,7 @@ export const RELAY_IPC_CHANNELS = {
   INSPECT_RUNTIME: 'relay:inspect-runtime',
   ACTIVATE_RUNTIME: 'relay:activate-runtime',
   OPEN_RUNTIME_SESSION: 'relay:open-runtime-session',
+  OPEN_PLANNER_PROJECT: 'relay:open-planner-project',
   RECOVER_RUNTIME: 'relay:recover-runtime',
   DETACH_RUNTIME: 'relay:detach-runtime',
   ARCHIVE_RUNTIME_SESSION: 'relay:archive-runtime-session',

@@ -6,6 +6,7 @@ import { OpenCodeProvider } from '../src/relay/providers/adapters.ts';
 import { Attempt } from '../src/relay/domain/entities.ts';
 import { MockProvider } from './MockProvider.ts';
 import type { SideIdentityRequest, SideIdentityResolution } from '../src/relay/providers/interfaces.ts';
+import { buildWatermark, type ReconciliationMessage } from '../src/relay/providers/exactSessionReconciliation.ts';
 
 /**
  * Hermetic identity read.
@@ -57,6 +58,8 @@ describe('Phase 8 & Phase 9 — Background Supervision & Crash/Restart Recovery'
     class ControllableProvider extends HermeticIdentityOpenCode {
       public isComplete = false;
       public isWorking = true;
+      /** The hermetic exact session the relay baton reads. */
+      private readonly turns: ReconciliationMessage[] = [];
 
       protected override probeMacOSProcess(_name: string) {
         return {
@@ -64,6 +67,59 @@ describe('Phase 8 & Phase 9 — Background Supervision & Crash/Restart Recovery'
           pid: 5521,
           windowTitle: 'OpenCode — [sess_recover] /repo',
           details: { testEnvironment: true },
+        };
+      }
+
+      public override async deliverInstruction(request: any): Promise<any> {
+        // A confirmed send must land in the exact session, or there is nothing after the
+        // boundary for the baton to observe on the far side of the restart.
+        this.turns.push({
+          messageId: `msg_dispatched_${this.turns.length}`,
+          role: 'user',
+          createdAt: 2_000,
+          text: request.instructionText,
+        });
+        return {
+          outcome: 'delivered',
+          evidence: {
+            id: `ev_recover_d_${Date.now()}`,
+            timestamp: Date.now(),
+            source: 'macos_system_events' as const,
+            runtimeSessionId: request.runtimeSessionId,
+          },
+        };
+      }
+
+      /** The pre-dispatch boundary, from the hermetic transcript rather than the real CLI. */
+      public override async captureTransportBoundary(request: any): Promise<any> {
+        return {
+          watermark: buildWatermark(request.externalSessionId ?? 'ses_recover', this.turns, Date.now()),
+          failure: null,
+        };
+      }
+
+      /**
+       * The authoritative exact-session read, hermetic.
+       *
+       * A still-running turn has no terminator and no text; a finished one carries a
+       * run-terminating `finish` and the response. That is the only difference the relay
+       * baton looks at, so rendering `isWorking` / `isComplete` into the transcript is what
+       * makes this restart test exercise the production path.
+       */
+      public override async readExactSessionTurnsForReconciliation(): Promise<any> {
+        return {
+          readable: true,
+          messages: [
+            ...this.turns,
+            {
+              messageId: 'msg_response',
+              role: 'assistant',
+              createdAt: 3_000,
+              text: this.isComplete ? 'Feature refactored while RelayX was offline.' : '',
+              finish: this.isWorking ? null : this.isComplete ? 'stop' : null,
+            } as ReconciliationMessage,
+          ],
+          failure: null,
         };
       }
 
@@ -101,6 +157,14 @@ describe('Phase 8 & Phase 9 — Background Supervision & Crash/Restart Recovery'
     const planner = await engine1.registerRuntimeSession('chatgpt', 'Planner');
     const worker = await engine1.registerRuntimeSession('opencode', 'Worker');
     const pair = await engine1.createPair(project.id, 'Pair 1', planner.id, worker.id);
+    // The relay baton addresses ONE exact provider session per side, so these fixtures bind a
+    // real external session identity (I-11). Binding happens AFTER createPair on purpose:
+    // createPair demands verified project-association evidence for a session that already has an
+    // external id, and these fixtures exercise the relay loop rather than pairing authority.
+    planner.updateExternalIdentity('ses_chatgpt_phase8_phase11_supervision_recovery_cli_pl1', '/dev/phase8_phase11_supervision_recovery_cli_pl1');
+    worker.updateExternalIdentity('ses_opencode_phase8_phase11_supervision_recovery_cli_wr1', '/dev/phase8_phase11_supervision_recovery_cli_wr1');
+    await db.runtimes.save(planner);
+    await db.runtimes.save(worker);
     // I-2 (S6): engine2's startup recovery reaches the provider, so the Pair must be
     // ACTIVE. This is also what makes the restart assertion meaningful: the pair is
     // activated, the engine is rebuilt, and the recovered operational state still
@@ -109,11 +173,12 @@ describe('Phase 8 & Phase 9 — Background Supervision & Crash/Restart Recovery'
     await engine1.startPair(pair.id);
 
     const assignment = await engine1.createAssignment(pair.id, 'Offline task', 'do something');
-    // Dispatch assignment
-    const attempt = Attempt.create(assignment.id, 1);
-    await db.attempts.save(attempt);
-    assignment.startAttempt(attempt);
-    await db.assignments.save(assignment);
+    // Dispatched for real, so a confirmed Delivery and its recorded pre-dispatch boundary
+    // exist before the restart. The relay baton is defined as "recipient of the last
+    // CONFIRMED Delivery", so an Assignment that was only ever given a hand-made Attempt
+    // carries no baton and no boundary — work that was never sent cannot have a response to
+    // recover, and fabricating one would report an external effect that never occurred.
+    await engine1.dispatchAssignment(assignment.id);
     worker.recordObservationSuccess('working');
     await db.runtimes.save(worker);
 

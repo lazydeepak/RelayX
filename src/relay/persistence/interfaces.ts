@@ -135,6 +135,18 @@ export interface IAssignmentRepository {
   findByPairId(pairId: PairId): Promise<Assignment[]>;
   findAll(): Promise<Assignment[]>;
   findActive(): Promise<Assignment[]>;
+  /**
+   * The recovery notice already issued for one unresolved relay baton episode, if any.
+   *
+   * Keyed by the triggering confirmed Delivery rather than by Pair, because the question
+   * is always "has a notice already gone out FOR THIS EPISODE?". A new baton episode has
+   * a new triggering Delivery and therefore correctly returns `null`, so a genuinely owed
+   * recovery is never suppressed by an earlier, unrelated one.
+   *
+   * The backing UNIQUE partial index makes this a one-or-none lookup, and the engine's
+   * create path is additionally guarded by the same constraint.
+   */
+  findBySourceRecoveryDelivery(deliveryId: DeliveryId): Promise<Assignment | null>;
   save(assignment: Assignment): Promise<void>;
   delete(id: AssignmentId): Promise<void>;
 }

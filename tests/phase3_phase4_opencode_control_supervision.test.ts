@@ -6,6 +6,7 @@ import { MemoryRelayDatabase } from '../src/relay/persistence/memory/MemoryDatab
 import { AmbiguousDeliveryResendError } from '../src/relay/domain/errors.ts';
 import { MockProvider } from './MockProvider.ts';
 import type { SideIdentityRequest, SideIdentityResolution } from '../src/relay/providers/interfaces.ts';
+import { buildWatermark, type ReconciliationMessage } from '../src/relay/providers/exactSessionReconciliation.ts';
 
 /**
  * Hermetic identity read for every test provider in this file.
@@ -116,6 +117,14 @@ describe('Phase 3 & Phase 4 — OpenCode UI Control & Worker Supervision', () =>
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner ChatGPT');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker OpenCode');
     const pair = await engine.createPair(project.id, 'Control Pair', planner.id, worker.id);
+    // The relay baton addresses ONE exact provider session per side, so these fixtures bind a
+    // real external session identity (I-11). Binding happens AFTER createPair on purpose:
+    // createPair demands verified project-association evidence for a session that already has an
+    // external id, and these fixtures exercise the relay loop rather than pairing authority.
+    planner.updateExternalIdentity('ses_chatgpt_phase3_phase4_opencode_control_supervision_pl1', '/dev/phase3_phase4_opencode_control_supervision_pl1');
+    worker.updateExternalIdentity('ses_opencode_phase3_phase4_opencode_control_supervision_wr1', '/dev/phase3_phase4_opencode_control_supervision_wr1');
+    await db.runtimes.save(planner);
+    await db.runtimes.save(worker);
     // I-2 (S6): this test drives provider contact (dispatch/supervision/recovery),
     // which requires operational_state = ACTIVE. Load & Activate is the ONLY
     // authorized grantor (freeze §4.4, §11.5).
@@ -172,6 +181,14 @@ describe('Phase 3 & Phase 4 — OpenCode UI Control & Worker Supervision', () =>
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker');
     const pair = await engine.createPair(project.id, 'Ambiguous Pair', planner.id, worker.id);
+    // The relay baton addresses ONE exact provider session per side, so these fixtures bind a
+    // real external session identity (I-11). Binding happens AFTER createPair on purpose:
+    // createPair demands verified project-association evidence for a session that already has an
+    // external id, and these fixtures exercise the relay loop rather than pairing authority.
+    planner.updateExternalIdentity('ses_chatgpt_phase3_phase4_opencode_control_supervision_pl2', '/dev/phase3_phase4_opencode_control_supervision_pl2');
+    worker.updateExternalIdentity('ses_opencode_phase3_phase4_opencode_control_supervision_wr2', '/dev/phase3_phase4_opencode_control_supervision_wr2');
+    await db.runtimes.save(planner);
+    await db.runtimes.save(worker);
     // I-2 (S6): this test drives provider contact (dispatch/supervision/recovery),
     // which requires operational_state = ACTIVE. Load & Activate is the ONLY
     // authorized grantor (freeze §4.4, §11.5).
@@ -208,12 +225,26 @@ describe('Phase 3 & Phase 4 — OpenCode UI Control & Worker Supervision', () =>
 
     class SupervisedOpenCodeProvider extends HermeticIdentityOpenCode {
       public state: 'working' | 'complete' = 'working';
+      /** The hermetic exact session: a pre-existing exchange the relay did not cause. */
+      private readonly turns: ReconciliationMessage[] = [
+        { messageId: 'msg_preexisting', role: 'user', createdAt: 1_000, text: 'earlier question' },
+        { messageId: 'msg_preexisting_asst', role: 'assistant', createdAt: 1_100, text: 'earlier answer', finish: 'stop' },
+      ];
 
       protected override probeMacOSProcess(_name: string) {
         return { running: true, pid: 1122, windowTitle: 'OpenCode Workspace', details: { testEnvironment: true } };
       }
 
       public override async deliverInstruction(req: any): Promise<any> {
+        // The instruction must actually enter the exact session: the relay baton decides
+        // everything from what the transcript holds after the recorded boundary, so a send
+        // that appended no turn would leave nothing for the baton to observe.
+        this.turns.push({
+          messageId: `msg_dispatched_${this.turns.length}`,
+          role: 'user',
+          createdAt: 2_000,
+          text: req.instructionText,
+        });
         return {
           outcome: 'delivered',
           evidence: {
@@ -222,6 +253,50 @@ describe('Phase 3 & Phase 4 — OpenCode UI Control & Worker Supervision', () =>
             source: 'macos_system_events',
             runtimeSessionId: req.runtimeSessionId,
           },
+        };
+      }
+
+      /**
+       * The pre-dispatch boundary, read from this hermetic transcript.
+       *
+       * Overridden because the production implementation reads the real OpenCode CLI. The
+       * recorded id set is precisely what the baton anchors on, so it has to be genuine: a
+       * stand-in here would make the boundary a decoration.
+       */
+      public override async captureTransportBoundary(request: any): Promise<any> {
+        return {
+          watermark: buildWatermark(
+            request.externalSessionId ?? 'ses_hermetic',
+            this.turns,
+            Date.now(),
+          ),
+          failure: null,
+        };
+      }
+
+      /**
+       * The authoritative exact-session read.
+       *
+       * `state` is rendered into the transcript the way the provider really expresses it: a
+       * still-running turn has NO terminator, and a finished one carries a run-terminating
+       * finish with text. That difference is exactly what the baton reads, which is why
+       * driving `state` here exercises the production path instead of a shortcut.
+       */
+      public override async readExactSessionTurnsForReconciliation(): Promise<any> {
+        const working = this.state === 'working';
+        return {
+          readable: true,
+          messages: [
+            ...this.turns,
+            {
+              messageId: 'msg_response',
+              role: 'assistant',
+              createdAt: 3_000,
+              text: working ? '' : 'Feature implemented cleanly in 3 files.',
+              finish: working ? null : 'stop',
+            } as ReconciliationMessage,
+          ],
+          failure: null,
         };
       }
 
@@ -250,6 +325,14 @@ describe('Phase 3 & Phase 4 — OpenCode UI Control & Worker Supervision', () =>
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker');
     const pair = await engine.createPair(project.id, 'Supervision Pair', planner.id, worker.id);
+    // The relay baton addresses ONE exact provider session per side, so these fixtures bind a
+    // real external session identity (I-11). Binding happens AFTER createPair on purpose:
+    // createPair demands verified project-association evidence for a session that already has an
+    // external id, and these fixtures exercise the relay loop rather than pairing authority.
+    planner.updateExternalIdentity('ses_chatgpt_phase3_phase4_opencode_control_supervision_pl3', '/dev/phase3_phase4_opencode_control_supervision_pl3');
+    worker.updateExternalIdentity('ses_opencode_phase3_phase4_opencode_control_supervision_wr3', '/dev/phase3_phase4_opencode_control_supervision_wr3');
+    await db.runtimes.save(planner);
+    await db.runtimes.save(worker);
     // I-2 (S6): this test drives provider contact (dispatch/supervision/recovery),
     // which requires operational_state = ACTIVE. Load & Activate is the ONLY
     // authorized grantor (freeze §4.4, §11.5).

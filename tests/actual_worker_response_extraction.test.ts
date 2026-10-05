@@ -30,6 +30,14 @@ describe('Phase F — Actual Worker Response Extraction', () => {
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker');
     const pair = await engine.createPair(project.id, 'Supervision Pair', planner.id, worker.id);
+    // The relay baton addresses ONE exact provider session per side, so these fixtures bind a
+    // real external session identity (I-11). Binding happens AFTER createPair on purpose:
+    // createPair demands verified project-association evidence for a session that already has an
+    // external id, and these fixtures exercise the relay loop rather than pairing authority.
+    planner.updateExternalIdentity('ses_chatgpt_actual_worker_response_extraction_pl1', '/dev/actual_worker_response_extraction_pl1');
+    worker.updateExternalIdentity('ses_opencode_actual_worker_response_extraction_wr1', '/dev/actual_worker_response_extraction_wr1');
+    await db.runtimes.save(planner);
+    await db.runtimes.save(worker);
 
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
     await engine.startPair(pair.id);

@@ -91,8 +91,17 @@ class CountingProvider extends MockProvider {
   async reconcileDispatch(r: any) { this.calls.push('reconcileDispatch'); return { outcome: 'unknown' as any }; }
 }
 // This class deliberately exposes NO identity capability. It models a LEVEL 0 provider.
+//
+// Every route to addressing ONE exact session has to be removed, not just the resolver: the
+// capability classifier accepts EITHER a `resolveSideIdentity` resolver OR the
+// `captureTransportBoundary` + `readExactSessionTurnsForReconciliation` DOM-observation pair.
+// Leaving the second pair in place silently promotes this provider from LEVEL 0 to LEVEL 1,
+// and every assertion below about `unknown`-never-`false` would then be testing a capable
+// provider while claiming to test an incapable one.
 (CountingProvider.prototype as any).resolveSideIdentity = undefined;
 (CountingProvider.prototype as any).observeSide = undefined;
+(CountingProvider.prototype as any).captureTransportBoundary = undefined;
+(CountingProvider.prototype as any).readExactSessionTurnsForReconciliation = undefined;
 
 /** LEVEL 1: a provider that CAN resolve and verify an exact external session id. */
 class VerifyingProvider extends CountingProvider {

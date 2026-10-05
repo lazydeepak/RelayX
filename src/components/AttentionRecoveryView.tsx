@@ -49,7 +49,7 @@ export const AttentionRecoveryView: React.FC<AttentionRecoveryViewProps> = ({
             return (
               <div
                 key={item.id}
-                className={`p-5 rounded-xl border flex flex-col md:flex-row md:items-center justify-between gap-4 ${
+                className={`rx-card p-5 rounded-xl border flex flex-col md:flex-row md:items-center justify-between gap-4 ${
                   item.severity === 'critical'
                     ? 'bg-red-950/20 border-red-800/40 text-red-200'
                     : item.severity === 'warning'
@@ -57,7 +57,7 @@ export const AttentionRecoveryView: React.FC<AttentionRecoveryViewProps> = ({
                     : 'bg-slate-900 border-slate-800 text-slate-200'
                 }`}
               >
-                <div className="space-y-1.5 flex-1">
+                <div className="rx-card-content space-y-1.5 flex-1">
                   <div className="flex items-center gap-2">
                     <span
                       className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${
@@ -81,19 +81,19 @@ export const AttentionRecoveryView: React.FC<AttentionRecoveryViewProps> = ({
                     {item.assignmentId && (
                       <span className="flex items-center gap-1">
                         <span className="text-slate-500">Assignment:</span>
-                        <span className="text-slate-300">{item.assignmentId}</span>
+                        <span className="text-slate-300 truncate max-w-[120px]" title={item.assignmentId}>{item.assignmentId}</span>
                       </span>
                     )}
                     {item.deliveryId && (
                       <span className="flex items-center gap-1">
                         <span className="text-slate-500">Delivery:</span>
-                        <span className="text-slate-300">{item.deliveryId}</span>
+                        <span className="text-slate-300 truncate max-w-[120px]" title={item.deliveryId}>{item.deliveryId}</span>
                       </span>
                     )}
                     {item.pairId && (
                       <span className="flex items-center gap-1">
                         <span className="text-slate-500">Pair:</span>
-                        <span className="text-slate-300">{item.pairId}</span>
+                        <span className="text-slate-300 truncate max-w-[120px]" title={item.pairId}>{item.pairId}</span>
                       </span>
                     )}
                   </div>
@@ -106,8 +106,10 @@ export const AttentionRecoveryView: React.FC<AttentionRecoveryViewProps> = ({
                   )}
                 </div>
 
-                {/* Tier 1 Deterministic Recovery & Observability Controls */}
-                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {/* Tier 1 Deterministic Recovery & Observability Controls
+                    One action region. It may wrap onto further lines when the
+                    card is narrow; controls keep their order and gaps. */}
+                <div className="rx-action-group rx-action-group-wrap flex items-center gap-2">
                   {item.type === 'ambiguous_delivery' && recoveryDeliveryArgument(item) && (
                     <>
                       <button

@@ -201,11 +201,13 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({ onNotify }) =>
           </h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {Object.entries(components).map(([name, comp]) => (
-              <div key={name} className="bg-slate-900/60 border border-slate-800/80 rounded-xl p-5 flex flex-col justify-between">
+              <div key={name} className="rx-card bg-slate-900/60 border border-slate-800/80 rounded-xl p-5 flex flex-col justify-between">
                 <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-sm font-semibold text-slate-200">{comp.component}</span>
-                    {renderHealthBadge(comp.status)}
+                  <div className="rx-card-header mb-2">
+                    <span className="rx-value text-sm font-semibold text-slate-200" title={comp.component}>
+                      {comp.component}
+                    </span>
+                    <div className="rx-card-region">{renderHealthBadge(comp.status)}</div>
                   </div>
                   <p className="text-xs text-slate-400 mb-4 line-clamp-2">{comp.summary}</p>
                 </div>

@@ -266,6 +266,55 @@ export default function App() {
     setProjectDetail({ isOpen: true, projectId: project.id });
   };
 
+  const handleOpenPlannerSession = async (sessionId: string) => {
+    // Exact-conversation Open for the planner: opens the bound conversation
+    // (`/c/<id>`) in Chrome, via RelayX's own opener so the persisted
+    // runtime.sessionUrl is used verbatim instead of shell.openExternal() through an
+    // <a target="_blank">. Use handleOpenPlannerProject for the PROJECT page.
+    try {
+      const res: any = await relayBridge.openRuntimeSession(sessionId);
+      // Surface the REAL verified outcome, including the concrete failure reason.
+      if (!res?.success) {
+        notify(
+          `Exact-session Open FAILED — ${res?.error ?? 'no reason reported'}` +
+            (res?.url ? ` (requested: ${res.url})` : ''),
+        );
+      } else {
+        notify(
+          `Opened exact session (verified): ${res.observedUrl ?? res.url}` +
+            `${res.reused ? ' [reused existing tab]' : ''}` +
+            `${res.windowId !== undefined ? ` [WIN:${res.windowId}|TAB:${res.tabId}]` : ''}`,
+        );
+      }
+      await loadData();
+    } catch (err: any) {
+      notify(`Open error: ${formatFriendlyError(err)}`);
+    }
+  };
+
+  /**
+   * Opens the project's ChatGPT PROJECT page in the browser.
+   *
+   * Distinct from handleOpenPlannerSession, which opens the exact conversation. The
+   * project URL is the one captured when the project was added, and it is opened in
+   * Chrome — the ChatGPT desktop app is never brought to the front.
+   */
+  const handleOpenPlannerProject = async (projectId: string) => {
+    try {
+      const res = await relayBridge.openPlannerProject(projectId);
+      if (!res?.success) {
+        notify(
+          `Open project FAILED — ${res?.error ?? 'no reason reported'}` +
+            (res?.url ? ` (requested: ${res.url})` : ''),
+        );
+      } else {
+        notify(`Opened ChatGPT project in browser (verified): ${res.observedUrl ?? res.url}`);
+      }
+    } catch (err: any) {
+      notify(`Open project error: ${formatFriendlyError(err)}`);
+    }
+  };
+
   const handleOpenSessionDetail = (sessionId: string) => {
     setSessionDetail({ isOpen: true, sessionId });
   };
@@ -445,9 +494,16 @@ export default function App() {
     try {
       const success = await relayBridge.activateRuntime(sessionId);
       if (success) {
-        notify('Opened / focused OpenCode session successfully');
+        notify('Opened the exact attached session in OpenCode Desktop');
       } else {
-        notify('OpenCode session process/window activation signal sent');
+        // A false result is a real, reportable failure. The old wording ("activation signal
+        // sent") described success and is what let a silently-diverted keystroke sequence
+        // read as a working Open button.
+        notify(
+          'Open failed: the session was not opened. Another app was holding focus, the ' +
+            'OpenCode title is ambiguous, or OpenCode Desktop is not reachable. ' +
+            'No other session was opened.',
+        );
       }
     } catch (err: any) {
       notify(`Session open error: ${formatFriendlyError(err)}`);
@@ -590,7 +646,7 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-slate-950 text-slate-100 font-sans select-none">
+    <div className="rx-shell h-screen overflow-hidden bg-slate-950 text-slate-100 font-sans select-none">
       {/* Sidebar */}
       <Sidebar
         activeTab={activeTab}
@@ -599,7 +655,7 @@ export default function App() {
       />
 
       {/* Main Content Area */}
-      <main className="flex-1 flex flex-col h-full overflow-hidden bg-slate-950">
+      <main className="rx-page flex flex-col h-full overflow-hidden bg-slate-950">
         {/* Status Toast */}
         {statusNotification && (
           <div className="fixed top-4 right-6 z-50 px-4 py-2.5 rounded-lg bg-blue-600 text-white text-xs font-semibold shadow-xl border border-blue-400/40 animate-fade-in flex items-center gap-2">
@@ -657,6 +713,8 @@ export default function App() {
                 onViewEvidence={(ev) => setSelectedEvidence(ev)}
                 onOpenSessionDetail={handleOpenSessionDetail}
                 onActivateRuntime={handleActivateRuntime}
+                onOpenPlannerSession={handleOpenPlannerSession}
+                onOpenPlannerProject={handleOpenPlannerProject}
                 onActivatePair={handleActivatePair}
               />
             )}

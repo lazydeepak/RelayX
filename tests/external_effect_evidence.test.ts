@@ -226,6 +226,28 @@ describe('S1 — deliverHandoffToPlanner cannot mark external delivery (§9.4, �
     const plannerSession = await engine.registerRuntimeSession('chatgpt', 'Planner');
     const workerSession = await engine.registerRuntimeSession('opencode', 'Worker');
     const pair = await engine.createPair(project.id, 'Pair 1', plannerSession.id, workerSession.id);
+    // The relay baton addresses ONE exact provider session on the side it inspects, so the
+    // WORKER fixture below binds a real external session identity (I-11). Binding happens AFTER
+    // createPair on purpose: createPair demands verified project-association evidence for a
+    // session that already has an external id, and these fixtures exercise the relay loop
+    // rather than pairing authority.
+    //
+    // The PLANNER is deliberately left WITHOUT one, in every fixture in this file. All of them
+    // assert that a Handoff cannot be recorded as delivered to the Planner, and
+    // `attemptPlannerDelivery` performs a real provider send as soon as the Planner side has an
+    // external session id. Binding it would stop testing the guarantee this file exists to prove.
+    // The relay baton addresses ONE exact provider session on the side it inspects, so the
+    // WORKER fixture binds a real external session identity (I-11). Binding happens AFTER
+    // createPair on purpose: createPair demands verified project-association evidence for a
+    // session that already has an external id, and these fixtures exercise the relay loop
+    // rather than pairing authority.
+    //
+    // The PLANNER is deliberately left WITHOUT one. Every test in this group asserts that a
+    // Handoff cannot be recorded as delivered to the Planner, and `attemptPlannerDelivery`
+    // performs a real provider send as soon as the Planner side has an external session id.
+    // Binding it here would stop testing the guarantee this file exists to prove.
+    workerSession.updateExternalIdentity('ses_opencode_external_effect_evidence_wr1', '/dev/external_effect_evidence_wr1');
+    await db.runtimes.save(workerSession);
     // I-2 (S6): the dispatch and supervision this S1 test observes are provider
     // contact, so the Pair must be ACTIVE. Load & Activate is the ONLY authorized
     // grantor (freeze §4.4, §11.5). Nothing here weakens an S1 evidence assertion:
@@ -328,6 +350,8 @@ describe('S1 — attemptPlannerDelivery reports a truthful, typed outcome (§9.4
     const plannerSession = await engine.registerRuntimeSession('chatgpt', 'Planner');
     const workerSession = await engine.registerRuntimeSession('opencode', 'Worker');
     const pair = await engine.createPair(project.id, 'Pair 1', plannerSession.id, workerSession.id);
+    workerSession.updateExternalIdentity('ses_opencode_external_effect_evidence_wr2', '/dev/external_effect_evidence_wr2');
+    await db.runtimes.save(workerSession);
     // I-2 (S6): the dispatch and supervision this S1 test observes are provider
     // contact, so the Pair must be ACTIVE. Load & Activate is the ONLY authorized
     // grantor (freeze §4.4, §11.5). Nothing here weakens an S1 evidence assertion:
@@ -423,6 +447,8 @@ describe('S1 — no event type in src/ asserts the Planner was notified', () => 
     const plannerSession = await engine.registerRuntimeSession('chatgpt', 'Planner');
     const workerSession = await engine.registerRuntimeSession('opencode', 'Worker');
     const pair = await engine.createPair(project.id, 'Pair 1', plannerSession.id, workerSession.id);
+    workerSession.updateExternalIdentity('ses_opencode_external_effect_evidence_wr3', '/dev/external_effect_evidence_wr3');
+    await db.runtimes.save(workerSession);
     // I-2 (S6): the dispatch and supervision this S1 test observes are provider
     // contact, so the Pair must be ACTIVE. Load & Activate is the ONLY authorized
     // grantor (freeze §4.4, §11.5). Nothing here weakens an S1 evidence assertion:
@@ -463,6 +489,8 @@ describe('S1 — the handoff lifecycle cannot manufacture a delivery record', ()
     const plannerSession = await engine.registerRuntimeSession('chatgpt', 'Planner');
     const workerSession = await engine.registerRuntimeSession('opencode', 'Worker');
     const pair = await engine.createPair(project.id, 'Pair 1', plannerSession.id, workerSession.id);
+    workerSession.updateExternalIdentity('ses_opencode_external_effect_evidence_wr4', '/dev/external_effect_evidence_wr4');
+    await db.runtimes.save(workerSession);
     // I-2 (S6): the dispatch and supervision this S1 test observes are provider
     // contact, so the Pair must be ACTIVE. Load & Activate is the ONLY authorized
     // grantor (freeze §4.4, §11.5). Nothing here weakens an S1 evidence assertion:

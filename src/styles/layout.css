@@ -1,0 +1,34 @@
+/* RelayX layout primitives — app shell, sidebar, main page column.
+ *
+ * Ownership: these describe RelayX-wide sizing policy (sidebar + main content
+ * must never exceed the window). Everything inside a page stays component-local.
+ *
+ * Grid track policy is NOT redefined here: Tailwind's grid-cols-* already emits
+ * repeat(N, minmax(0, 1fr)), so tracks are shrink-safe by default.
+ *
+ * Layered as components so a component can intentionally override with a
+ * Tailwind utility (e.g. w-full, flex-none) without !important.
+ */
+@layer components {
+  /* Root application shell: window-sized row, never wider than the window. */
+  .rx-shell {
+    display: flex;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  /* Sidebar: intrinsic width, never stretched or squeezed by main content. */
+  .rx-sidebar {
+    flex: 0 0 auto;
+    width: 16rem;
+    min-width: 0;
+  }
+
+  /* Main content column: absorbs remaining space, may shrink to zero. */
+  .rx-page {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 100%;
+  }
+}

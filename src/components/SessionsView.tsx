@@ -330,14 +330,14 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
             return (
               <div
                 key={session.id}
-                className={`p-5 rounded-xl bg-slate-900 border flex flex-col justify-between space-y-4 shadow-sm transition-all ${
+                className={`rx-card p-5 rounded-xl bg-slate-900 border flex flex-col justify-between space-y-4 shadow-sm transition-all ${
                   session.status === 'archived' ? 'border-slate-800/60 opacity-80' : 'border-slate-800'
                 }`}
               >
                 <div className="space-y-3">
-                  {/* Top Badges */}
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-1.5">
+                  {/* Top Badges — identity region + status region */}
+                  <div className="rx-card-header">
+                    <div className="rx-card-region rx-card-region-wrap">
                       <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-semibold">
                         {session.providerType}
                       </span>
@@ -352,7 +352,7 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
                       </span>
                     </div>
 
-                    <div className="flex items-center gap-1.5">
+                    <div className="rx-card-region">
                       {getStatusBadge(session.status)}
                     </div>
                   </div>
@@ -376,7 +376,7 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
 
                   {/* Concrete Identity Display */}
                   <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-850 space-y-1 text-xs">
-                    <div className="flex items-center justify-between text-slate-400 text-[10px]">
+                    <div className="rx-card-header text-slate-400 text-[10px]">
                       <span className="font-semibold uppercase tracking-wider">Concrete Session ID</span>
                       {session.externalSessionId && (
                         <button
@@ -489,9 +489,13 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
                   </div>
                 </div>
 
-                {/* Bottom Action Controls */}
-                <div className="flex items-center justify-between pt-2.5 border-t border-slate-800">
-                  <div className="flex items-center gap-1.5">
+                {/* Bottom Action Controls
+                    One action region (header/content region not involved here).
+                    The primary group may wrap as a unit when the card is too
+                    narrow; the archive/restore control stays a single nowrap
+                    region so it is never stranded on its own row. */}
+                <div className="rx-card-header pt-2.5 border-t border-slate-800">
+                  <div className="rx-action-group rx-action-group-wrap gap-1.5">
                     <button
                       onClick={() => onOpenSessionDetail(session.id)}
                       className="flex items-center gap-1 px-2 py-1 rounded bg-slate-850 hover:bg-slate-750 text-slate-200 text-[11px] transition-colors"
@@ -533,23 +537,25 @@ export const SessionsView: React.FC<SessionsViewProps> = ({
                   </div>
 
                   {/* Archive / Restore */}
-                  {session.status === 'archived' ? (
-                    <button
-                      onClick={() => onUnarchiveSession(session.id)}
-                      className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-emerald-400 transition-colors"
-                      title="Restore Session"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => onArchiveSession(session.id)}
-                      className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-amber-400 transition-colors"
-                      title="Archive Session"
-                    >
-                      <Archive className="w-3.5 h-3.5" />
-                    </button>
-                  )}
+                  <div className="rx-action-region shrink-0">
+                    {session.status === 'archived' ? (
+                      <button
+                        onClick={() => onUnarchiveSession(session.id)}
+                        className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-emerald-400 transition-colors"
+                        title="Restore Session"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => onArchiveSession(session.id)}
+                        className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-amber-400 transition-colors"
+                        title="Archive Session"
+                      >
+                        <Archive className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             );

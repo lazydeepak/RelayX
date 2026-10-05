@@ -189,7 +189,7 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({ onNotify }) 
       </div>
 
       {/* Active Defaults Authority Card */}
-      <div className="p-4 rounded-xl bg-gradient-to-r from-blue-950/30 via-slate-900 to-indigo-950/30 border border-blue-900/40 flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div className="rx-card p-4 rounded-xl bg-gradient-to-r from-blue-950/30 via-slate-900 to-indigo-950/30 border border-blue-900/40 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="space-y-1">
           <div className="flex items-center gap-2 text-blue-400 font-semibold text-xs uppercase tracking-wider">
             <ShieldCheck className="w-4 h-4 text-emerald-400" />
@@ -201,7 +201,7 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({ onNotify }) 
           </p>
         </div>
 
-        <div className="flex items-center gap-4 shrink-0">
+        <div className="rx-action-group rx-action-group-wrap gap-4">
           <div className="px-3.5 py-2 rounded-lg bg-slate-950/80 border border-blue-500/30 flex items-center gap-2.5">
             <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
             <div>
@@ -277,7 +277,7 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({ onNotify }) 
           return (
             <div
               key={id}
-              className={`rounded-2xl bg-slate-900 border transition-all overflow-hidden ${
+              className={`rx-card rounded-2xl bg-slate-900 border transition-all overflow-hidden ${
                 !isEnabled
                   ? 'border-slate-800 opacity-60 bg-slate-950/40'
                   : app.isDefaultPlanner

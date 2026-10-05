@@ -62,6 +62,18 @@ describe('Phase 2 — Real OpenCode Discovery', () => {
         this.mockTitle = title;
       }
 
+      /**
+       * Determinism guard, matching the one the "not running" test above already uses.
+       *
+       * `findRuntime` consults `findAllRuntimes()` BEFORE `probeMacOSProcess`, so overriding
+       * only the latter leaves the real host enumeration in play — and whichever OpenCode
+       * happens to be running on the machine decides the assertions. This override keeps the
+       * test on its own mock and off the host, which is what it was always meant to test.
+       */
+      override async findAllRuntimes() {
+        return [];
+      }
+
       protected override probeMacOSProcess(_name: string) {
         if (!this.mockPid) {
           return { running: false, details: { reason: 'Process not running' } };
@@ -116,6 +128,11 @@ describe('Phase 2 — Real OpenCode Discovery', () => {
           pid: 8891,
           windowTitle: 'OpenCode Workspace',
         };
+      }
+      // Same determinism guard as above: keep the host enumeration out of a test that is
+      // about the FAILURE transition, not about which processes exist on this machine.
+      override async findAllRuntimes() {
+        return [];
       }
     }
 

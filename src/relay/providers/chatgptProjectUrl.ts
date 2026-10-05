@@ -66,20 +66,43 @@ export function extractChatGPTProjectIdFromUrl(url: string | null | undefined): 
 }
 
 /**
+ * The stable ChatGPT Project key, or `null` when the input carries none.
+ *
+ * ChatGPT emits the SAME project under two slug spellings:
+ *
+ *   stable   `g-p-<32-hex>`            e.g. `g-p-6a9bdd536b688191b57de5da6e7f3b09`
+ *   named    `g-p-<32-hex>-<name>`     e.g. `g-p-6a9bdd53…-test-project`
+ *
+ * The named form is cosmetic and changes with the project name; the stable key
+ * is what identifies the project, and it is the form ChatGPT's own redirect
+ * settles on. Accepts either a bare slug or a full URL so callers never have to
+ * decide which they hold.
+ *
+ * A slug with no 32-hex key (`g-p-abc123def456`, legacy `/p/<slug>`) has no
+ * separate stable form and is returned verbatim, so this never invents identity.
+ */
+export function toStableChatGPTProjectId(slugOrUrl: string | null | undefined): string | null {
+  const raw = typeof slugOrUrl === 'string' ? slugOrUrl.trim() : '';
+  if (!raw) return null;
+  // The ONE host-aware extractor decides whether this is a ChatGPT Project at all
+  // (absolute URLs are host-checked; bare slugs are not URLs and pass through).
+  // Identity normalization must never widen that gate.
+  const slug = extractChatGPTProjectIdFromUrl(raw);
+  if (!slug) return null;
+  return slug.match(/^(g-p-[0-9a-f]{32})(?:-|$)/)?.[1] ?? slug.toLowerCase();
+}
+
+/**
  * Canonicalizes a ChatGPT Project URL to its project root form.
- * `…/g/<g-p-id>/c/<conv>` -> `https://chatgpt.com/g/<g-p-id>/project`
+ * `…/g/<g-p-id>/c/<conv>` -> `https://chatgpt.com/g/<stable g-p-id>/project`
+ *
+ * The stable key is used deliberately: the named slug form is the same project
+ * wearing a cosmetic suffix, so persisting it verbatim is what made one project
+ * read as two different records depending on which flow captured the URL.
  */
 export function canonicalizeChatGPTProjectUrlFromUrl(url: string | null | undefined): string | null {
-  const projectId = extractChatGPTProjectIdFromUrl(url);
+  const projectId = toStableChatGPTProjectId(url);
   if (!projectId) return null;
-  try {
-    const parsed = new URL(String(url));
-    if (isChatGPTHost(parsed.hostname)) {
-      return `https://chatgpt.com/g/${projectId}/project`;
-    }
-  } catch {
-    // fall through to the chatgpt.com default below
-  }
   return `https://chatgpt.com/g/${projectId}/project`;
 }
 
@@ -94,13 +117,15 @@ export function canonicalizeChatGPTProjectUrlFromUrl(url: string | null | undefi
  *
  * Each is canonicalized to its own root form, so a legacy binding round-trips
  * unchanged instead of being rewritten into a shape ChatGPT never produced.
+ * A modern project's id is normalized to its stable `g-p-<32-hex>` key, so the
+ * named slug form and the stable form of one project produce ONE identity.
  *
  * Fails closed: returns `null` whenever the URL carries no Project identity —
  * including a standalone `/c/<conversationId>` URL, which is SESSION identity and
  * must never be bound as a Project.
  */
 export function parseChatGPTProjectUrl(url: string | null | undefined): ChatGPTProjectUrlIdentity | null {
-  const modernId = extractChatGPTProjectIdFromUrl(url);
+  const modernId = toStableChatGPTProjectId(url);
   if (modernId) {
     return { projectId: modernId, canonicalProjectUrl: `https://chatgpt.com/g/${modernId}/project` };
   }

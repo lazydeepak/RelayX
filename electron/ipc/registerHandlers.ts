@@ -69,6 +69,9 @@ export function registerRelayIpcHandlers(service: RelayApiService): void {
   ipcMain.handle(RELAY_IPC_CHANNELS.OPEN_RUNTIME_SESSION, (_event, sessionId) =>
     service.openRuntimeSession(sessionId),
   );
+  ipcMain.handle(RELAY_IPC_CHANNELS.OPEN_PLANNER_PROJECT, (_event, projectId) =>
+    service.openPlannerProject(projectId),
+  );
   ipcMain.handle(RELAY_IPC_CHANNELS.RECOVER_RUNTIME, (_event, sessionId) =>
     service.recoverRuntime(sessionId),
   );

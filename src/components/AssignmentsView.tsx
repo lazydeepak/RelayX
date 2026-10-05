@@ -65,7 +65,7 @@ export const AssignmentsView: React.FC<AssignmentsViewProps> = ({ assignments, f
       ) : (
         <div className="space-y-3">
           {filtered.map((asgn) => (
-            <div key={asgn.id} className="rounded-xl bg-slate-900 border border-slate-800 overflow-hidden">
+            <div key={asgn.id} className="rx-card rounded-xl bg-slate-900 border border-slate-800 overflow-hidden">
               <button
                 onClick={() => handleSelect(asgn.id)}
                 className="w-full text-left p-5 hover:bg-slate-800/50 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500/20"

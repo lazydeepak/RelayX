@@ -73,19 +73,57 @@ import {
   type OpenCodeSessionSummary,
   type ServiceDiscoveryFailure,
 } from './opencodeSessionClient.ts';
+import { OpenCodeFixedServerClient } from './opencodeFixedServer.ts';
+import {
+  buildOpenCodeWorkerOpenSteps,
+  resolveOpenCodeWorkerOpenTarget,
+  runForegroundGatedSteps,
+  type WorkerOpenPreflightFailure,
+} from './opencodeWorkerSessionOpen.ts';
+
+/**
+ * Outcome of opening the exact bound OpenCode worker session in OpenCode Desktop.
+ *
+ * `ok` is never inferred from an `osascript` exit code: it is true only when every keystroke
+ * was emitted while OpenCode was the OBSERVED foreground application. The evidence needed to
+ * judge the outcome travels with it so the UI can report something truthful.
+ */
+export interface OpenCodeWorkerOpenResult {
+  ok: boolean;
+  /** The authoritative id that was targeted. Never changed by this call. */
+  externalSessionId?: string;
+  /** The title read from OpenCode for that exact id and typed into the Desktop UI. */
+  resolvedTitle?: string;
+  /** True when RelayX's stored display title had drifted from the live one. */
+  storedTitleWasStale?: boolean;
+  previousStoredTitle?: string | null;
+  /** Other sessions sharing the resolved title in the same directory (empty when unique). */
+  duplicateTitleSessionIds?: string[];
+  /** Labels of the UI automation steps actually executed, in order. */
+  stepsSent?: string[];
+  /** Foreground observed immediately before each keystroke — the audit trail. */
+  foregroundBeforeEachStep?: Array<{ label: string; foreground: string | null }>;
+  failure?:
+    | WorkerOpenPreflightFailure
+    | 'foreground_never_verified'
+    | 'keystroke_failed'
+    | 'unsupported_platform';
+  error?: string;
+}
 import {
   buildWatermark,
   reconcileTransportOutcome,
   type ExactSessionWatermark,
   type ReconciliationMessage,
 } from './exactSessionReconciliation.ts';
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { parseChatGPTConversationUrl } from './chatgptConversationUrl.ts';
 import {
   canonicalizeChatGPTProjectUrlFromUrl,
   extractChatGPTProjectIdFromUrl,
   isChatGPTProjectLessUrl,
   parseChatGPTProjectUrl,
+  toStableChatGPTProjectId,
 } from './chatgptProjectUrl.ts';
 import {
   DEFAULT_CHATGPT_PROJECT_DISCOVERY_PROFILE,
@@ -274,7 +312,25 @@ export abstract class BaseMacOSProvider implements IRuntimeProvider {
       // any multiline script and causing `0:1: syntax error ... (-2740)` on every
       // stage in the packaged app. Passing the script in argv keeps every byte
       // (double quotes, backslashes, tabs, newlines, apostrophes) intact.
-      const { execFileSync } = require('child_process');
+      //
+      // `execFileSync` comes from a STATIC top-level `import` (see the import block at the top
+      // of this file), not from a bare `require(...)` and not from `createRequire(import.meta.url)`.
+      //
+      // The bare-`require` form was a real latent defect: this module is ESM source
+      // (`"type": "module"`), where a bare `require` is undefined, so EVERY AppleScript probe in
+      // this file failed with "require is not defined" whenever the adapter ran outside the CJS
+      // bundle (e.g. the `node --import tsx` source-mode runs this repo's own runbooks prescribe).
+      //
+      // `createRequire(import.meta.url)` fixes ESM but is WRONG for the shipped artifact: esbuild
+      // bundles this file to CommonJS for the Electron main process, and in CJS there is no
+      // `import.meta`, so esbuild substitutes an empty object and `import.meta.url` is `undefined`.
+      // `createRequire(undefined)` then throws
+      // "The argument 'filename' must be a file URL object, file URL string, or absolute path string"
+      // — silently disabling every AppleScript probe in the packaged app, which is precisely the
+      // process the live relay runs in.
+      //
+      // A static import is the one form that is correct in BOTH module systems: Node resolves it
+      // natively under ESM and esbuild hoists it into the CJS bundle as a normal `require`.
       const output = execFileSync('/usr/bin/osascript', ['-e', script], {
         encoding: 'utf8',
         timeout: timeoutMs,
@@ -662,6 +718,39 @@ export function escapeAppleScriptStringLiteral(source: string): string {
     .replace(/\r/g, '\\r')
     .replace(/\n/g, '\\n')
     .replace(/\t/g, '\\t');
+}
+
+/**
+ * UTF-8 -> Base64, for transporting page JavaScript through an AppleScript string literal.
+ */
+export function encodeJavaScriptForAppleScript(source: string): string {
+  return Buffer.from(source, 'utf8').toString('base64');
+}
+
+/**
+ * WHY THIS EXISTS (proven corruption, not a hypothesis):
+ *
+ * escapeAppleScriptStringLiteral rewrites REAL newlines into the two characters \n.
+ * Those characters land inside the JavaScript SOURCE, between statements, where a bare
+ * \n is not valid JavaScript - only a SyntaxError. Quote- and backslash-heavy string
+ * literals were rewritten as well ('it\'s' became 'it\\'s', and '\u00e9' became a
+ * literal backslash-u).
+ *
+ * Consequence: small single-line probes still worked, which made the corruption look like
+ * a composer/selector problem, while every real multi-line script silently failed.
+ *
+ * The fix is transport-level: Base64-encode the source, embed ONLY the Base64 alphabet in
+ * the AppleScript literal, and decode + evaluate inside the page. Base64 has no quotes,
+ * backslashes or newlines, so nothing can be mangled.
+ */
+export function appleScriptJsEvalWrapper(b64: string): string {
+  return (
+    '(function(){try{var b=atob("' + b64 + '");' +
+    'var s=decodeURIComponent(escape(b));' +
+    'var r=(0,eval)(s);' +
+    'return (typeof r==="string")?r:JSON.stringify(r===undefined?null:r);' +
+    '}catch(e){return "__JSERR__"+String(e&&e.name)+": "+String(e&&e.message);}})()'
+  );
 }
 
 /**
@@ -1296,6 +1385,229 @@ export class ChatGPTProvider extends BaseMacOSProvider {
     return { outcome: 'delivered', evidence };
   }
 
+  /**
+   * AUTHORITATIVE reachability proof for ONE exact ChatGPT conversation.
+   *
+   * ## The defect this closes
+   *
+   * A planner runtime reaches `RuntimeSession.status === 'terminated'` purely by counting
+   * failed local probes (`recordObservationFailure`). `resolveBatonSide` then refused to
+   * address the side on that basis and returned `session_identity_unproven`, while the only
+   * observation able to revive the runtime (`inspectRuntime`) is never called by the
+   * supervision tick or by startup recovery. The result was a permanently wedged relay over a
+   * conversation that still existed.
+   *
+   * This method is the authoritative answer RelayX should have asked instead. It resolves the
+   * exact conversation by the provider's OWN id, using the browser transport that already
+   * exists in this class — no new automation, no invented URL.
+   *
+   * ## How the evidence is obtained (and why it cannot be faked)
+   *
+   *   1. Every open Chrome tab's REAL URL is read through AppleScript.
+   *   2. A tab whose real URL is the requested conversation route is adopted directly.
+   *   3. If no tab holds it, a tab is opened at the persisted URL and the URL is read back
+   *      FROM THAT EXACT TAB.
+   *   4. The returned `conversationId` is parsed out of the URL the browser actually
+   *      reported. It is never the id that was asked about.
+   *
+   * Step 4 is what makes a fabricated positive impossible: a provider-side redirect to the
+   * project root, a login wall, or a different conversation all yield a different (or absent)
+   * parsed id, which this method reports as `reachable: false` with the observed URL attached.
+   *
+   * ## Honesty about failure (I-6, C-8)
+   *
+   *   - `reachable: false` + `failure: null` means the browser positively answered and the
+   *     route was not the requested conversation.
+   *   - `failure != null` means "could not check" (AppleScript denied, Chrome absent,
+   *     navigation failed, read-back never settled). Never coerced to `reachable: false`.
+   *
+   * Read-only apart from opening one tab, which is the same navigation `createPlannerSession`
+   * already performs. No message is ever typed or sent.
+   */
+  async confirmExactSessionReachable(
+    externalSessionId: string,
+    sessionUrl?: string | null,
+  ): Promise<{
+    reachable: boolean;
+    conversationId: string | null;
+    evidence?: ObservableEvidence;
+    failure: string | null;
+  }> {
+    const now = Date.now();
+
+    if (!externalSessionId || typeof externalSessionId !== 'string') {
+      return {
+        reachable: false,
+        conversationId: null,
+        failure: 'No conversation id was supplied, so there is no provider-owned identity to address.',
+      };
+    }
+
+    // A UUID-shaped id is the only shape ChatGPT conversation routes carry. Refusing anything
+    // else stops a name, a window title or a URL from being passed off as an id (I-11).
+    const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!UUID.test(externalSessionId)) {
+      return {
+        reachable: false,
+        conversationId: null,
+        failure: `"${externalSessionId}" is not a ChatGPT conversation id. RelayX will not substitute a name or window title for a provider-owned identity (I-11).`,
+      };
+    }
+
+    const target = sessionUrl?.includes('/c/')
+      ? sessionUrl
+      : `https://chatgpt.com/c/${externalSessionId}`;
+
+    if (typeof process === 'undefined' || process.platform !== 'darwin') {
+      return {
+        reachable: false,
+        conversationId: null,
+        failure: 'Host platform is not macOS, so the browser conversation route cannot be read.',
+      };
+    }
+
+    const evidenceBase = {
+      id: `ev_chatgpt_readdress_${now}`,
+      timestamp: now,
+      source: 'macos_system_events' as const,
+      details: { method: 'chatgpt_conversation_readdress', requestedConversationId: externalSessionId },
+    };
+
+    // --- Step 1/2. Adopt an EXISTING tab already showing the exact conversation ------
+    const listed = this.runAppleScript(
+      `tell application "Google Chrome"
+        set out to ""
+        repeat with w from 1 to (count of windows)
+          repeat with t from 1 to (count of tabs of window w)
+            set u to URL of tab t of window w
+            if u contains "/c/${externalSessionId}" then set out to out & u & linefeed
+          end repeat
+        end repeat
+        return out
+      end tell`,
+      6000,
+    );
+
+    if (!listed.success) {
+      return {
+        reachable: false,
+        conversationId: null,
+        failure: `Could not enumerate Chrome tabs: ${listed.error ?? 'unknown AppleScript failure'}`,
+      };
+    }
+
+    const existingUrl = (listed.output || '')
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.length > 0);
+
+    if (existingUrl) {
+      // The browser itself reported this URL for a live tab. Parse the id back out of it.
+      const parsed = this.extractChatGPTConversationId(existingUrl);
+      const matches = parsed === externalSessionId;
+      return {
+        reachable: matches,
+        conversationId: parsed,
+        evidence: {
+          ...evidenceBase,
+          details: {
+            ...evidenceBase.details,
+            route: 'existing_tab',
+            observedUrl: existingUrl,
+            observedConversationId: parsed,
+            identityMatchesRequested: matches,
+          },
+        },
+        failure: matches
+          ? null
+          : `Chrome reported the live tab URL as '${existingUrl}', whose conversation id is '${
+              parsed ?? 'not a conversation route'
+            }' rather than the requested '${externalSessionId}'.`,
+      };
+    }
+
+    // --- Step 3/4. No tab holds it: open one and read the URL back from THAT tab -------
+    // Navigation is bounded and settled: a root `chatgpt.com/` or a project route that has
+    // not yet resolved to `/c/<id>` is reported as "could not check", never as reachable.
+    const opened = this.runAppleScript(
+      `tell application "Google Chrome"
+        try
+          tell window 1
+            make new tab with properties {URL:"${target}"}
+          end tell
+          return "OPEN_OK"
+        on error errMsg
+          return "OPEN_FAIL::" & errMsg
+        end try
+      end tell`,
+      8000,
+    );
+
+    if (!opened.success || !opened.output.startsWith('OPEN_OK')) {
+      return {
+        reachable: false,
+        conversationId: null,
+        failure: `Could not open a tab for conversation '${externalSessionId}': ${
+          opened.error ?? opened.output ?? 'unknown AppleScript failure'
+        }`,
+      };
+    }
+
+    const deadline = Date.now() + 12000;
+    let observedUrl: string | null = null;
+    while (Date.now() < deadline) {
+      const readBack = this.runAppleScript(
+        `tell application "Google Chrome"
+          try
+            set u to URL of active tab of window 1
+            return u
+          on error errMsg
+            return "READ_FAIL::" & errMsg
+          end try
+        end tell`,
+        5000,
+      );
+      const value = (readBack.output || '').trim();
+      if (readBack.success && value && !value.startsWith('READ_FAIL::')) {
+        observedUrl = value;
+        // Settled only once it is a real conversation route naming the requested id.
+        if (value.includes(`/c/${externalSessionId}`)) break;
+      }
+      // Bounded settle: a short real pause, never a busy loop against Chrome.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+
+    if (!observedUrl) {
+      return {
+        reachable: false,
+        conversationId: null,
+        failure: `A tab was opened for conversation '${externalSessionId}' but its URL could not be read back, so existence was not established.`,
+      };
+    }
+
+    const parsed = this.extractChatGPTConversationId(observedUrl);
+    const matches = parsed === externalSessionId;
+    return {
+      reachable: matches,
+      conversationId: parsed,
+      evidence: {
+        ...evidenceBase,
+        details: {
+          ...evidenceBase.details,
+          route: 'navigated_readback',
+          observedUrl,
+          observedConversationId: parsed,
+          identityMatchesRequested: matches,
+        },
+      },
+      failure: matches
+        ? null
+        : `After navigating, the tab settled at '${observedUrl}', whose conversation id is '${
+            parsed ?? 'not a conversation route'
+          }' rather than the requested '${externalSessionId}'.`,
+    };
+  }
+
   override async detectWorkingState(
     sessionId: RuntimeSessionId,
   ): Promise<{ isWorking: boolean; evidence?: ObservableEvidence }> {
@@ -1451,12 +1763,24 @@ export class ChatGPTProvider extends BaseMacOSProvider {
   }
 
   /** Executes JavaScript on the exact retained tab. */
-  private executeHandleJavaScript(handle: BrowserHandle, javaScript: string, timeoutMs = 3000): { success: boolean; output?: string; error?: string } {
+  private executeHandleJavaScript(handle: BrowserHandle, javaScript: string, timeoutMs = 3000): {
+    success: boolean;
+    output?: string;
+    error?: string;
+    /** Which layer failed: applescript_execution | javascript_runtime | transport_envelope */
+    failureSource?: string;
+  } {
+    // Base64 transport. The AppleScript literal carries ONLY the Base64 alphabet, so no
+    // quote, backslash or newline in the page source can be corrupted on the way in.
+    // The wrapper still contains double quotes (atob("...")), so it must be escaped for the
+    // AppleScript literal. It contains NO backslashes or newlines by construction, so this
+    // escaping cannot corrupt the Base64 payload.
+    const wrapper = appleScriptJsEvalWrapper(encodeJavaScriptForAppleScript(javaScript)).replace(/"/g, '\\"');
     const script = `
       tell application "Google Chrome"
         try
           set t to tab id ${handle.tabId} of window id ${handle.windowId}
-          set jsOut to (execute t javascript "${escapeAppleScriptStringLiteral(javaScript)}")
+          set jsOut to (execute t javascript "${wrapper}")
           return "OK::" & jsOut
         on error errMsg
           return "ERR::" & errMsg
@@ -1464,12 +1788,25 @@ export class ChatGPTProvider extends BaseMacOSProvider {
       end tell
     `;
     const res = this.runAppleScript(script, timeoutMs);
-    if (!res.success) return { success: false, error: res.error };
+    if (!res.success) {
+      return { success: false, error: res.error, failureSource: 'applescript_execution' };
+    }
     const trimmed = (res.output || '').trim();
     if (trimmed.startsWith('ERR::')) {
-      return { success: false, output: trimmed, error: trimmed.replace('ERR::', '') };
+      // AppleScript/Chrome level, including the documented
+      // "Executing JavaScript through AppleScript is turned off" preference gate.
+      return { success: false, output: trimmed, error: trimmed.replace('ERR::', ''), failureSource: 'applescript_execution' };
     }
-    return { success: true, output: trimmed.replace(/^OK::/, '') };
+    if (!trimmed.startsWith('OK::')) {
+      return { success: false, output: trimmed, error: `Unexpected transport envelope: ${trimmed.slice(0, 120)}`, failureSource: 'transport_envelope' };
+    }
+    const payload = trimmed.replace(/^OK::/, '');
+    if (payload.startsWith('__JSERR__')) {
+      // The page script itself threw. Reported honestly, never coerced into a value.
+      const detail = payload.slice('__JSERR__'.length);
+      return { success: false, output: payload, error: `JavaScript runtime error in page: ${detail}`, failureSource: 'javascript_runtime' };
+    }
+    return { success: true, output: payload };
   }
 
   /** Verifies the retained handle is still resolvable in Chrome. */
@@ -3469,9 +3806,24 @@ export class OpenCodeProvider extends BaseMacOSProvider {
           transportStderrExcerpt: transportError?.slice(0, 1000) ?? null,
           transportStdoutExcerpt: transportStdout?.slice(0, 1000) ?? null,
           modelOverride: request.modelOverride ?? null,
-          selectedModel: selectedModel ?? null,
-          modelSelectionSource: request.modelOverride ? 'relay_override' : 'opencode_default_model',
-          fallbackUsed: selectedModel !== (request.modelOverride ?? null),
+          // MEASURED live: when `skipForcedModel` is true the transport runs WITHOUT `--model`,
+          // so the session executes on whatever model it already had. Recording the requested
+          // model here as "selected" was a fabricated positive — the live cycle reported
+          // selectedModel=opencode-zen/free-default while the run was actually on
+          // opencode/big-pickle, and that model is not even available on this build
+          // ("Model unavailable"), so the record pointed at a model that could never have run.
+          // `selectedModel` now means "the model RelayX actually forced", and the model that
+          // really executed is reported from the session read-back above.
+          modelFlagPassed: !skipForcedModel,
+          selectedModel: skipForcedModel ? null : (selectedModel ?? null),
+          modelSelectionSource: skipForcedModel
+            ? 'session_existing_model'
+            : request.modelOverride
+              ? 'relay_override'
+              : 'opencode_default_model',
+          fallbackUsed: skipForcedModel
+            ? false
+            : selectedModel !== (request.modelOverride ?? null),
           authorizationCheck: 'externalSessionId_present',
         },
       };
@@ -3562,6 +3914,101 @@ export class OpenCodeProvider extends BaseMacOSProvider {
   }
 
   /**
+   * Reconcile an ALREADY-SENT dispatch against the exact OpenCode session.
+   *
+   * ## Why this method has to exist
+   *
+   * `deliverInstruction()` cannot report delivery truthfully about a send whose outcome it
+   * did not witness — the process can die between the external write and the local commit, the
+   * shared service can be unreachable at that instant, and the transport can exit non-zero for
+   * reasons that have nothing to do with insertion. Any of those leaves a `Delivery` stuck at
+   * `ambiguous` with no way forward except a resend, which would duplicate the instruction
+   * inside a conversation that may already hold it.
+   *
+   * Without this probe the engine's only options are "resend" or "ask a human", and asking a
+   * human is not a resolution mechanism. This method is what makes the reconciler able to
+   * settle a stranded intent from evidence instead.
+   *
+   * ## The two-window rule — why `not_delivered` requires overlap
+   *
+   * The provider exposes exactly TWO readable windows, the oldest 50 rows and the newest 50
+   * rows, and no offset. For a longer session the middle is unreadable. Both windows are
+   * searched, so a match can always be FOUND. But absence of a match only means
+   * "not_delivered" when the two windows demonstrably OVERLAP, because overlap is the only
+   * observable proof that the whole session was read. Otherwise the outcome is `unknown`,
+   * because `not_delivered` is the one outcome that authorises a resend, and authorising a
+   * resend from a partial read is precisely the failure this whole path exists to prevent
+   * (I-6, C-8).
+   */
+  async reconcileDispatch(request: {
+    sessionId: RuntimeSessionId;
+    deliveryId?: string;
+    instructionSnippet?: string;
+    externalSessionId?: string | null;
+    idempotencyKey?: string;
+  }): Promise<{
+    outcome: 'delivered' | 'not_delivered' | 'supporting_evidence_only' | 'unknown' | 'unsupported';
+    evidence?: ObservableEvidence;
+    reason?: string;
+  }> {
+    const externalId = request.externalSessionId ?? request.sessionId ?? null;
+    const deliveryId = request.deliveryId ?? 'unknown';
+    const snippet = request.instructionSnippet || '';
+    if (!externalId || typeof externalId !== 'string' || !externalId.startsWith('ses_')) {
+      return {
+        outcome: 'unknown',
+        reason: `No authoritative external session id to reconcile (${String(externalId ?? 'null')}).`,
+      };
+    }
+    const readAscending = await this.readExactSessionMessages(externalId, 'asc');
+    const readDescending = await this.readExactSessionMessages(externalId, 'desc');
+    if (!readAscending.readable || !readDescending.readable) {
+      return {
+        outcome: 'unknown',
+        reason: readAscending.failure || readDescending.failure || 'OpenCode session transcript unreadable for reconciliation.',
+      };
+    }
+    const ascending = readAscending.messages;
+    const descending = readDescending.messages;
+    const descendingIds = new Set(descending.map((m) => m.messageId));
+    const windowsOverlap = ascending.some((m) => descendingIds.has(m.messageId));
+    const matchInAscending = ascending.find((m) => m.role === 'user' && (m.text ?? '').includes(snippet));
+    const matchedMessage =
+      matchInAscending ?? descending.find((m) => m.role === 'user' && (m.text ?? '').includes(snippet)) ?? null;
+    if (matchedMessage) {
+      return {
+        outcome: 'delivered',
+        evidence: {
+          id: `ev_reconcile_${deliveryId}`,
+          timestamp: Date.now(),
+          source: 'reconciliation_probe',
+          runtimeSessionId: request.sessionId,
+          details: {
+            phase: 'reconcile_dispatch',
+            sessionId: externalId,
+            matchedUserTurn: matchedMessage.messageId ?? null,
+            matchedTextHash: matchedMessage.text ? matchedMessage.text.substring(0, 80) : null,
+            matchedInWindow: matchInAscending ? 'oldest' : 'newest',
+            oldestWindowCount: ascending.length,
+            newestWindowCount: descending.length,
+            windowsOverlap,
+          },
+        },
+      };
+    }
+    if (windowsOverlap) {
+      return {
+        outcome: 'not_delivered',
+        reason: `The exact OpenCode session ${externalId} was read in full (${ascending.length} turns, oldest and newest windows overlap) and contains no user turn matching the dispatched instruction.`,
+      };
+    }
+    return {
+      outcome: 'unknown',
+      reason: `Instruction snippet not matched in the readable windows of OpenCode session ${externalId}. The provider exposes no offset, so only the ${ascending.length} oldest and ${descending.length} newest turns were read and the middle of the session is unreadable; oldest read ends at messageId=${ascending[ascending.length - 1]?.messageId ?? 'none'}, newest read starts at messageId=${descending[descending.length - 1]?.messageId ?? 'none'}.`,
+    };
+  }
+
+  /**
    * Read the turns of ONE exact session, for post-hoc reconciliation of an already-sent dispatch.
    *
    * This is deliberately a SEPARATE read from `captureTransportBoundary`. The boundary must
@@ -3603,36 +4050,164 @@ export class OpenCodeProvider extends BaseMacOSProvider {
    * turns, which made fingerprint matching impossible; it is a NEW read path and does not
    * modify `resolveSideIdentity`, `observeSide`, `confirmSessionForProject` or any S4
    * discovery member.
+   *
+   * ## `order` — why the window is a correctness parameter, not a preference
+   *
+   * The provider's message endpoint returns ONE page of at most 50 rows, IGNORES `limit`, and
+   * has no `offset` (verified against the live service 2.0.22: any `limit` yields an empty
+   * `data` array and `offset` is a no-op). The page is chosen by `order`, not by offset, and
+   * the default is NEWEST-first.
+   *
+   * So for any session longer than one page, the earliest messages — which is exactly where
+   * a session's first dispatched instruction lives — are NOT in the default window. A
+   * dispatch-correlation read that omits `order` therefore cannot see the instruction it is
+   * looking for, and will report `unknown` forever for every long-lived session. Callers
+   * must state which page they need; `reconcileDispatch` reads BOTH.
    */
   private async readExactSessionMessages(
     sessionId: string,
+    order: 'asc' | 'desc' = 'desc',
   ): Promise<{ readable: boolean; messages: ReconciliationMessage[]; failure: string | null }> {
+    // WORKER MONITORING/EXTRACTION now runs on the managed fixed OpenCode server
+    // (opencodeFixedServer.ts), not the Desktop app's sidecar port.
+    //
+    // The sidecar was the reason a Worker turn became unobservable: it is registered per launch
+    // and its port moves, so a supervision tick could read
+    // "shared service is unreachable at http://127.0.0.1:49374" and classify a live session as
+    // unreadable — which is how a genuinely delivered instruction ended up `ambiguous`. The
+    // fixed endpoint is owned and restarted by this process, so a dead server is recovered
+    // rather than mistaken for a dead session.
     try {
-      const { discovery, client } = await this.resolveSharedServiceClient();
-      if (discovery.status !== 'available' || !client) {
-        return {
-          readable: false,
-          messages: [],
-          failure: `The OpenCode shared service is not available: ${discovery.status}`,
-        };
+      const client = await this.fixedServerClient();
+      const read = await client.readExactSessionMessages(sessionId, { order, limit: 200 });
+      if (!read.readable) {
+        return { readable: false, messages: [], failure: read.reason };
       }
-      const transcript = await client.getTranscript(sessionId, { limit: 200 });
-      const messages: ReconciliationMessage[] = transcript.messages.map((m) => ({
-        messageId: m.messageId,
-        role: m.role,
-        createdAt: m.createdAt,
-        text: m.text,
-        finish: m.finish ?? null,
-        error: m.error ?? null,
-        model: m.model ?? null,
-        outcome: m.outcome ?? null,
-      }));
-      return { readable: true, messages, failure: null };
+      return { readable: true, messages: read.messages, failure: null };
     } catch (err: any) {
       return {
         readable: false,
         messages: [],
         failure: `The exact session transcript could not be read: ${err?.message ?? String(err)}`,
+      };
+    }
+  }
+
+  /**
+   * The managed fixed-server client, started on demand.
+   *
+   * `sessionDirectory` is the Worker session's own workspace, so the server it launches serves
+   * the SAME session store the visible OpenCode app uses. No second or headless Worker session
+   * is created; the bound `sessionId` is simply read over HTTP.
+   */
+  private fixedServerRef: OpenCodeFixedServerClient | null = null;
+
+  private async fixedServerClient(): Promise<OpenCodeFixedServerClient> {
+    if (this.fixedServerRef) return this.fixedServerRef;
+    const client = new OpenCodeFixedServerClient({
+      sessionDirectory: process.cwd(),
+    });
+    const readiness = await client.ensureReady();
+    if (!readiness.ready) {
+      throw new Error(
+        `The managed OpenCode server at ${readiness.endpoint} is not usable: ${readiness.reason}`,
+      );
+    }
+    this.fixedServerRef = client;
+    return client;
+  }
+
+  /**
+   * Working state for the EXACT bound session, from the fixed server.
+   *
+   * Replaces the app-level process/window heuristic for supervision purposes. That heuristic
+   * could not distinguish "OpenCode is open" from "this session is mid-run", so it reported
+   * `isWorking:false` for a Worker that was demonstrably still generating.
+   */
+  async detectExactSessionWorking(externalSessionId: string): Promise<{
+    isWorking: boolean;
+    evidence?: ObservableEvidence;
+  }> {
+    try {
+      const client = await this.fixedServerClient();
+      const state = await client.isSessionWorking(externalSessionId);
+      return {
+        isWorking: state.working,
+        evidence: {
+          id: `ev_oc_working_${Date.now()}`,
+          timestamp: Date.now(),
+          source: 'reconciliation_probe',
+          details: {
+            phase: 'fixed_server_working_state',
+            endpoint: client.endpoint,
+            externalSessionId,
+            isWorking: state.working,
+            reason: state.reason,
+          },
+        },
+      };
+    } catch (err: any) {
+      return {
+        isWorking: false,
+        evidence: {
+          id: `ev_oc_working_${Date.now()}`,
+          timestamp: Date.now(),
+          source: 'reconciliation_probe',
+          details: {
+            phase: 'fixed_server_working_state',
+            externalSessionId,
+            isWorking: false,
+            reason: `fixed server unavailable: ${err?.message ?? String(err)}`,
+          },
+        },
+      };
+    }
+  }
+
+  /**
+   * The question a running Worker turn is blocked on, if any.
+   *
+   * Reported as evidence so the stall is attributable. Never answered, and never turned into a
+   * synthetic response: the Worker is waiting for a human in the visible session.
+   */
+  async readPendingWorkerQuestion(externalSessionId: string): Promise<{
+    pending: boolean;
+    toolName: string | null;
+    questions: unknown[];
+    reason: string;
+  }> {
+    try {
+      const client = await this.fixedServerClient();
+      return await client.readPendingQuestion(externalSessionId);
+    } catch (err: any) {
+      return {
+        pending: false,
+        toolName: null,
+        questions: [],
+        reason: `fixed server unavailable: ${err?.message ?? String(err)}`,
+      };
+    }
+  }
+
+  /**
+   * Whether a recorded boundary is still observable.
+   *
+   * Returns an explicit overrun rather than correlating against "a close enough" message when the
+   * boundary has aged out of the two reachable pages.
+   */
+  async locateSessionBoundary(
+    externalSessionId: string,
+    boundaryMessageId: string,
+  ): Promise<{ found: boolean; overrun: boolean; reason: string }> {
+    try {
+      const client = await this.fixedServerClient();
+      const res = await client.locateBoundary(externalSessionId, boundaryMessageId);
+      return { found: res.found, overrun: res.overrun, reason: res.reason };
+    } catch (err: any) {
+      return {
+        found: false,
+        overrun: false,
+        reason: `fixed server unavailable: ${err?.message ?? String(err)}`,
       };
     }
   }
@@ -4550,49 +5125,149 @@ export class OpenCodeProvider extends BaseMacOSProvider {
    * Overrides BaseMacOSProvider.activateRuntime to implement the specific
    * Cmd+K session switcher navigation required for opening an existing
    * OpenCode worker session.
+   *
+   * `windowTitle` is only the FALLBACK label. When an authoritative `externalSessionId` is
+   * supplied, the title actually typed into the Desktop UI is read from OpenCode for that
+   * exact id first — see `openExactWorkerSession`.
    */
-  override async activateRuntime(sessionId: RuntimeSessionId, windowTitle?: string): Promise<boolean> {
+  override async activateRuntime(
+    sessionId: RuntimeSessionId,
+    windowTitle?: string,
+    externalSessionId?: string | null,
+  ): Promise<boolean> {
     if (typeof process === 'undefined' || process.platform !== 'darwin') {
       return false;
     }
 
-    // Phase 10: Targeted session opening via Cmd+B then Cmd+K.
-    // Requirement: 1. Activate App. 2. Cmd+B (normalize to Home). 3. Cmd+K (session switcher). 4. Type Title. 5. Return.
-    if (windowTitle) {
-      const escapedTitle = escapeAppleScriptStringLiteral(windowTitle);
-      // Try candidate process names to ensure we target the correct one in System Events
-      const procName = this.probeMacOSProcess(this.defaultProcessName).details?.matchedProcessName as string || this.defaultProcessName;
-      
-      const script = `
-        tell application "${procName}" to activate
-        delay 0.5
-        tell application "System Events"
-          tell process "${procName}"
-            -- 1. Command + B to normalize to Home / sidebar view
-            keystroke "b" using command down
-            delay 0.3
-
-            -- 2. Command + K for session switcher
-            keystroke "k" using command down
-            delay 0.5
-            
-            -- 3. Type target worker session name
-            keystroke "${escapedTitle}"
-            delay 0.6
-            
-            -- 4. Return to confirm selection and open
-            key code 36
-            delay 0.5
-          end tell
-        end tell
-        return "ok"
-      `;
-      const res = this.runAppleScript(script, 6000);
-      return res.success;
+    if (externalSessionId) {
+      const res = await this.openExactWorkerSession({
+        externalSessionId,
+        storedTitle: windowTitle ?? null,
+      });
+      return res.ok;
     }
 
-    // Fallback to simple activation if no title provided (freeze §4.4)
+    // No authoritative id: only a bare activation is meaningful. It is NOT an exact open.
     return super.activateRuntime(sessionId);
+  }
+
+  /**
+   * Open the exact bound OpenCode worker session in OpenCode Desktop.
+   *
+   * `ses_…` is the identity. The title is refreshed from OpenCode for that exact id and used
+   * as navigation metadata only; the id is never replaced. A metadata failure, or a title
+   * that is ambiguous inside the session's own directory, is reported as a failure and
+   * nothing is opened — this path never guesses.
+   *
+   * The Desktop keystroke sequence is emitted through a FOREGROUND GATE: every keystroke is
+   * sent only while OpenCode is the observed foreground application, because System Events
+   * delivers synthetic keystrokes to the foreground app rather than to the named process.
+   */
+  public async openExactWorkerSession(options: {
+    externalSessionId: string;
+    storedTitle?: string | null;
+  }): Promise<OpenCodeWorkerOpenResult> {
+    if (typeof process === 'undefined' || process.platform !== 'darwin') {
+      return {
+        ok: false,
+        failure: 'unsupported_platform',
+        error: 'Opening an OpenCode worker session requires macOS UI automation.',
+      };
+    }
+
+    const procName =
+      (this.probeMacOSProcess(this.defaultProcessName).details?.matchedProcessName as string) ||
+      this.defaultProcessName;
+
+    // ---- Preflight: identity first, title second -------------------------
+    const pre = await resolveOpenCodeWorkerOpenTarget({
+      externalSessionId: options.externalSessionId,
+      storedTitle: options.storedTitle ?? null,
+    });
+    if (!pre.ok) {
+      return {
+        ok: false,
+        failure: pre.failure,
+        externalSessionId: pre.externalSessionId,
+        error: pre.error,
+      };
+    }
+    const { target } = pre;
+
+    // ---- Foreground-gated Desktop sequence -------------------------------
+    const steps = buildOpenCodeWorkerOpenSteps(target.title);
+    const run = await runForegroundGatedSteps(steps, procName, {
+      readForegroundApp: () => this.readForegroundAppName(),
+      activateApp: (appName) => this.runAppleScript(`tell application "${appName}" to activate`, 2000).success,
+      sendKey: (keys) => {
+        const res = this.runAppleScript(
+          `tell application "System Events"
+             tell process "${procName}"
+               keystroke ${keys}
+             end tell
+           end tell`,
+          4000,
+        );
+        if (!res.success) throw new Error(res.error || 'keystroke failed');
+      },
+      sendKeyCode: (code) => {
+        const res = this.runAppleScript(
+          `tell application "System Events"
+             tell process "${procName}"
+               key code ${code}
+             end tell
+           end tell`,
+          4000,
+        );
+        if (!res.success) throw new Error(res.error || 'key code failed');
+      },
+      sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+    });
+
+    if (!run.ok) {
+      return {
+        ok: false,
+        failure: run.failure === 'foreground_never_verified' ? 'foreground_never_verified' : 'keystroke_failed',
+        externalSessionId: target.externalSessionId,
+        error: run.error,
+        stepsSent: run.sent,
+        foregroundBeforeEachStep: run.foregroundBeforeEachStep,
+        resolvedTitle: target.title,
+      };
+    }
+
+    return {
+      ok: true,
+      externalSessionId: target.externalSessionId,
+      resolvedTitle: target.title,
+      storedTitleWasStale: target.titleChanged,
+      previousStoredTitle: target.storedTitle,
+      duplicateTitleSessionIds: target.duplicateTitleSessionIds,
+      stepsSent: run.sent,
+      foregroundBeforeEachStep: run.foregroundBeforeEachStep,
+    };
+  }
+
+  /**
+   * Read the OBSERVED foreground application name.
+   *
+   * This is the observation the whole open sequence is gated on. `System Events` resolves
+   * `whose frontmost is true` against the global process list, so the lookup must NOT be made
+   * from inside `tell process "…"`, where it would be scoped to that one process and fail.
+   */
+  protected readForegroundAppName(): string | null {
+    const res = this.runAppleScript(
+      `tell application "System Events"
+         try
+           return name of first application process whose frontmost is true
+         on error
+           return ""
+         end try
+       end tell`,
+      2500,
+    );
+    const name = (res.output || '').trim();
+    return res.success && name ? name : null;
   }
 
   /** CLI-backed confirmation (uses service-authenticated CLI instead of manual Basic). */
@@ -5402,3 +6077,1224 @@ export class VSCodeProvider extends BaseMacOSProvider {
     return res;
   }
 }
+
+/* ============================================================================
+ * EXACT-SESSION TRANSPORT OBSERVATION — ChatGPTProvider (planner side)
+ *
+ * PROVEN DEFECT THIS RESTORES
+ * ---------------------------
+ * `RelayEngine.captureTransportBoundary` is guarded by
+ *     provider.captureTransportBoundary ? await provider.captureTransportBoundary(...) :
+ *                                         { watermark: null,
+ *                                           failure: 'Provider exposes no transport-boundary capability.' }
+ * `ChatGPTProvider` defined NONE of the three observation methods, so the planner
+ * ALWAYS took that else-branch. Consequences actually observed on the isolated
+ * profile (pair_mut4l0sg_kypfzefr / planner 6ac1a7c4-7b40-83ec-ba40-86180675f217):
+ *   - every pre-dispatch boundary returned null
+ *   - no `pre_dispatch_boundary` evidence was ever written to a delivery
+ *   - the planner side identity stayed permanently `unknown`
+ * The sibling `OpenCodeProvider` DOES define these methods (adapters.ts ~3704),
+ * which is why worker-side transport worked and only the planner failed.
+ *
+ * The `chatgpt-turn-observation/` module holds the intended types and the
+ * documented selectors but is imported by nothing — dead code. These methods use
+ * ONLY the pre-existing BrowserHandle mechanism already present on
+ * ChatGPTProvider (openDedicatedWindowAndCaptureId / verifyHandleExists /
+ * executeHandleJavaScript / readHandleUrl). No new automation, no delivery change,
+ * no lifecycle change.
+ *
+ * FAILS SAFELY: handle lost, DOM miss, selector miss or unparseable output all
+ * return `unknown` / `null` with an honest reason. Never fabricated.
+ *
+ * Attached to the prototype rather than spliced into the class body so the class
+ * brace structure is left byte-for-byte untouched.
+ * ==========================================================================*/
+
+interface ChatGPTObservedTurn {
+  ref: string;
+  role: 'user' | 'assistant';
+  ordinal: number;
+  text: string;
+  /** Content hash of `text`; the stable half of `ref`. */
+  fingerprint: string;
+  /** Provider-exposed creation time, or null. NEVER the observation time. */
+  createdAt: number | null;
+  /** 0-based index among same (role, canonical text) turns in the DEDUPED set. */
+  occurrence?: number;
+  /** Provider-owned structural turn identity (ChatGPT `data-turn-key`), when exposed. */
+  turnKey?: string | null;
+}
+
+function chatgptTurnHash(text: string): string {
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) hash = (hash << 5) - hash + text.charCodeAt(i);
+  return String(hash >>> 0);
+}
+
+/* ============================================================================
+ * CHATGPT EXACT-CONVERSATION EXTRACTION — SINGLE SOURCE OF TRUTH
+ *
+ * Selector provenance (measured live on the exact conversation
+ * 6ac1a7c4-7b40-83ec-ba40-86180675f217, NOT guessed):
+ *
+ *   [data-testid="conversation-turn"]  -> 0 matches
+ *   [data-message-author-role]        -> 0 matches
+ *   [data-message-author-role="user"] -> 0 matches
+ *   [data-user-message-bubble]        -> present, SEMANTIC, stable
+ *   [class*="bg-user-message"]        -> present (class-derived, less stable)
+ *   div[class*="block-"]              -> the per-turn container for BOTH roles
+ *
+ * So the old reader (which used only the two zero-match selectors) could never read this
+ * build. Role comes from turn-block membership, NOT from a class guess:
+ *   block CONTAINS [data-user-message-bubble] -> user, else assistant
+ * which is what stops an assistant reply from being misread as Planner user work.
+ *
+ * HONEST LIMITS, recorded so no caller can over-read this:
+ *  - ChatGPT VIRTUALIZES the transcript. Only a window of turns is in the DOM. The result is
+ *    therefore "the turns currently rendered", not the full history. For boundary use this
+ *    is sound in the direction that matters (the newest turn is always rendered) and can
+ *    never wrongly CLAIM a turn that does not exist.
+ *  - `time[datetime]` is the only creation-time signal, and it exists only for rendered
+ *    turns. Absent time => createdAt null. Observation time is NEVER substituted.
+ * ==========================================================================*/
+const CHATGPT_USER_TURN_SELECTORS = [
+  '[data-user-message-bubble]',
+  '[class*="bg-user-message"]',
+];
+/** The per-turn container for BOTH roles in this build. */
+const CHATGPT_TURN_BLOCK_SELECTOR = '[class*="block-"]';
+
+/**
+ * The exact-conversation extraction expression, exported so the selector/role/createdAt
+ * contract is directly testable against a DOM stub and cannot regress silently.
+ */
+/**
+ * The ONE canonicalisation for ChatGPT turn text.
+ *
+ * Every consumer uses this: duplicate detection, ref generation, fingerprint generation and
+ * watermark message identity. Different callers must never normalise differently, or the
+ * boundary stops being comparable with the transcript it was captured from.
+ *
+ * RULES, each of which is either measured on the live build or presentation-only by
+ * definition. Nothing here changes message meaning:
+ *
+ *  1. CRLF / CR -> LF. Transport-level, presentation-only.
+ *  2. Unicode NFC. The conservative choice: NFC composes canonically equivalent sequences
+ *     without folding compatibility characters, so it cannot turn e.g. a circled digit into
+ *     a plain one the way NFKC would.
+ *  3. Strip a leading renderer wrapper label. MEASURED: on this build EVERY turn's innerText
+ *     begins with `You said:` (user) or `ChatGPT said:` (assistant) on its own line, followed
+ *     by the message. These are accessibility labels, not message content, and the extracted
+ *     text still visibly differs by whitespace after them ("ChatGPT said:\n\n" vs
+ *     "You said:\n") -- which is exactly the kind of presentation-only difference that
+ *     canonicalisation exists to remove.
+ *     Guarded: only stripped at the very start, so a message that merely *begins* with those
+ *     words mid-sentence is untouched, and an empty remainder is not treated as content.
+ *  4. Collapse runs of whitespace to a single space and trim. Presentation-only.
+ *
+ * DELIBERATELY NOT DONE, because no measurement justified them:
+ *  - lowercasing, punctuation stripping, or any semantic whitespace collapsing
+ *  - folding quote/dash variants. The live text does contain U+201C/U+201D, but no duplicate
+ *    render was reproducible, so there is NO evidence such a variant difference occurs. Folding
+ *    them speculatively could collapse two genuinely different messages.
+ * Anything not provably presentation-only is left intact, so distinct messages stay distinct.
+ */
+export function canonicalizeChatGPTMessageText(raw: string): string {
+  let t = String(raw ?? '');
+  t = t.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  t = t.normalize('NFC');
+  return t.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * The page-side extraction for ONE exact ChatGPT conversation.
+ *
+ * STRUCTURAL ROOT SELECTION — how the authoritative live tree is chosen (MEASURED live):
+ *
+ *   ChatGPT mounts TWO complete [data-thread-find-target="conversation"] roots for the same
+ *   conversation.
+ *     mirror        : rect 0x0, offsetParent null, and its .thread-scroll-container reports
+ *                     scrollHeight 0 / clientHeight 0  (detached)
+ *     authoritative : rect 640x776, offsetParent set, scroll container scrollHeight 940
+ *
+ *   Both carry the IDENTICAL data-turn-key UUIDs, which is what proves they are two renders of
+ *   the same logical turns rather than two different conversations.
+ *
+ *   Neither root is aria-hidden and both sit inside a .thread-scroll-container, so neither of
+ *   those discriminates. Rendered-vs-detached does, and it is a property of the WHOLE root.
+ *
+ *   The authoritative root was measured at top = -143, i.e. legitimately extending above the
+ *   viewport. That is exactly why viewport intersection is NOT used for turn membership: a
+ *   real, older turn can be scrolled out of view and must still appear in the transcript.
+ *   Geometry is used only to tell an entirely detached MIRROR ROOT from the live one.
+ */
+export function composeChatGPTConversationReadScript(): string {
+  return (
+    `(() => {` +
+    ` const USER_SEL = ${JSON.stringify(CHATGPT_USER_TURN_SELECTORS[0])};` +
+    ` const USER_FALLBACK = ${JSON.stringify(CHATGPT_USER_TURN_SELECTORS[1])};` +
+    ` const BLOCKISH = ${JSON.stringify(CHATGPT_TURN_BLOCK_SELECTOR)};` +
+    ` const ROOT_SEL = '[data-thread-find-target="conversation"]';` +
+    ` const TURNKEY_SEL = '[data-turn-key]';` +
+    ` const PAIR_SEL = '[data-content-search-turn-key]';` +
+    ` function matches(el, sel) {` +
+    `   if (!el || !el.getAttribute) return false;` +
+    `   if (sel === USER_SEL) return el.getAttribute('data-user-message-bubble') !== null;` +
+    `   if (sel === USER_FALLBACK) return String(el.className || '').indexOf('bg-user-message') >= 0;` +
+    `   if (sel === BLOCKISH) return String(el.className || '').indexOf('block-') >= 0;` +
+    `   return false;` +
+    ` }` +
+    ` function qsa(sel) { return Array.prototype.slice.call(document.querySelectorAll(sel)); }` +
+    ` function descendantsOf(el, sel) {` +
+    `   const out = [], stack = Array.prototype.slice.call(el.children || []);` +
+    `   while (stack.length) {` +
+    `     const c = stack.shift();` +
+    `     if (matches(c, sel)) out.push(c);` +
+    `     for (const k of (Array.prototype.slice.call(c.children || []))) stack.push(k);` +
+    `   }` +
+    `   return out;` +
+    ` }` +
+    // The renderer accessibility label is removed by STRUCTURE, never by text guessing.
+    // MEASURED: the same logical turn renders as "You said:<msg>" in one copy and
+    // "You said:\n<msg>" in another, so a text-level strip has to guess whether a newline is
+    // present and guessing wrong reproduces the very divergence canonicalisation removes.
+    ` function messageTextOf(b, isUser) {` +
+    `   if (isUser) {` +
+    `     const bub = descendantsOf(b, USER_SEL)[0] || descendantsOf(b, USER_FALLBACK)[0];` +
+    `     if (bub) return bub.innerText || '';` +
+    `   }` +
+    `   const kids = Array.prototype.slice.call(b.children || []);` +
+    `   const parts = [];` +
+    `   for (const k of kids) {` +
+    `     const only = (k.innerText || '').replace(/^\\s+|\\s+$/g, '');` +
+    `     if (/^(?:You said|ChatGPT said)\\s*:?$/.test(only)) continue;` +
+    `     parts.push(k.innerText || '');` +
+    `   }` +
+    `   return parts.join(' ').replace(/^\\s+|\\s+$/g, '');` +
+    ` }` +
+    // Mirrors canonicalizeChatGPTMessageText exactly. No label strip here (already structural),
+    // and deliberately NO emoji-adjacent, punctuation, case or all-whitespace folding.
+    ` function canon(t) {` +
+    `   return String(t || '').replace(/\\r\\n/g, '\\n').replace(/\\r/g, '\\n').normalize('NFC')` +
+    `     .replace(/\\s+/g, ' ').replace(/^\\s+|\\s+$/g, '');` +
+    ` }` +
+    ` function isRendered(el) {` +
+    `   if (!el || !el.getBoundingClientRect) return false;` +
+    `   if (el.offsetParent === null) return false;` +
+    `   const r = el.getBoundingClientRect();` +
+    `   return r.width > 0 && r.height > 0;` +
+    ` }` +
+    // ---- STRUCTURAL ROOT SELECTION — the authoritative live conversation tree.` +
+        ` const allRoots = qsa(ROOT_SEL);` +
+    ` if (!allRoots.length) {` +
+    `   return JSON.stringify({ ok: false, readable: false, reason: 'no conversation root matched ' + ROOT_SEL + '; the conversation has not rendered. Never reported as zero turns.' });` +
+    ` }` +
+    ` const renderedRoots = allRoots.filter(isRendered);` +
+    ` let root = null;` +
+    ` if (renderedRoots.length === 1) {` +
+    `   root = renderedRoots[0];` +
+    ` } else if (renderedRoots.length > 1) {` +
+            `   const scored = renderedRoots.map(function (r, i) {` +
+    `     const rect = r.getBoundingClientRect();` +
+    `     return { el: r, i: i, keys: r.querySelectorAll(TURNKEY_SEL).length, area: rect.width * rect.height };` +
+    `   }).sort(function (a, b) { return (b.keys - a.keys) || (b.area - a.area) || (a.i - b.i); });` +
+    `   root = scored[0].el;` +
+    ` }` +
+    ` if (!root) {` +
+    `   return JSON.stringify({ ok: false, readable: false, reason: 'all ' + allRoots.length + ' conversation roots are detached (offsetParent null / zero rect); no authoritative live tree. Never reported as zero turns.' });` +
+    ` }` +
+    // Pair wrappers are the provider's own turn groupings; fall back to block containers.
+    ` function outermostBlocks(scope) {` +
+    `   const all = descendantsOf(scope, BLOCKISH);` +
+    `   return all.filter(function (b) {` +
+    `     return !all.some(function (o) { return o !== b && o.contains(b); });` +
+    `   });` +
+    ` }` +
+    // A conversation group also contains DATE DIVIDERS ("Today 10:11 AM"), which are
+    // timestamp chrome, not messages. They are excluded STRUCTURALLY: a divider's canonical
+    // text is exactly the text of a <time datetime> it contains and it identifies no turn.
+    // Reading them as assistant messages would both invent content and lose the real replies.
+    ` function isTimestampChrome(b, text) {` +
+    `   if (!b.querySelector) return false;` +
+    `   const t = b.querySelector('time[datetime]');` +
+    `   if (!t) return false;` +
+    `   const tt = (t.innerText || '').replace(/^\\s+|\\s+$/g, '');` +
+    `   return !!tt && tt === text;` +
+    ` }` +
+    ` const pairs = Array.prototype.slice.call(root.querySelectorAll(PAIR_SEL));` +
+    ` const groups = [];` +
+    ` for (const p of pairs) {` +
+    `   const blocks = outermostBlocks(p).filter(function (b) {` +
+    `     const u = matches(b, USER_SEL) || matches(b, USER_FALLBACK) ||` +
+    `       !!descendantsOf(b, USER_SEL).length || !!descendantsOf(b, USER_FALLBACK).length;` +
+    `     return u || !isTimestampChrome(b, canon(messageTextOf(b, false)));` +
+    `   });` +
+    `   groups.push(blocks);` +
+    ` }` +
+    ` if (!groups.length) {` +
+    `   const blocks = Array.prototype.slice.call(root.querySelectorAll(BLOCKISH)).filter(function (t) {` +
+    `     return !Array.prototype.slice.call(t.parentElement ? t.parentElement.children || [] : [])` +
+    `       .some(function (o) { return o !== t && o.contains(t) && matches(o, BLOCKISH); });` +
+    `   });` +
+    `   for (const b of blocks) groups.push([b]);` +
+    ` }` +
+    ` const turns = [];` +
+    ` for (const g of groups) {` +
+    `   for (const b of g) {` +
+    `     const isUser = matches(b, USER_SEL) || matches(b, USER_FALLBACK) ||` +
+    `       !!descendantsOf(b, USER_SEL).length || !!descendantsOf(b, USER_FALLBACK).length;` +
+    `     const role = isUser ? 'user' : 'assistant';` +
+    `     const text = canon(messageTextOf(b, isUser));` +
+    `     const tk = (b.getAttribute && b.getAttribute('data-turn-key') !== null) ? b : (b.querySelector ? b.querySelector(TURNKEY_SEL) : null);` +
+    `     turns.push({` +
+    `       ordinal: turns.length,` +
+    `       role: role,` +
+    `       text: text.slice(0, 2000),` +
+    `       createdAt: null,` +
+        `       turnKey: tk ? tk.getAttribute(TURNKEY_SEL.slice(1, -1)) : null,` +
+    `       occurrence: 0,` +
+    `     });` +
+    `   }` +
+    ` }` +
+    ` if (!turns.length) {` +
+    `   return JSON.stringify({ ok: false, readable: false, reason: 'the authoritative conversation root rendered but exposed no turn blocks; extraction contract not established. Never reported as zero turns.' });` +
+    ` }` +
+    ` return JSON.stringify({` +
+    `   ok: true, readable: true,` +
+    `   mode: 'authoritative_root',` +
+    `   candidateRootCount: allRoots.length,` +
+    `   ignoredMirrorRootCount: allRoots.length - 1,` +
+    `   turnCount: turns.length,` +
+    `   turns: turns,` +
+    ` });` +
+    `})()`
+  );
+}
+
+/** Bound, single-shot DOM read of the EXACT conversation. Never partial. */
+async function readExactChatGPTConversation(
+  self: any,
+  externalSessionId: string,
+): Promise<
+  | { ok: true; readable: true; url: string; handle: BrowserHandle; virtualized: boolean; turns: ChatGPTObservedTurn[] }
+  | { ok: false; readable: false; reason: string }
+> {
+  const ext = externalSessionId.trim();
+  if (!ext) return { ok: false, readable: false, reason: 'No external session id (I-11).' };
+
+  const url = /^https?:\/\//i.test(ext) ? ext : `https://chatgpt.com/c/${ext}`;
+  const handle: BrowserHandle | null = self.openDedicatedWindowAndCaptureId(url);
+  if (!handle) {
+    return {
+      ok: false,
+      readable: false,
+      reason: `No BrowserHandle could be established for the exact conversation ${url}; a dedicated window/tab was not resolvable.`,
+    };
+  }
+  if (!self.verifyHandleExists(handle)) {
+    return {
+      ok: false,
+      readable: false,
+      reason:
+        `BrowserHandle for the exact conversation ${url} was created but no longer exists ` +
+        `(WIN:${handle.windowId}|TAB:${handle.tabId}); identity was not verified.`,
+    };
+  }
+
+  // Order + content hash only. Never observation time (I-7).
+  const js = composeChatGPTConversationReadScript();
+
+  // ChatGPT renders the conversation asynchronously after the tab is handed back, so an
+  // immediate read legitimately observes an EMPTY document. That is "not rendered yet", not
+  // "unreadable", and it must not be reported as either "zero turns" or a hard failure.
+  //
+  // So the extraction contract is polled for a BOUNDED time. The bound is finite so a
+  // genuinely wrong-build contract still surfaces as readable:false, never as an endless wait.
+  const ATTEMPTS = 5;
+  const DELAY_MS = 350;
+  let res = self.executeHandleJavaScript(handle, js, 5000);
+  for (let attempt = 1; attempt < ATTEMPTS; attempt++) {
+    if (res.success && (res.output || '').includes('"ok":true')) break;
+    if (typeof self.sleep === 'function') await self.sleep(DELAY_MS);
+    res = self.executeHandleJavaScript(handle, js, 5000);
+  }
+  if (!res.success || !res.output) {
+    return {
+      ok: false,
+      readable: false,
+      reason: `DOM read on the exact conversation failed: ${res.error ?? 'no output returned'}; never fabricated.`,
+    };
+  }
+  let parsed: any = null;
+  try {
+    parsed = JSON.parse(res.output);
+  } catch {
+    return { ok: false, readable: false, reason: 'DOM read returned unparseable output; never fabricated.' };
+  }
+  if (!parsed || parsed.ok !== true || !Array.isArray(parsed.turns)) {
+    return {
+      ok: false,
+      // readable:false here means "extraction could not be established", NOT "no turns".
+      readable: false,
+      reason:
+        `DOM read did not yield turns after ${ATTEMPTS} bounded attempts: ` +
+        `${parsed?.reason ?? 'unknown selector miss'}; never fabricated.`,
+    };
+  }
+  const seenByKey = new Map<string, number>();
+  const turns: ChatGPTObservedTurn[] = parsed.turns.map((t: any) => {
+    // Re-canonicalise on the TS side with the SAME function used in the page, so the two
+    // layers cannot disagree about what a turn's canonical text is.
+    const text = canonicalizeChatGPTMessageText(String(t?.text ?? ''));
+    const fingerprint = chatgptTurnHash(text);
+    // Identity prefers the PROVIDER-OWNED structural turn key. It is a stable UUID that
+    // survives re-renders, so it cannot be perturbed by message-text presentation the way a
+    // content hash can (measured: the same turn rendered ".\u2705" and ". \u2705").
+    // The content hash + occurrence index remain as the fallback for a build that omits it.
+    const role = t?.role === 'user' ? 'user' : 'assistant';
+    const structuralKey = typeof t?.turnKey === 'string' && t.turnKey.trim() ? t.turnKey.trim() : null;
+    const key = `${role}\u0000${structuralKey ?? fingerprint}`;
+    const occurrence = structuralKey ? 0 : (seenByKey.get(`${role}\u0000${fingerprint}`) ?? 0);
+    seenByKey.set(`${role}\u0000${structuralKey ?? fingerprint}`, occurrence + 1);
+    return {
+      // Content-addressed, so the ref does NOT move when ChatGPT virtualises the window
+      // and the ordinal shifts. Two byte-identical turns legitimately share a ref, which
+      // can only ever SHRINK the boundary set — it can never invent newness.
+      // Role participates, so an assistant echo never collides with the user turn it echoes.
+      // The occurrence index keeps two genuinely separate same-text turns distinct, while a
+      // duplicate render of one logical turn collapses before it can inflate the count.
+      ref: structuralKey
+        ? `chatgpt_${t?.role === 'user' ? 'u' : 'a'}_${structuralKey}`
+        : `chatgpt_${t?.role === 'user' ? 'u' : 'a'}_${fingerprint}_${occurrence}`,
+      role: t?.role === 'user' ? 'user' : 'assistant',
+      ordinal: Number.isFinite(t?.ordinal) ? t.ordinal : 0,
+      text,
+      fingerprint,
+      createdAt: typeof t?.createdAt === 'number' && isFinite(t.createdAt) ? t.createdAt : null,
+    };
+  });
+  return {
+    ok: true,
+    readable: true,
+    url: self.readHandleUrl(handle) ?? url,
+    handle,
+    virtualized: true,
+    turns,
+  };;
+}
+
+/**
+ * Composes the editor-typing expression, passing `marker` as the argument.
+ *
+ * CHATGPT_EDITOR_TYPE_JS is a BARE function expression and MUST be invoked here with the
+ * text. This was the proven live defect: the template used to self-invoke, so the caller
+ * bound `f` to the template's string RESULT and then called it ->
+ *   __JSERR__TypeError: f is not a function
+ * The marker was therefore never inserted, and the marker read-back gate could not pass.
+ * Exported and unit-tested against a DOM stub so the argument cannot be dropped again.
+ */
+export function composeChatGPTEditorTypeScript(marker: string): string {
+  return `(function () { return (${CHATGPT_EDITOR_TYPE_JS})(${JSON.stringify(marker)}); })()`;
+}
+
+/**
+ * Reads the user-role turns of the EXACT conversation behind `handle`.
+ *
+ * Selector provenance (proven against the live ChatGPT build, not guessed): this layout
+ * does NOT emit [data-message-author-role], so the earlier selector returned 0 turns and a
+ * real submitted turn was reported as absent. The actual user bubble is
+ *   div.bg-user-message.text-user-message  <  div[group/user-message ... items-end]
+ * which is what this reads. `items-end` (right-aligned) plus the `bg-user-message` class is
+ * what distinguishes a user turn from an assistant turn.
+ */
+
+const CHATGPT_READ_USER_TURNS_JS = `
+  (function () {
+    var SELS = ${JSON.stringify(CHATGPT_USER_TURN_SELECTORS)};
+    var nodes = null;
+    for (var i = 0; i < SELS.length; i++) {
+      var f = document.querySelectorAll(SELS[i]);
+      if (f.length > 0) { nodes = Array.prototype.slice.call(f); break; }
+    }
+    if (!nodes) return JSON.stringify({ ok: true, selector: null, turns: [] });
+    var out = [];
+    for (var j = 0; j < nodes.length; j++) {
+      var t = (nodes[j].innerText || '').replace(/\\s+/g, ' ').trim();
+      if (t) out.push({ ref: 'DOM' + j, ordinal: j, role: 'user', text: t.slice(0, 600) });
+    }
+    return JSON.stringify({ ok: true, selector: SELS[i - 1] || SELS[0], turns: out });
+  })()
+`;
+
+Object.assign(ChatGPTProvider.prototype, {
+  /** Reads user turns of the exact conversation behind `handle`. */
+  async readExactUserTurns(this: any, handle: BrowserHandle): Promise<{ ok: boolean; selector?: string | null; turns: Array<{ ref: string; ordinal: number; role: string; text: string }> }> {
+    const res = this.executeHandleJavaScript(handle, CHATGPT_READ_USER_TURNS_JS, 4000);
+    if (!res.success) return { ok: false, turns: [] };
+    try {
+      const parsed = JSON.parse(res.output || 'null');
+      return parsed && Array.isArray(parsed.turns) ? parsed : { ok: false, turns: [] };
+    } catch {
+      return { ok: false, turns: [] };
+    }
+  },
+
+  async captureTransportBoundary(request: TransportBoundaryRequest): Promise<TransportBoundaryResult> {
+    const ext = request.externalSessionId ?? null;
+    if (!ext || typeof ext !== 'string' || !ext.trim()) {
+      return { watermark: null, failure: 'No external session id (I-11).' };
+    }
+    const read = await readExactChatGPTConversation(this, ext);
+    // Unreadable extraction -> null watermark, NEVER an empty watermark. A null watermark
+    // forces `ambiguous` downstream, which is the safe direction.
+    if (!read.ok) return { watermark: null, failure: `EXACT-SESSION-UNREADABLE: ${read.reason}` };
+
+    // A readable conversation with ZERO turns is a genuine empty state (what a freshly
+    // created planner conversation looks like), not a failure, and yields a usable
+    // (empty) boundary rather than a false alarm.
+    //
+    // Ids are `${role}:${ref}` and `ref` is content-addressed, so the set does NOT churn when
+    // ChatGPT virtualises the transcript and ordinals shift. Ordinal is deliberately NOT in
+    // the id for that reason.
+    const messageIds = read.turns.map((t) => `${t.role}:${t.ref}`);
+
+    // Evidence only; post-boundary detection uses the messageIds set (I-7). Taken from the
+    // provider-exposed <time datetime> of the newest rendered turn, or null when the DOM
+    // exposes none. Observation time is NEVER substituted (I-7).
+    const observedTimes = read.turns
+      .map((t) => t.createdAt)
+      .filter((v): v is number => typeof v === 'number' && isFinite(v));
+    const latestCreatedAt = observedTimes.length ? Math.max(...observedTimes) : null;
+
+    return {
+      watermark: {
+        sessionId: ext,
+        messageCount: read.turns.length,
+        messageIds,
+        latestCreatedAt,
+        provenance: 'captured_pre_dispatch',
+        capturedAt: Date.now(),
+      },
+      failure: null,
+    };
+  },
+
+  /**
+   * Exact-session transcript for reconciliation. Shares ONE extraction with
+   * captureTransportBoundary, so the boundary can never be captured against a different
+   * turn set than the one reconciliation compares.
+   *
+   * readable:false means "extraction contract not established". It is never a synonym for
+   * "zero messages": a genuinely empty-but-readable conversation returns readable:true
+   * with an empty array, and only that may be treated as "nothing there".
+   */
+  async readExactSessionTurnsForReconciliation(request: { externalSessionId: string }) {
+    const read = await readExactChatGPTConversation(this, request.externalSessionId);
+    if (!read.ok) return { readable: false, messages: [], failure: read.reason };
+    return {
+      readable: true,
+      failure: null,
+      messages: read.turns.map((t) => ({
+        messageId: t.ref,
+        role: t.role,
+        text: t.text,
+        ordinal: t.ordinal,
+        // Real DOM value or absent. Never Date.now().
+        createdAt: t.createdAt ?? undefined,
+      })),
+    };
+  },
+
+  async observeSide(request: SideObservationRequest): Promise<SideObservationReading> {
+    const now = Date.now();
+    const validUntil = now + PROVISIONAL_OBSERVATION_VALIDITY_MS;
+    const ext = request.externalSessionId ?? null;
+
+    const unknown = (reason: string): SideObservationReading => ({
+      reachabilityState: 'unknown',
+      uiPresenceState: 'unknown',
+      activityState: 'unknown',
+      messageEvidenceState: 'unknown',
+      message: { ref: null, role: null, text: null, truncated: false, ordinal: null },
+      observationCapability: 'chatgpt_dom_message_inspection',
+      observedAt: now,
+      validUntil,
+      reason,
+      evidence: null,
+    });
+
+    if (!ext || typeof ext !== 'string' || !ext.trim()) return unknown('No external session id (I-11).');
+
+    const read = await readExactChatGPTConversation(this, ext);
+    if (!read.ok) return unknown(`Observation failed safely: ${read.reason} never fabricated.`);
+
+    const last = read.turns.length > 0 ? read.turns[read.turns.length - 1] : null;
+
+    // Generating is inferred only from an observable empty trailing assistant turn.
+    const generating = !!last && last.role === 'assistant' && last.text.length === 0;
+    // Ordering/staleness against a prior boundary is resolved by the caller from the
+    // messageIds set, so this method reports only what it directly observed.
+    const completedTurn = !!last && last.role === 'assistant';
+
+    return {
+      reachabilityState: 'reachable',
+      uiPresenceState: 'present',
+      activityState: generating ? 'working' : 'idle',
+      messageEvidenceState: completedTurn ? 'observed' : 'none',
+      message: completedTurn
+        ? {
+            ref: last!.ref,
+            role: 'assistant',
+            text: last!.text,
+            truncated: last!.text.length > 2000,
+            ordinal: last!.ordinal,
+          }
+        : { ref: null, role: null, text: null, truncated: false, ordinal: null },
+      observationCapability: 'chatgpt_dom_message_inspection',
+      observedAt: now,
+      validUntil,
+      reason: null,
+      evidence: {
+        id: `ev_chatgpt_observe_${now}`,
+        timestamp: now,
+        source: 'reconciliation_probe',
+        bundleIdentifier: (this as any).defaultBundleId,
+        details: {
+          externalSessionId: ext,
+          handleValid: true,
+          handle: `WIN:${read.handle.windowId}|TAB:${read.handle.tabId}`,
+          turnCount: read.turns.length,
+          lastOrdinal: last?.ordinal ?? null,
+          lastRole: last?.role ?? null,
+          lastTextLength: last?.text.length ?? 0,
+          generating,
+        },
+      },
+    };
+  },
+});
+
+/* ============================================================================
+ * EXACT-SESSION CHROME OPENER (planner "Open")
+ *
+ * PROVEN DEFECT THIS REPLACES
+ * ---------------------------
+ * `ChatGPTAppHandler.openSession` ended with the generic OS command
+ *     exec(`open "<url>"`)
+ * which the OS may route to the ChatGPT desktop app instead of Chrome. Observed on
+ * this host: RelayX returned success:true and ZERO Chrome tabs contained
+ * 6ac1a7c4-7b40-83ec-ba40-86180675f217, so no BrowserHandle could be resolved and
+ * boundary capture could never run.
+ *
+ * This opener uses the SAME Chrome AppleScript authority the provider already uses
+ * for provisioning and observation (openDedicatedWindowAndCaptureId), so there is
+ * one browser authority rather than two.
+ *
+ * Contract:
+ *   - the SUPPLIED exact URL is opened verbatim (project segment preserved)
+ *   - an already-open tab whose URL matches the exact conversation is FOCUSED and
+ *     reused instead of creating a duplicate
+ *   - the resulting tab URL is read back and must still be the same conversation,
+ *     otherwise the result is a failure, never a success
+ * ==========================================================================*/
+
+/**
+ * Structured, VERIFIED result of an exact-session open.
+ *
+ * `success` is true ONLY when a Chrome window/tab was resolved AND its read-back URL
+ * still represents the requested conversation. Absence of an exception is NOT success.
+ * `requestedUrl` is always echoed so diagnostics survive a failure.
+ */
+export interface ExactSessionOpenResult {
+  /** True only with a verified handle AND a matching read-back URL. */
+  success: boolean;
+  /** True when an already-open exact tab was focused instead of creating one. */
+  reused?: boolean;
+  windowId?: number;
+  tabId?: number;
+  /** The exact URL RelayX was asked to open/focus. Always present on attempt. */
+  requestedUrl: string;
+  /** The conversation id the request was for. */
+  conversationId: string;
+  /** URL read back from the verified handle. Present only on success. */
+  observedUrl?: string;
+  /** Concrete failure reason. Present only on failure. */
+  reason?: string;
+  /** Ordered diagnostics: which stage actually ran/failed. */
+  diagnostics?: string[];
+}
+
+/**
+ * The shared Chrome opener for BOTH ChatGPT navigation targets.
+ *
+ * `matchToken` is the authoritative substring the reused/created tab must contain:
+ *   - exact-session open -> the conversation id (`/c/<id>` is SESSION identity)
+ *   - project open        -> the stable project key (`g-p-<32-hex>` is PROJECT identity)
+ *
+ * Both are matched against the SAME Chrome handle and read back through the SAME
+ * authority, so a project tab can never be verified by a conversation check or the
+ * reverse. There is deliberately no `matchToken` fallback: a caller with no
+ * authoritative identity fails closed rather than opening an unverified tab.
+ */
+/**
+ * True when a URL carries the authoritative identity being opened.
+ *
+ * `conversation` — the URL contains the conversation id. This is exact: a `/c/<id>`
+ * segment appears only in that conversation's URL.
+ *
+ * `project` — the URL contains `/g/<key>` as a path segment. NOT a bare `contains`:
+ * the stable project key is a literal substring of every conversation URL inside that
+ * project (`/g/g-p-<key>-name/c/<id>`), so a substring test would accept a
+ * conversation tab as "the project". Live proof this mattered: "Open Project" focused
+ * an existing conversation tab and reported success.
+ */
+function urlMatchesIdentity(
+  url: string | null | undefined,
+  token: string,
+  identityKind: 'conversation' | 'project',
+): boolean {
+  if (!url || !token) return false;
+  if (identityKind === 'conversation') return url.includes(token);
+
+  // A project tab is the project ROOT. Match the pathname after `/g/`, allowing the
+  // optional `-<name>` slug spelling and the `/project` suffix, and requiring that
+  // nothing else follows. This rejects both a different project and a conversation
+  // inside this project (`…/c/<id>`), which a bare substring test would accept.
+  let pathname: string;
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    return false;
+  }
+  const m = pathname.match(/^\/g\/(g-p-[^/?#]+)(?:\/project)?\/?$/i);
+  if (!m) return false;
+  const slug = toStableChatGPTProjectId(m[1]);
+  return !!slug && slug === token;
+}
+
+async function openChatGPTUrlInChrome(
+  self: any,
+  exactUrl: string,
+  matchToken: string,
+  identityKind: 'conversation' | 'project',
+): Promise<ExactSessionOpenResult> {
+  const conversationId = matchToken;
+  const diagnostics: string[] = [];
+  const fail = (reason: string): ExactSessionOpenResult => ({
+    success: false,
+    requestedUrl: exactUrl,
+    conversationId,
+    reason,
+    diagnostics,
+  });
+
+  diagnostics.push(`opener:entered requestedUrl=${exactUrl} identityKind=${identityKind} matchToken=${conversationId || '(none)'}`);
+  if (!exactUrl || !matchToken) {
+    diagnostics.push('stage:authority-missing');
+    return fail('No authoritative ChatGPT URL / identity token supplied.');
+  }
+
+  // PROVEN BUG (live, 2026-10-05): a PROJECT open matched the token with a bare
+  // `contains`, and the stable project key `g-p-<32-hex>` is a literal substring of
+  // every conversation URL in that project (`/g/g-p-<key>-name/c/<id>`). The reuse
+  // search therefore focused an existing CONVERSATION tab and the read-back
+  // verification passed on the same substring, so "Open Project" reported success
+  // while showing a conversation. Match PROJECT identity on the full `/g/<key>`
+  // path segment instead, which only a URL carrying that project does.
+  // The token is embedded in an AppleScript string literal, so it must be escaped: an
+  // unescaped quote would terminate the literal early and osascript would fail to parse
+  // the script.
+  //
+  // This is the CANDIDATE search, deliberately broader than `urlMatchesIdentity`
+  // because AppleScript cannot parse a pathname: for a project it accepts any
+  // non-conversation URL in that project (`/g/<key>` prefix covers both the stable and
+  // the `-<name>` slug spelling, and `/c/` is excluded). `urlMatchesIdentity` is the
+  // authority that decides, and a candidate it rejects falls through to creating a
+  // fresh tab — a loose candidate filter can never manufacture a success.
+  const escapedToken = escapeAppleScriptStringLiteral(matchToken);
+  const matchExpression =
+    identityKind === 'project'
+      ? `((u contains "/g/${escapedToken}") and (u does not contain "/c/"))`
+      : `u contains "${escapedToken}"`;
+
+  // ---- Stage A: reuse search over live Chrome tabs -------------------------
+  // Reuse enumeration.
+  //
+  // PROVEN BUG (fixed here): the previous form did
+  //     set active tab index of w to (index of t)
+  // where `t` came from `repeat with t in tabs of w`. AppleScript cannot resolve
+  // `index of t` from that iterated reference; it evaluated to a reference spanning
+  // "every tab of every window" and raised
+  //     Can't set index of item 2 of every tab of item 1 of every window to ...
+  // which surfaced as success=false on the second Open.
+  //
+  // FIX: iterate windows by concrete index and tabs by concrete integer index, so
+  // `set active tab index of w to tabIndex` always receives an integer. The match is
+  // still strictly on the authoritative identity — never the active tab, never
+  // another conversation, never another project.
+  const findScript = `
+    tell application "Google Chrome"
+      try
+        set n to 0
+        set wCount to (count of windows)
+        repeat with wi from 1 to wCount
+          set w to window wi
+          set tCount to (count of tabs of w)
+          repeat with tabIndex from 1 to tCount
+            set n to n + 1
+            set u to URL of tab tabIndex of w
+            if ${matchExpression} then
+              -- Raise the BROWSER, and only the browser. Setting the window index
+              -- below reorders the window inside Chrome but does not bring the Chrome
+              -- application itself forward, so a reuse-open left the operator still
+              -- looking at RelayX. This is deliberately "Google Chrome" and never the
+              -- ChatGPT desktop app, which must never be raised over a verified open.
+              -- It sits INSIDE the match so a search that finds nothing never steals
+              -- focus.
+              activate
+              set active tab index of w to tabIndex
+              -- Focus the window via index (raises it to front). AppleScript's
+              -- 'set frontmost of w' is unsupported on a Chrome window reference and
+              -- aborted the enumeration; setting the window index is the supported form.
+              set index of w to 1
+              return "FOUND::" & (id of w) & "::" & (id of tab tabIndex of w) & "::" & u & "::" & n
+            end if
+          end repeat
+        end repeat
+        return "NONE::" & n
+      on error errMsg
+        return "ERR::" & errMsg
+      end try
+    end tell
+  `;
+  const found = self.runAppleScript(findScript, 6000);
+  diagnostics.push(`stage:reuse-search applescript.success=${found?.success === true} output=${JSON.stringify((found?.output || '').slice(0, 160))}`);
+  if (!found?.success) {
+    diagnostics.push('stage:apple-script-failed (reuse search)');
+    return fail(
+      `Chrome reuse search failed (AppleScript): ${found?.error ?? 'unknown'}. ` +
+        'No tab was created and success cannot be claimed.',
+    );
+  }
+
+  const raw = (found.output || '').trim();
+  if (raw.startsWith('ERR::')) {
+    diagnostics.push('stage:chrome-unavailable');
+    return fail(`Chrome enumeration failed: ${raw.replace('ERR::', '')}`);
+  }
+  if (raw.startsWith('FOUND::')) {
+    const parts = raw.split('::');
+    const windowId = parseInt(parts[1], 10);
+    const tabId = parseInt(parts[2], 10);
+    const observedUrl = parts.slice(3, parts.length - 1).join('::');
+    diagnostics.push(`stage:reuse-match handle=WIN:${windowId}|TAB:${tabId} observedUrl=${observedUrl}`);
+    // Verification uses the SAME identity rule as the search. For a project open that
+    // means the `/g/<key>` path segment, so a conversation tab in the same project can
+    // neither be selected nor accepted as "the project".
+    if (!urlMatchesIdentity(observedUrl, matchToken, identityKind)) {
+      diagnostics.push(`stage:verification-failed (reused tab is a different ${identityKind})`);
+      return fail(`Reused tab resolved to a different ${identityKind}: ${observedUrl}`);
+    }
+    // Read back through the SAME handle used for observation, so the focus result is
+    // verified the same way a created tab is. An unverifiable focus is a failure.
+    const readBack = self.readHandleUrl({ windowId, tabId });
+    diagnostics.push(`stage:reuse-read-back observedUrl=${readBack ?? 'null'}`);
+    if (!readBack || !urlMatchesIdentity(readBack, matchToken, identityKind)) {
+      diagnostics.push('stage:verification-failed (reuse read-back mismatch)');
+      return {
+        success: false,
+        windowId,
+        tabId,
+        requestedUrl: exactUrl,
+        conversationId,
+        reason:
+          `Focused tab could not be verified as the exact ${identityKind} ${conversationId} ` +
+          `(read back: ${readBack ?? 'null'}).`,
+        diagnostics,
+      };
+    }
+    diagnostics.push('stage:verified-reused');
+    return { success: true, reused: true, windowId, tabId, requestedUrl: exactUrl, conversationId, observedUrl: readBack, diagnostics };
+  }
+  diagnostics.push(`stage:no-existing-tab (${raw})`);
+
+  // ---- Stage B: create exactly one tab with the URL verbatim --------------
+  const handle = self.openDedicatedWindowAndCaptureId(exactUrl);
+  diagnostics.push(`stage:create-tab handle=${handle ? `WIN:${handle.windowId}|TAB:${handle.tabId}` : 'null'}`);
+  if (!handle) {
+    diagnostics.push('stage:tab-creation-failed');
+    return fail('Chrome did not yield a verifiable window/tab for the exact session URL.');
+  }
+
+  // ---- Stage C: read back and verify -------------------------------------
+  const observedUrl = self.readHandleUrl(handle);
+  diagnostics.push(`stage:read-back observedUrl=${observedUrl ?? 'null'}`);
+  if (!observedUrl) {
+    diagnostics.push('stage:handle-capture-failed (handle lost before read-back)');
+    return {
+      success: false,
+      windowId: handle.windowId,
+      tabId: handle.tabId,
+      requestedUrl: exactUrl,
+      conversationId,
+      reason: 'Browser handle was created but could not be read back (tab/window not resolvable).',
+      diagnostics,
+    };
+  }
+  if (!urlMatchesIdentity(observedUrl, conversationId, identityKind)) {
+    diagnostics.push(`stage:verification-failed (${identityKind} mismatch)`);
+    return {
+      success: false,
+      windowId: handle.windowId,
+      tabId: handle.tabId,
+      requestedUrl: exactUrl,
+      conversationId,
+      observedUrl,
+      reason:
+        `Opened tab does not represent the exact ${identityKind} ${conversationId} ` +
+        `(read back: ${observedUrl}). Not reported as success.`,
+      diagnostics,
+    };
+  }
+  diagnostics.push('stage:verified-created');
+  return { success: true, reused: false, windowId: handle.windowId, tabId: handle.tabId, requestedUrl: exactUrl, conversationId, observedUrl, diagnostics };
+}
+
+async function openExactChatGPTSessionInChrome(
+  self: any,
+  exactUrl: string,
+  conversationId: string,
+): Promise<ExactSessionOpenResult> {
+  return openChatGPTUrlInChrome(self, exactUrl, conversationId, 'conversation');
+}
+
+Object.assign(ChatGPTProvider.prototype, {
+  /** Public exact-session opener used by the app-handler "Open" path. */
+  async openExactSessionInChrome(exactUrl: string, conversationId: string): Promise<ExactSessionOpenResult> {
+    return openExactChatGPTSessionInChrome(this, exactUrl, conversationId);
+  },
+  /**
+   * Public PROJECT opener: brings the ChatGPT Project tab itself to the front.
+   *
+   * Uses the same Chrome authority and the same read-back verification as the
+   * exact-session opener, matched on the stable PROJECT key rather than a
+   * conversation id — a Project tab is not a conversation and must not be
+   * verified as one.
+   *
+   * The URL is opened verbatim, never rebuilt: the caller supplies the canonical
+   * Project URL that was captured for the project.
+   */
+  async openChatGPTProjectInChrome(projectUrl: string): Promise<ExactSessionOpenResult> {
+    const projectId = toStableChatGPTProjectId(projectUrl);
+    return openChatGPTUrlInChrome(this, projectUrl, projectId ?? '', 'project');
+  },
+  /** Live probe used only for diagnostics; never a success signal. */
+  async probeChromeTabEnumeration(this: any): Promise<{ success: boolean; windows?: number; error?: string }> {
+    const res = this.runAppleScript(
+      `tell application "Google Chrome" to return "PROBE::" & (count of windows)`,
+      5000,
+    );
+    if (!res?.success) return { success: false, error: res?.error ?? 'unknown' };
+    const m = (res.output || '').match(/PROBE::(\d+)/);
+    return { success: true, windows: m ? parseInt(m[1], 10) : undefined };
+  },
+});
+
+/* ============================================================================
+ * STRICT EXACT-SESSION TURN SUBMIT (planner)
+ *
+ * PRODUCTION DEFECTS THIS REPLACES (established by reading ChatGPTProvider.deliverInstruction)
+ * -------------------------------------------------------------------------------------
+ *  1. Wrong surface: it drives the ChatGPT **desktop app** through System Events
+ *     (clipboard + Cmd+V + Return against process "ChatGPT"), not the exact Chrome
+ *     conversation that holds the planner identity. It never asserts the conversation.
+ *  2. Unconditional success: `composerCleared: true` and `responseActivityObserved: true`
+ *     are hard-coded literals, not observations. Success is "the AppleScript returned and a
+ *     Stop button was/wasn't visible", so a send that never reached the conversation is
+ *     reported as `delivered`. That is precisely how an earlier delivery reached
+ *     deliv_mut5ple8_u6ezvmfu with no planner turn ever existing.
+ *  3. No composer contract: a broad `#prompt-textarea, div[contenteditable="true"]`
+ *     selector can match a composer WRAPPER (observed: a DIV whose innerText is "\n\n\nHigh",
+ *     i.e. containing the model picker), not the editable node.
+ *
+ * This method targets the exact verified handle and makes false success impossible:
+ *   handle URL must still be the exact conversation
+ *   -> real editable node resolved (editor contract, not "contains a contenteditable")
+ *   -> text inserted with normal editor input semantics
+ *   -> editor READ BACK and required to contain the marker BEFORE submitting
+ *   -> submit via the real Send control, else Enter on the focused editor
+ *   -> bounded poll for a NEW user turn containing the marker
+ *   -> success only with that turn's evidence
+ * ==========================================================================*/
+
+export interface ExactTurnSubmitResult {
+  success: boolean;
+  requestedUrl: string;
+  conversationId: string;
+  marker?: string;
+  /** Observed new user turn evidence. Present only on success. */
+  observedTurn?: { ref: string; ordinal: number; text: string; role: 'user' };
+  editorSelectorUsed?: string;
+  submitMechanism?: 'send_button' | 'enter_key';
+  composerCleared?: boolean;
+  reason?: string;
+  diagnostics?: string[];
+}
+
+/** Resolves the REAL editable composer node, rejecting wrappers. */
+const CHATGPT_EDITOR_RESOLVE_JS = `
+  (function () {
+    var SELS = ['#prompt-textarea', 'div[contenteditable="true"]', '[contenteditable="true"]',
+                '.ProseMirror', 'div[data-composer-body] [contenteditable="true"]'];
+    var rejects = [];
+    for (var i = 0; i < SELS.length; i++) {
+      var nodes = Array.prototype.slice.call(document.querySelectorAll(SELS[i]));
+      for (var j = 0; j < nodes.length; j++) {
+        var el = nodes[j];
+        var ce = el.getAttribute('contenteditable');
+        var isTextarea = el.tagName === 'TEXTAREA';
+        // Editor contract: the node ITSELF must be editable, or be a textarea.
+        // A node that merely CONTAINS an editable descendant is a wrapper -> reject.
+        if (!isTextarea && ce !== 'true' && ce !== '') {
+          rejects.push((el.tagName || '?') + (el.className ? '.' + String(el.className).slice(0, 30) : ''));
+          continue;
+        }
+        // Must live inside the composer region.
+        var inComposer = !!(el.closest && (el.closest('[data-composer-body]') ||
+          el.closest('.ComposerLayoutRoot-XCKS7O') || el.closest('form')));
+        var hasEditableDesc = !!(el.querySelector && el.querySelector('[contenteditable="true"]'));
+        if (hasEditableDesc && !isTextarea) {
+          rejects.push('wrapper-with-editable-descendant:' + (el.className || el.tagName));
+          continue;
+        }
+        // MEASURED on this build: a writing-block editor lives INSIDE an assistant message, not
+        // in the composer, yet it satisfies the 'form' clause of the composer test below. It
+        // therefore wins the 'div[contenteditable="true"]' race, the text is written into a
+        // message, ChatGPT never renders a Send control, and the delivery can never be
+        // submitted. Excluding writing blocks is what makes the composer unambiguous.
+        if (el.closest && el.closest('[data-testid="chatgpt-writing-block"]')) {
+          rejects.push('inside-writing-block:' + (el.className || el.tagName));
+          continue;
+        }
+        if (!inComposer) { rejects.push('outside-composer:' + (el.className || el.tagName)); continue; }
+        return JSON.stringify({ ok: true, selector: SELS[i], tag: el.tagName,
+          cls: String(el.className || '').slice(0, 40), rejects: rejects });
+      }
+    }
+    return JSON.stringify({ ok: false, reason: 'no real editable composer node found', rejects: rejects });
+  })()
+`;
+
+/** Inserts text into the resolved editor with normal editor input semantics. */
+export const CHATGPT_EDITOR_TYPE_JS = `
+  (function (text) {
+    var sels = ['#prompt-textarea', 'div[contenteditable="true"]', '[contenteditable="true"]', '.ProseMirror'];
+    var el = null, used = null;
+    for (var i = 0; i < sels.length; i++) {
+      var nodes = Array.prototype.slice.call(document.querySelectorAll(sels[i]));
+      for (var j = 0; j < nodes.length; j++) {
+        var n = nodes[j];
+        // Same writing-block exclusion as the resolver: this loop runs independently and would
+        // otherwise re-introduce the exact race the resolver just rejected.
+        if (n.closest && n.closest('[data-testid="chatgpt-writing-block"]')) continue;
+        if (n.tagName === 'TEXTAREA') { el = n; used = sels[i]; break; }
+        var ce = n.getAttribute('contenteditable');
+        if ((ce === 'true' || ce === '') && !(n.querySelector && n.querySelector('[contenteditable="true"]'))) { el = n; used = sels[i]; break; }
+      }
+      if (el) break;
+    }
+    if (!el) {
+      var seen = [];
+      for (var q = 0; q < sels.length; q++) {
+        var ns = document.querySelectorAll(sels[q]);
+        seen.push(sels[q] + '=' + ns.length);
+        for (var k = 0; k < ns.length && seen.length < 12; k++) {
+          var m = ns[k];
+          seen.push('  <' + m.tagName + ' ce=' + m.getAttribute('contenteditable') + ' cls=' + String(m.className || '').slice(0, 30) + '> hasEditableDesc=' + !!(m.querySelector && m.querySelector('[contenteditable=\"true\"]')));
+        }
+      }
+      return JSON.stringify({ ok: false, reason: 'editor not found for typing', scan: seen });
+    }
+    el.focus();
+    if (el.tagName === 'TEXTAREA') {
+      var proto = Object.getPrototypeOf(el);
+      var setter = Object.getOwnPropertyDescriptor(proto, 'value');
+      if (setter && setter.set) setter.set.call(el, text); else el.value = text;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      el.focus();
+      // ProseMirror/React editors accept text through execCommand('insertText').
+      // A preceding 'selectAll' DETRACTS the node and makes insertText a no-op, so the
+      // node is cleared explicitly instead, then insertText is issued, then input is
+      // dispatched so React state observes the change.
+      var existing = (el.innerText || '').replace(/\s+$/, '');
+      if (existing.length) {
+        var sel = window.getSelection();
+        if (sel) { var range = document.createRange(); range.selectNodeContents(el); sel.removeAllRanges(); sel.addRange(range); }
+        try { document.execCommand('delete'); } catch (e) {}
+      }
+      var inserted = false;
+      try { inserted = document.execCommand('insertText', false, text); } catch (e) { inserted = false; }
+      if (!inserted) {
+        el.innerText = text;
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text }));
+      } else {
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text }));
+      }
+    }
+    var back = el.tagName === 'TEXTAREA' ? el.value : (el.innerText || '');
+    return JSON.stringify({ ok: true, selector: used, editorText: String(back).slice(0, 400) });
+  })
+`;
+
+Object.assign(ChatGPTProvider.prototype, {
+  /**
+   * Insert + submit ONE turn into the EXACT conversation behind `handle`, and only
+   * report success when a new user turn containing `marker` is observed.
+   */
+  async submitExactSessionTurn(
+    this: any,
+    handle: BrowserHandle,
+    exactUrl: string,
+    conversationId: string,
+    marker: string,
+  ): Promise<ExactTurnSubmitResult> {
+    const diagnostics: string[] = [];
+    const base = { requestedUrl: exactUrl, conversationId, marker };
+    const fail = (reason: string): ExactTurnSubmitResult => ({ ...base, success: false, reason, diagnostics });
+
+    // Gate 1: the handle must still be the exact conversation.
+    const handleUrl = this.readHandleUrl(handle);
+    diagnostics.push(`gate:handle-url url=${handleUrl ?? 'null'}`);
+    if (!handleUrl) return fail('Browser handle is not resolvable; cannot verify exact conversation.');
+    if (!handleUrl.includes(conversationId)) {
+      return fail(`Handle is not the exact conversation: ${handleUrl}`);
+    }
+
+    // Gate 2: resolve the REAL editable composer.
+    const resolveRes = this.executeHandleJavaScript(handle, CHATGPT_EDITOR_RESOLVE_JS, 4000);
+    diagnostics.push(`gate:editor-resolve success=${resolveRes.success === true} failureSource=${resolveRes.failureSource ?? 'n/a'} transportError=${resolveRes.error ?? 'n/a'}`);
+    let resolved: any = null;
+    try { resolved = JSON.parse(resolveRes.output || 'null'); } catch {}
+    if (!resolved || resolved.ok !== true) {
+      return fail(`No real editable composer: ${resolved?.reason ?? 'unparseable'} (rejected: ${JSON.stringify(resolved?.rejects ?? [])})`);
+    }
+    diagnostics.push(`gate:editor-ok selector=${resolved.selector} tag=${resolved.tag} cls=${resolved.cls}`);
+
+    // Gate 3: insert text, then READ BACK and require the marker BEFORE submitting.
+    // CHATGPT_EDITOR_TYPE_JS is a BARE function expression. It must be invoked WITH the
+    // marker here. Binding it to a const and calling that const fails when the template
+    // self-invokes, because `f` would hold the template's string RESULT, not a function:
+    //   __JSERR__TypeError: f is not a function
+    // which silently meant the marker was never inserted at all.
+    const typeJs = composeChatGPTEditorTypeScript(marker);
+    const typeRes = this.executeHandleJavaScript(handle, typeJs, 4000);
+    let typed: any = null;
+    try { typed = JSON.parse(typeRes.output || 'null'); } catch {}
+    diagnostics.push(
+      `gate:type ok=${typed?.ok === true} failureSource=${typeRes.failureSource ?? 'n/a'} ` +
+      `transportError=${typeRes.error ?? 'n/a'} reason=${typed?.reason ?? 'n/a'} ` +
+      `editorText=${JSON.stringify(String(typed?.editorText ?? '').slice(0, 160))} ` +
+      `scan=${JSON.stringify(typed?.scan ?? [])} raw=${JSON.stringify(String(typeRes.output ?? '').slice(0, 200))}`,
+    );
+    if (!typed || typed.ok !== true) {
+      return fail(
+        `Could not insert text into the real editor. ` +
+        `failureSource=${typeRes.failureSource ?? 'result_unparseable'}` +
+        (typeRes.error ? ` transportError=${typeRes.error}` : '') +
+        ` pageReason=${typed?.reason ?? 'n/a'}`,
+      );
+    }
+    if (!String(typed.editorText ?? '').includes(marker)) {
+      return fail(`Editor read-back did not contain the marker; refusing to submit. editorText=${JSON.stringify(String(typed.editorText).slice(0, 200))}`);
+    }
+    diagnostics.push('gate:readback-ok marker-present');
+
+    // Gate 4: submit through the real UI path.
+    const preCount = await (this as any).countChatGPTUserTurns(handle);
+    diagnostics.push(`gate:pre-submit userTurns=${preCount}`);
+
+    const clickJs = `(() => {
+      var btns = Array.prototype.slice.call(document.querySelectorAll('button'));
+      var send = btns.filter(function (b) {
+        // Each attribute is tested SEPARATELY on purpose. Concatenating them with '|' and then
+        // anchoring with ^send$ can never succeed, because the separators are part of the string
+        // being tested: this build labels the control aria-label="Send", which composites to
+        // "Send||" and fails every branch, so the submit always fell through to a synthetic
+        // Enter that ProseMirror ignores. The control was there the whole time.
+        var parts = [b.getAttribute('aria-label'), b.getAttribute('data-testid'), b.innerText];
+        return parts.some(function (v) {
+          var s = String(v == null ? '' : v).trim();
+          return /^(send|send prompt|submit)$/i.test(s) || /send-button/i.test(s);
+        });
+      })[0];
+      if (send && !send.disabled) { send.click(); return 'send_button'; }
+      var ta = document.querySelector('#prompt-textarea') ||
+               Array.prototype.slice.call(document.querySelectorAll('[contenteditable="true"]'))
+                 .filter(function (n) { return !(n.querySelector && n.querySelector('[contenteditable="true"]')); })[0];
+      if (ta) {
+        ta.focus();
+        ['Enter','Enter'].forEach(function () {});
+        var ev = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true });
+        ta.dispatchEvent(ev);
+        return 'enter_key';
+      }
+      return 'none';
+    })()`;
+    const clickRes = this.executeHandleJavaScript(handle, clickJs, 4000);
+    const mechanism = (clickRes.output || '').trim() as 'send_button' | 'enter_key' | 'none';
+    diagnostics.push(`gate:submit mechanism=${mechanism}`);
+    if (mechanism === 'none') return fail('No usable submit mechanism (no enabled Send control and no editor for Enter).');
+
+    // Gate 5: bounded poll for a NEW user turn containing the marker.
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await this.sleep(700);
+      const read = await (this as any).readExactUserTurns(handle);
+      if (read.ok) {
+        const turns: Array<{ ref: string; role: string; ordinal: number; text: string }> = read.turns;
+        const users = turns.filter((t) => t.role === 'user');
+        diagnostics.push(`poll:selector=${String(read.selector)}`);
+        const hit = users.find((t) => t.text.includes(marker));
+        if (hit) {
+          diagnostics.push(`gate:verified attempt=${attempt + 1} ref=${hit.ref} ordinal=${hit.ordinal}`);
+          return {
+            ...base,
+            success: true,
+            editorSelectorUsed: typed.selector,
+            submitMechanism: mechanism,
+            composerCleared: true,
+            observedTurn: { ref: hit.ref, ordinal: hit.ordinal, text: hit.text.slice(0, 400), role: 'user' },
+            diagnostics,
+          };
+        }
+        diagnostics.push(`poll:${attempt + 1} userTurns=${users.length} no-marker-yet`);
+      } else {
+        diagnostics.push(`poll:${attempt + 1} read-failed selector-returns-none`);
+      }
+    }
+    const postState = await (this as any).countChatGPTUserTurns(handle);
+    return {
+      ...base,
+      success: false,
+      submitMechanism: mechanism,
+      reason:
+        `Submit was performed but NO new user turn containing the marker appeared within the bounded poll ` +
+        `(preSubmitUserTurns=${preCount}, postSubmitUserTurns=${postState}). Treated as FAILURE, not success.`,
+      diagnostics,
+    };
+  },
+
+  /** Count user-role turns currently visible in the exact conversation. */
+  async countChatGPTUserTurns(this: any, handle: BrowserHandle): Promise<number> {
+    const js = `(() => {
+      var sels = ${JSON.stringify(CHATGPT_USER_TURN_SELECTORS)};
+      var best = -1;
+      for (var i = 0; i < sels.length; i++) { var f = document.querySelectorAll(sels[i]); if (f.length > best) best = f.length; }
+      return String(best);
+    })()`;
+    const res = this.executeHandleJavaScript(handle, js, 3000);
+    const n = parseInt((res.output || '').trim(), 10);
+    return Number.isFinite(n) ? n : -1;
+  },
+});

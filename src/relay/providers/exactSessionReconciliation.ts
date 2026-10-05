@@ -128,6 +128,11 @@ export interface ReconciliationMessage {
   text?: string;
   /** Provider-reported assistant turn terminator (`stop`, `error`, `length`, ...). */
   finish?: string | null;
+  /**
+   * Provider-reported wall-clock completion of the turn. Additive, optional, and never
+   * inferred: an absent value means the provider did not report one.
+   */
+  completedAt?: number | null;
   /** Provider-reported terminal error on the assistant turn. */
   error?: { type?: string | null; message?: string | null; status?: number | null } | null;
   /** Provider-reported model actually used for the turn. */
@@ -367,6 +372,50 @@ function toChronological(messages: ReconciliationMessage[]): {
 }
 
 /**
+ * Find the user turn that IS this Attempt's payload, newest occurrence first.
+ *
+ * Extracted so that dispatch-time reconciliation and supervision-time completion
+ * observation cannot drift into two different definitions of "the dispatched turn". Two
+ * definitions of the same anchor is how a system ends up believing an instruction was
+ * answered while reading the answer to a different message.
+ *
+ * Scanned newest-first so that, when an identical instruction legitimately appears more
+ * than once, the most recent post-boundary occurrence is the one the transport produced
+ * (ground-truth Case 5). `priorIds` — the pre-dispatch id set — excludes every pre-existing
+ * occurrence; pass `null` when no boundary was captured, which disables that exclusion
+ * rather than silently excluding everything.
+ */
+function findDispatchedUserTurn(
+  ordered: ReconciliationMessage[],
+  normalizedExpected: string,
+  priorIds: Set<string> | null,
+): { message: ReconciliationMessage; ordinal: number; kind: InstructionMatchKind } | null {
+  if (normalizedExpected.length === 0) return null;
+  for (let i = ordered.length - 1; i >= 0; i--) {
+    const message = ordered[i];
+    if (message.role !== 'user') continue;
+    if (priorIds !== null && priorIds.has(message.messageId)) continue;
+    const observed = normalizeInstructionText(message.text);
+    if (observed.length === 0) continue;
+    if (observed === normalizedExpected) {
+      return { message, ordinal: i, kind: 'exact' };
+    }
+    // Truncation-only fallback: the provider cut the stored text, so what survived is a
+    // strict prefix of the payload. A turn whose text merely happens to start with part of
+    // the instruction is NOT accepted — that would let a different message match.
+    if (
+      message.text !== undefined &&
+      observed.length > 0 &&
+      normalizedExpected.length > observed.length &&
+      normalizedExpected.startsWith(observed)
+    ) {
+      return { message, ordinal: i, kind: 'truncated_prefix' };
+    }
+  }
+  return null;
+}
+
+/**
  * Classify a post-transport dispatch by reading the EXACT authoritative session.
  *
  * Pure: no provider, no I/O, no clock. The caller supplies the transcript it already read.
@@ -396,34 +445,7 @@ export function reconcileTransportOutcome(
   );
 
   // ---- Find the post-boundary user turn that IS this Attempt's payload.
-  // Scanned newest-first so that, when an identical instruction legitimately appears more
-  // than once, the most recent post-boundary occurrence is the one the transport produced
-  // (ground-truth Case 5). The boundary already excludes every pre-existing occurrence.
-  let matched: { message: ReconciliationMessage; ordinal: number; kind: InstructionMatchKind } | null =
-    null;
-  for (let i = ordered.length - 1; i >= 0; i--) {
-    const message = ordered[i];
-    if (message.role !== 'user') continue;
-    if (watermark !== null && priorIds.has(message.messageId)) continue;
-    const observed = normalizeInstructionText(message.text);
-    if (observed.length === 0) continue;
-    if (observed === normalizedExpected) {
-      matched = { message, ordinal: i, kind: 'exact' };
-      break;
-    }
-    // Truncation-only fallback: the provider cut the stored text, so what survived is a
-    // strict prefix of the payload. A turn whose text merely happens to start with part of
-    // the instruction is NOT accepted — that would let a different message match.
-    if (
-      message.text !== undefined &&
-      observed.length > 0 &&
-      normalizedExpected.length > observed.length &&
-      normalizedExpected.startsWith(observed)
-    ) {
-      matched = { message, ordinal: i, kind: 'truncated_prefix' };
-      break;
-    }
-  }
+  const matched = findDispatchedUserTurn(ordered, normalizedExpected, priorIds);
 
   const matchingUserTurn: MatchedUserTurn | null = matched
     ? {
@@ -581,6 +603,340 @@ function classifyWorkerExecution(
     return { classification: 'completed', evidence };
   }
   return { classification: 'in_progress', evidence };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Supervision-time completion observation                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Where the "before the response" line was drawn for a completion claim.
+ *
+ * `recorded_watermark_message_ids` — the caller supplied the pre-dispatch message-id SET
+ *   that its own Delivery committed, and that set is present in the transcript, so the
+ *   boundary is a set of provider message ids read from the exact session. This is the
+ *   strongest form available and it is the one the relay baton uses: it needs no text
+ *   match (which can fail on truncated text) and no timestamp comparison (which the
+ *   baton forbids as a deciding comparison).
+ * `matched_dispatched_user_turn` — the instruction text was found in the session and that
+ *   turn IS the watermark. Also a provider message id rather than a timestamp, and it is
+ *   the same anchor `reconcileTransportOutcome` used.
+ * `caller_after_created_at` — neither id-based anchor existed (the recorded id set was not
+ *   locatable in the transcript, and the instruction text was not found — it can sit
+ *   outside the provider's readable windows, or the caller supplied none), so the boundary
+ *   is the caller's own timestamp. Weaker, and reported as such rather than silently
+ *   substituted.
+ * `unavailable` — nothing exists. Then NO turn can be claimed to be a response, and the
+ *   observation reports zero assistant turns rather than the whole session.
+ */
+export type WorkerCompletionBoundarySource =
+  | 'recorded_watermark_message_ids'
+  | 'matched_dispatched_user_turn'
+  | 'caller_after_created_at'
+  /**
+   * The boundary was drawn by the Planner Observer at its ARM point: the set of assistant turn
+   * keys that already existed in the page when the observer was armed for that exact
+   * conversation. This is a real, recorded boundary — not an absence of one — and it is what
+   * lets the Planner side be observed without reconstructing any transcript history.
+   */
+  | 'observer_arm_baseline'
+  | 'unavailable';
+
+/** The assistant turn captured as this instruction's completed response. */
+export interface WorkerCompletedResponse {
+  messageId: string;
+  createdAt: number | null;
+  completedAt: number | null;
+  /** The provider's terminator for the turn that ended the run. */
+  finish: string;
+  /** The response text, as the provider stored it, unquoted and whitespace-collapsed. */
+  text: string;
+}
+
+export interface WorkerCompletionObservation {
+  boundary: {
+    source: WorkerCompletionBoundarySource;
+    /**
+     * The recorded pre-dispatch message id the boundary was actually drawn at.
+     *
+     * `null` when the caller supplied no recorded id set, and also when it supplied one
+     * that the transcript could not locate — the two are distinguishable by `source`,
+     * and both are reported rather than collapsed.
+     */
+    recordedAnchorMessageId: string | null;
+    /** The provider message id of the dispatched instruction, when it was matched. */
+    instructionTurnId: string | null;
+    instructionTurnCreatedAt: number | null;
+    instructionMatchKind: InstructionMatchKind;
+    /** The caller's timestamp boundary, recorded whichever source was used. */
+    callerAfterCreatedAt: number | null;
+  };
+  /** Assistant turns observed strictly after the watermark. */
+  assistantTurnCount: number;
+  /**
+   * A COMPLETED assistant response for this instruction is durably present in the session.
+   *
+   * This requires a provider-reported terminator that ends a RUN (`stop` / `error`) on a
+   * specific identified turn that produced text. It is never derived from the absence of
+   * activity, from an idle session, or from a turn that merely stopped to call a tool.
+   */
+  hasCompletedResponse: boolean;
+  /**
+   * A NEWER assistant turn is still running: the provider has reported no terminator for it.
+   *
+   * Reported independently of `hasCompletedResponse`, because both can be true at once —
+   * the worker answered and then went back to work. Collapsing them into one flag is what
+   * forces a choice between losing a real answer and waiting forever for silence.
+   */
+  inFlight: boolean;
+  /** The newest assistant turn after the watermark, whatever its state. */
+  newestAssistantMessageId: string | null;
+  /** Present exactly when `hasCompletedResponse`. */
+  response: WorkerCompletedResponse | null;
+  /**
+   * True when the captured response IS the newest assistant turn in the session.
+   *
+   * `hasCompletedResponse` stays `true` either way: a named, provider-terminated turn with
+   * text has been observed, and that fact does not depend on reading the rest of the
+   * session. But which completed response that is DOES depend on it. When the provider's
+   * readable windows do not span the session, a later completion may exist in the gap, so a
+   * consumer that forwards this text onward (a Handoff to the Planner) must be able to see
+   * that it is holding an older completion rather than the latest one.
+   */
+  capturedResponseIsNewest: boolean;
+  /** Provider-reported terminal error on the newest post-watermark assistant turn. */
+  terminalError: { type: string | null; message: string | null; status: number | null } | null;
+  /** True when the provider's readable windows do not span the whole session. */
+  unreadableMiddle: boolean;
+  /** False when any message lacked a timestamp, so array order was kept as given. */
+  chronologicalOrderDerived: boolean;
+}
+
+/**
+ * Terminators that end a RUN, as opposed to one turn within it.
+ *
+ * OpenCode emits one assistant row per turn. A turn that ended by invoking tools carries
+ * `finish: 'tool-calls'` and the run CONTINUES; its text is the model's narration, not its
+ * answer. Treating it as completion is precisely the false positive this set prevents,
+ * because the chain can still end in a provider error minutes later.
+ */
+const TERMINAL_RUN_FINISHES: ReadonlySet<string> = new Set(['stop', 'error']);
+
+/**
+ * Terminators that explicitly hand the RUN to something else, so the run is still going.
+ *
+ * `tool-calls` is the only one the providers actually emit, and it is the state a working
+ * agent spends most of its time in: the model ends a TURN to invoke tools, the tool runs, and
+ * the next assistant turn follows. The provider terminated that turn, but not the run.
+ *
+ * ## Why this set exists
+ *
+ * `inFlight` used to mean only "the newest turn carries no terminator at all", which is true
+ * for the narrow window in which a turn is mid-write. The much longer window — turn written,
+ * tool executing, next turn not yet created — reported neither `inFlight` nor
+ * `hasCompletedResponse`, because `tool-calls` is in neither set.
+ *
+ * The supervisor resolves that third state as "no completed turn, and the side is not
+ * running", which is `issueRecoveryNotice`: it mints a new Assignment and sends a message into
+ * the opposite conversation claiming the worker produced nothing. On the live worker session
+ * that misfire was reachable from all 50 possible boundaries.
+ *
+ * So the set is the missing third case, read straight off the provider's own terminator field.
+ * It is not a heuristic about silence and not a judgement about content: `tool-calls` is a
+ * first-class statement by the provider that it is continuing.
+ *
+ * ## Which direction this errs
+ *
+ * Marking `tool-calls` as still-running can only DELAY a transfer, never cause one, and
+ * `hasCompletedResponse` is monotone, so a response present now is still reported once the run
+ * terminates. The price is that a run abandoned mid-tool-call now waits rather than raising a
+ * notice; that is the same trade the surrounding design already makes everywhere, because
+ * waiting is reversible and a false claim about a live worker is not.
+ */
+const RUN_CONTINUING_FINISHES: ReadonlySet<string> = new Set(['tool-calls']);
+
+/**
+ * Observe whether ONE exact session has completed this Attempt's instruction.
+ *
+ * ## Why this exists separately from `classifyWorkerExecution`
+ *
+ * The two answer different questions at different times, and both are needed:
+ *
+ * - `classifyWorkerExecution` is the DISPATCH-time verdict: "is the run this instruction
+ *   caused still going?". Its answer is deliberately volatile — it is `in_progress` for as
+ *   long as the worker is mid-turn.
+ * - `observeWorkerCompletion` is the SUPERVISION-time verdict: "has a completed response
+ *   for this instruction been persisted?". Its answer must be MONOTONE, because the
+ *   supervisor reads it on every tick and must not be forced to miss a real response just
+ *   because the worker resumed working afterwards.
+ *
+ * A single flag cannot serve both: the dispatch-time one would un-complete a delivered
+ * Attempt on the next tick, and the supervision-time one would hand off a half-finished
+ * tool call as the worker's answer.
+ *
+ * ## Relationship to `classifyWorkerExecution`'s ordering
+ *
+ * Both anchor on the SAME dispatched user turn (via `findDispatchedUserTurn`) and both read
+ * the LAST assistant turn for the run's outcome. The difference is only which turn is
+ * reported as the response: the newest turn that both TERMINATED a run and produced text,
+ * rather than unconditionally the newest turn.
+ *
+ * Pure: no provider, no I/O, no clock. The caller supplies the transcript it already read,
+ * so this can be unit-tested against recorded provider output with no host involved.
+ */
+export function observeWorkerCompletion(input: {
+  /** Messages of the exact target session. Provider order is NOT assumed. */
+  messages: ReconciliationMessage[];
+  /** This Attempt's payload, used to find the dispatched instruction turn. */
+  expectedText?: string | null;
+  /**
+   * The pre-dispatch message-id SET the caller's own Delivery committed.
+   *
+   * When supplied and locatable in the transcript, this is the boundary: post-boundary
+   * means "not in this set", decided by provider message id rather than by comparing
+   * timestamps. It is additive and takes precedence over the text match because it does
+   * not depend on the instruction surviving storage intact, which a provider that
+   * truncates transcripts can break silently.
+   *
+   * When it is supplied but NOT locatable, the set cannot anchor anything — the provider's
+   * readable window does not span the boundary — so it is not honoured and the caller is
+   * told so through `boundary.source`. It is never quietly degraded into a timestamp.
+   */
+  afterMessageIds?: readonly string[] | null;
+  /** Caller-supplied fallback boundary, used only when no id-based anchor exists. */
+  afterCreatedAt?: number | null;
+  /** True when the provider's readable windows do not span the whole session. */
+  unreadableMiddle?: boolean;
+}): WorkerCompletionObservation {
+  const { ordered, derived } = toChronological(input.messages ?? []);
+  const callerAfter = typeof input.afterCreatedAt === 'number' ? input.afterCreatedAt : null;
+  const matched = findDispatchedUserTurn(
+    ordered,
+    normalizeInstructionText(input.expectedText ?? null),
+    null,
+  );
+
+  // ---- The watermark, and an honest account of how strong it is.
+  //
+  // Precedence is strongest-first, and each rung is an id-based anchor until none is
+  // available: the recorded id set, then the matched instruction turn, then — only as a
+  // last resort, and labelled — the caller's timestamp.
+  let source: WorkerCompletionBoundarySource = 'unavailable';
+  let anchorIndex = -1;
+  /**
+   * True when the recorded set is authoritative AND empty, which is a real boundary and
+   * not a missing one: the session held no messages at all when the send was made, so the
+   * whole transcript is post-boundary. Treating that as "no boundary" would make the very
+   * first dispatch of a fresh session permanently unreadable, which is the opposite of
+   * what an empty pre-send snapshot says.
+   */
+  let wholeSessionIsPostBoundary = false;
+
+  const recordedIds = Array.isArray(input.afterMessageIds) ? input.afterMessageIds : null;
+  let recordedAnchorId: string | null = null;
+  if (recordedIds !== null) {
+    const recordedSet = new Set(recordedIds);
+    // The newest recorded id that is actually present in this transcript is the last
+    // position the boundary can be drawn at: everything strictly after it is post-
+    // boundary. Older recorded ids may be absent because the provider's readable window
+    // is bounded, which is why the NEWEST present id is used rather than requiring all.
+    let newestPresent = -1;
+    for (let i = 0; i < ordered.length; i++) {
+      if (recordedSet.has(ordered[i].messageId)) newestPresent = i;
+    }
+    if (newestPresent >= 0) {
+      anchorIndex = newestPresent;
+      recordedAnchorId = ordered[newestPresent].messageId;
+      source = 'recorded_watermark_message_ids';
+    } else if (recordedIds.length === 0) {
+      wholeSessionIsPostBoundary = true;
+      source = 'recorded_watermark_message_ids';
+    }
+  }
+
+  if (anchorIndex < 0 && !wholeSessionIsPostBoundary && matched) {
+    anchorIndex = matched.ordinal;
+    source = 'matched_dispatched_user_turn';
+  }
+
+  if (anchorIndex < 0 && !wholeSessionIsPostBoundary && callerAfter !== null) {
+    source = 'caller_after_created_at';
+  }
+
+  const after =
+    anchorIndex >= 0
+      ? ordered.slice(anchorIndex + 1)
+      : wholeSessionIsPostBoundary
+        ? ordered
+        : callerAfter !== null
+          ? ordered.filter(
+              (m) => typeof m.createdAt === 'number' && (m.createdAt as number) > callerAfter,
+            )
+          : [];
+
+  const assistantTurns = after.filter((m) => m.role === 'assistant');
+  const newest = assistantTurns.length > 0 ? assistantTurns[assistantTurns.length - 1] : null;
+  const newestFinish = newest?.finish ?? null;
+  // "The RUN has not ended", as opposed to "this turn has not ended".
+  //
+  // Two provider statements mean the run is still going:
+  //   - no terminator at all: the provider has not finished writing the turn;
+  //   - `tool-calls`: the turn ended so a tool could run, and the run continues after it.
+  //
+  // Neither is ever widened to "the session looks quiet". `tool-calls` was previously in
+  // neither this test nor the terminal set, so a worker between turns read as idle-with-no-
+  // output — which the supervisor escalates. See RUN_CONTINUING_FINISHES.
+  const inFlight =
+    newest !== null &&
+    (newestFinish === null ||
+      newestFinish === undefined ||
+      newestFinish === '' ||
+      RUN_CONTINUING_FINISHES.has(newestFinish));
+
+  // ---- The completed response: the newest turn that ENDED a run and actually spoke.
+  let response: WorkerCompletedResponse | null = null;
+  for (let i = assistantTurns.length - 1; i >= 0 && response === null; i--) {
+    const candidate = assistantTurns[i];
+    const finish = candidate.finish ?? null;
+    if (finish === null || !TERMINAL_RUN_FINISHES.has(finish)) continue;
+    const text = normalizeInstructionText(candidate.text);
+    if (text.length === 0) continue;
+    response = {
+      messageId: candidate.messageId,
+      createdAt: candidate.createdAt ?? null,
+      completedAt: candidate.completedAt ?? null,
+      finish,
+      text,
+    };
+  }
+
+  const terminalError = newest?.error
+    ? {
+        type: newest.error.type ?? null,
+        message: newest.error.message ?? null,
+        status: typeof newest.error.status === 'number' ? newest.error.status : null,
+      }
+    : null;
+
+  return {
+    boundary: {
+      source,
+      recordedAnchorMessageId: recordedAnchorId,
+      instructionTurnId: matched?.message.messageId ?? null,
+      instructionTurnCreatedAt: matched?.message.createdAt ?? null,
+      instructionMatchKind: matched?.kind ?? 'none',
+      callerAfterCreatedAt: callerAfter,
+    },
+    assistantTurnCount: assistantTurns.length,
+    hasCompletedResponse: response !== null,
+    inFlight,
+    newestAssistantMessageId: newest?.messageId ?? null,
+    response,
+    capturedResponseIsNewest: response !== null && response.messageId === (newest?.messageId ?? null),
+    terminalError,
+    unreadableMiddle: input.unreadableMiddle === true,
+    chronologicalOrderDerived: derived,
+  };
 }
 
 /* -------------------------------------------------------------------------- */

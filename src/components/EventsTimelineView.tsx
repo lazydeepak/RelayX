@@ -327,7 +327,7 @@ export const EventsTimelineView: React.FC<EventsTimelineViewProps> = ({
       </div>
 
       {/* Filter and Query Controls Bar */}
-      <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3">
+      <div className="rx-card p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3">
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
           {/* Search Query */}
           <div className="relative">

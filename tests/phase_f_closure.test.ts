@@ -32,6 +32,14 @@ describe('Phase F Closure — Causal Extraction & Boundary Integrity', () => {
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker', 'ses_test_123');
     const pair = await engine.createPair(project.id, 'Phase F Pair', planner.id, worker.id);
+    // The relay baton addresses ONE exact provider session per side, so these fixtures bind a
+    // real external session identity (I-11). Binding happens AFTER createPair on purpose:
+    // createPair demands verified project-association evidence for a session that already has an
+    // external id, and these fixtures exercise the relay loop rather than pairing authority.
+    planner.updateExternalIdentity('ses_chatgpt_phase_f_closure_pl1', '/dev/phase_f_closure_pl1');
+    worker.updateExternalIdentity('ses_opencode_phase_f_closure_wr1', '/dev/phase_f_closure_wr1');
+    await db.runtimes.save(planner);
+    await db.runtimes.save(worker);
 
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
     await engine.startPair(pair.id);
@@ -60,6 +68,14 @@ describe('Phase F Closure — Causal Extraction & Boundary Integrity', () => {
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker', 'ses_test_stale');
     const pair = await engine.createPair(project.id, 'Phase F Stale Pair', planner.id, worker.id);
+    // The relay baton addresses ONE exact provider session per side, so these fixtures bind a
+    // real external session identity (I-11). Binding happens AFTER createPair on purpose:
+    // createPair demands verified project-association evidence for a session that already has an
+    // external id, and these fixtures exercise the relay loop rather than pairing authority.
+    planner.updateExternalIdentity('ses_chatgpt_phase_f_closure_pl2', '/dev/phase_f_closure_pl2');
+    worker.updateExternalIdentity('ses_opencode_phase_f_closure_wr2', '/dev/phase_f_closure_wr2');
+    await db.runtimes.save(planner);
+    await db.runtimes.save(worker);
 
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
 
@@ -87,6 +103,14 @@ describe('Phase F Closure — Causal Extraction & Boundary Integrity', () => {
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker', 'ses_bound_correct');
     const pair = await engine.createPair(project.id, 'Phase F Mismatch Pair', planner.id, worker.id);
+    // The relay baton addresses ONE exact provider session per side, so these fixtures bind a
+    // real external session identity (I-11). Binding happens AFTER createPair on purpose:
+    // createPair demands verified project-association evidence for a session that already has an
+    // external id, and these fixtures exercise the relay loop rather than pairing authority.
+    planner.updateExternalIdentity('ses_chatgpt_phase_f_closure_pl3', '/dev/phase_f_closure_pl3');
+    worker.updateExternalIdentity('ses_opencode_phase_f_closure_wr3', '/dev/phase_f_closure_wr3');
+    await db.runtimes.save(planner);
+    await db.runtimes.save(worker);
 
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
 
@@ -127,6 +151,15 @@ describe('Phase F Closure — Causal Extraction & Boundary Integrity', () => {
     const planner = await engine1.registerRuntimeSession('chatgpt', 'Planner');
     const worker = await engine1.registerRuntimeSession('opencode', 'Worker', 'ses_restart_123');
     const pair = await engine1.createPair(project.id, 'Restart Pair', planner.id, worker.id);
+    // The relay baton addresses ONE exact provider session per side, so these fixtures bind a
+    // real external session identity (I-11). Binding happens AFTER createPair on purpose:
+    // createPair demands verified project-association evidence for a session that already has an
+    // external id, and these fixtures exercise the relay loop rather than pairing authority.
+    planner.updateExternalIdentity('ses_chatgpt_phase_f_closure_pl4', '/dev/phase_f_closure_pl4');
+    worker.updateExternalIdentity('ses_opencode_phase_f_closure_wr4', '/dev/phase_f_closure_wr4');
+    // Saved to `db1`, the database THIS test restarts against — not the describe-level `db`.
+    await db1.runtimes.save(planner);
+    await db1.runtimes.save(worker);
 
     assert.strictEqual((await engine1.loadAndActivate(pair.id)).outcome, 'activated');
     await engine1.startPair(pair.id);

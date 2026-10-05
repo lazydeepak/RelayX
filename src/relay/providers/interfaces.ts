@@ -172,7 +172,20 @@ export interface IRuntimeProvider {
   findRuntime(descriptor: RuntimeTargetDescriptor): Promise<RuntimeInspectionResult>;
   findAllRuntimes(): Promise<RuntimeInspectionResult[]>;
   inspectRuntime(sessionId: RuntimeSessionId, dispatchBoundary?: { afterCreatedAt?: number; afterMessageId?: string | null; sessionId?: string | null; expectedInstructionSnippet?: string | null }): Promise<RuntimeInspectionResult>;
-  activateRuntime(sessionId: RuntimeSessionId, windowTitle?: string): Promise<boolean>;
+  /**
+   * Bring a runtime's surface to the front, and open the exact attached session when the
+   * provider can address one.
+   *
+   * `externalSessionId` is the authoritative session identity when the provider has one. It
+   * is optional so browser-preview and single-surface providers can ignore it, but any
+   * provider that navigates by a human-readable label MUST prefer the id: the label is
+   * mutable and is not an identity.
+   */
+  activateRuntime(
+    sessionId: RuntimeSessionId,
+    windowTitle?: string,
+    externalSessionId?: string | null,
+  ): Promise<boolean>;
   deliverInstruction(request: DeliveryInstructionRequest): Promise<DeliveryInstructionResult>;
   /**
    * Optional: read the pre-dispatch boundary of the exact target session.
@@ -198,8 +211,56 @@ export interface IRuntimeProvider {
     messages: ReconciliationMessage[];
     failure: string | null;
   }>;
+  /**
+   * Optional: AUTHORITATIVE reachability proof for ONE exact conversation, addressed by
+   * the provider's own conversation identifier.
+   *
+   * ## Why this exists separately from `readExactSessionTurnsForReconciliation`
+   *
+   * The two answer different questions and must not be merged:
+   *
+   *   - `readExactSessionTurnsForReconciliation` asks "what turns does this conversation
+   *     contain?" — it needs stable per-turn provider message ids, and a provider whose
+   *     surface cannot produce them must honestly report a capability gap.
+   *   - this asks "does this exact conversation still exist and can RelayX address it?" —
+   *     it needs only the conversation's own identity, which every provider can supply.
+   *
+   * RelayX needs the second question answered BEFORE it refuses to address a side, because
+   * `RuntimeSession.status === 'terminated'` is derived purely from failed local observation
+   * probes and therefore says nothing about whether the conversation survived. Gating on it
+   * without asking this first is what permanently wedged the relay: a live conversation
+   * became unaddressable because RelayX had once failed to see its window three times.
+   *
+   * ## Contract
+   *
+   *   - `reachable: true`  — the provider positively established that THIS conversation
+   *                          exists and is addressable. `conversationId` is the id read back
+   *                          from the provider, never the one that was asked about.
+   *   - `reachable: false` — the provider was asked and positively answered that this
+   *                          conversation does not exist. Only THIS is evidence of a
+   *                          genuinely dead conversation.
+   *   - `failure != null`  — "could not check". Must never be coerced to `reachable:false`,
+   *                          because "I could not look" is not "it is gone" (I-6, C-8).
+   *
+   * Implementations MUST NOT synthesize, infer or echo back the requested id to manufacture
+   * a positive. A fabricated `reachable: true` would let RelayX revive a runtime on evidence
+   * that does not exist.
+   */
+  confirmExactSessionReachable?(
+    externalSessionId: string,
+    sessionUrl?: string | null,
+  ): Promise<{
+    reachable: boolean;
+    conversationId: string | null;
+    evidence?: ObservableEvidence;
+    failure: string | null;
+  }>;
   detectWorkingState(sessionId: RuntimeSessionId): Promise<{ isWorking: boolean; evidence?: ObservableEvidence }>;
-  detectCompletionState(sessionId: RuntimeSessionId, dispatchBoundary?: { afterCreatedAt?: number; afterMessageId?: string | null; sessionId?: string | null; expectedInstructionSnippet?: string | null }): Promise<{ isComplete: boolean; responseSummary?: string; evidence?: ObservableEvidence }>;
+  /**
+   * `isWorking` is optional and additive: `undefined` means "could not be established", and
+   * the caller MUST then fall back to its other signal rather than reading it as `false`.
+   */
+  detectCompletionState(sessionId: RuntimeSessionId, dispatchBoundary?: { afterCreatedAt?: number; afterMessageId?: string | null; sessionId?: string | null; expectedInstructionSnippet?: string | null }): Promise<{ isComplete: boolean; responseSummary?: string; isWorking?: boolean; evidence?: ObservableEvidence }>;
   captureEvidence(sessionId: RuntimeSessionId, action: string): Promise<ObservableEvidence>;
   /**
    * Optional reconciliation of an uncertain delivery.

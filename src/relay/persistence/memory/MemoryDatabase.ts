@@ -378,7 +378,30 @@ export class MemoryAssignmentRepository implements IAssignmentRepository {
     );
   }
 
+  /**
+   * Mirrors the SQLite UNIQUE partial index on `source_recovery_delivery_id`: the create
+   * path relies on that constraint to reject a second recovery notice for one baton
+   * episode, so the in-memory repository has to reject it too or the two backends would
+   * disagree about whether exactly-once recovery holds.
+   */
+  async findBySourceRecoveryDelivery(deliveryId: DeliveryId): Promise<Assignment | null> {
+    return (
+      Array.from(this.items.values()).find(
+        (a) => a.sourceRecoveryDeliveryId === deliveryId,
+      ) ?? null
+    );
+  }
+
   async save(assignment: Assignment): Promise<void> {
+    if (assignment.sourceRecoveryDeliveryId !== undefined) {
+      const existing = await this.findBySourceRecoveryDelivery(assignment.sourceRecoveryDeliveryId);
+      if (existing && existing.id !== assignment.id) {
+        throw new Error(
+          `Assignment ${assignment.id} would duplicate the recovery notice already issued for ` +
+            `delivery ${assignment.sourceRecoveryDeliveryId} (Assignment ${existing.id}).`,
+        );
+      }
+    }
     this.items.set(assignment.id, assignment);
   }
 

@@ -646,10 +646,12 @@ describe('S6 closure group I — the provider-contact surface cannot grow silent
       'RelayEngine.ts:readExactSessionTurnsForReconciliation': 'the I-2 gate in reconcileDeliveryAgainstExactSession, resolved through the Attempt FROZEN authority (attempt.sessionPairId) exactly as probeDispatchOutcome does; a non-ACTIVE Pair yields disposition=insufficient with no contact and no inferred external state',
       'RelayEngine.ts:inspectRuntime': 'runSupervisionTick / recoverOnStartup continue-guard, and reconcileAndRecoverRuntime shared guard',
       'RelayEngine.ts:reconcileDispatch': 'probeDispatchOutcome via attempt.sessionPairId',
+      'RelayEngine.ts:confirmExactSessionReachable': 'called only from tryReviveTerminalRuntime, reached only from resolveBatonSide, which is reached only from resumeRelayContinuity AFTER its I-2 authority gate (pair.isAutomatedContactPermitted() / isProviderContactPermitted()) has passed and BEFORE any provider is resolved. A Pair that does not permit contact never reaches it, and the read itself is read-only: it resolves an already-recorded conversation id and never sends.',
       'RelayEngine.ts:detectWorkingState': 'reconcileInFlightPlanFirstUnit via run.sessionPairId',
       'RelayEngine.ts:observeSide': 'S2: pair.isProviderContactPermitted() checked inside observeSide before getProvider is ever resolved',
       'RelayApiService.ts:inspectRuntime': 'engine.assertRuntimeProviderContactPermitted()',
       'RelayApiService.ts:activateRuntime': 'engine.assertRuntimeProviderContactPermitted()',
+      'RelayApiService.ts:openExactWorkerSession': 'inside activateRuntime, behind the same engine.assertRuntimeProviderContactPermitted() I-2 gate that opens the method; the OpenCode worker surface can only be navigated by title, and the authoritative ses_… id is resolved through the shared OpenCode service before the refreshed title is used',
     };
     // Exempt by documented classification, not by omission.
     const EXEMPT: Record<string, string> = {

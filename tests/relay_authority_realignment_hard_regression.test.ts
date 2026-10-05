@@ -44,6 +44,20 @@ class CountingProvider extends MockProvider {
     return super.inspectRuntime(id);
   }
 
+  // The background tick resolves the relay baton and then reads the baton owner's EXACT
+  // session, so these are the capabilities that constitute automated contact on that path.
+  // Counting only `inspectRuntime` would report zero contact for a tick that is demonstrably
+  // reading the provider, which would make the "contact is permitted" proofs assert nothing.
+  async readExactSessionTurnsForReconciliation(externalSessionId: string): Promise<any> {
+    this.calls.push('readExactSessionTurnsForReconciliation');
+    return super.readExactSessionTurnsForReconciliation(externalSessionId);
+  }
+
+  async detectWorkingState(id: RuntimeSessionId): Promise<any> {
+    this.calls.push('detectWorkingState');
+    return super.detectWorkingState(id);
+  }
+
   async observeSide(args: any): Promise<any> {
     this.calls.push('observeSide');
     return super.observeSide(args);

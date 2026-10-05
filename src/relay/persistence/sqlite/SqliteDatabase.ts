@@ -205,6 +205,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
         instruction TEXT NOT NULL,
         target_side_role TEXT NOT NULL DEFAULT 'worker',
         source_handoff_id TEXT,
+        source_recovery_delivery_id TEXT,
         status TEXT NOT NULL,
         current_attempt_id TEXT,
         active_delivery_id TEXT,
@@ -407,6 +408,15 @@ CREATE TABLE IF NOT EXISTS handoffs (
     addColumnIfNeeded(this.db, 'assignments', 'source_handoff_id', 'TEXT');
     addColumnIfNeeded(this.db, 'assignments', 'completed_at', 'INTEGER');
     this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_assignments_source_handoff ON assignments(source_handoff_id) WHERE source_handoff_id IS NOT NULL;`);
+
+    // Relay recovery episodes. `source_recovery_delivery_id` names the confirmed Delivery
+    // whose unresolved baton episode produced a recovery notice; the UNIQUE partial index
+    // makes "at most one recovery notice per triggering Delivery" a schema guarantee, so
+    // exactly-once recovery survives a crash without depending on in-memory state. It is
+    // a TRANSPORT fact ("a notice was already issued for this episode"), never a semantic
+    // outcome — see AssignmentProps.sourceRecoveryDeliveryId.
+    addColumnIfNeeded(this.db, 'assignments', 'source_recovery_delivery_id', 'TEXT');
+    this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_assignments_source_recovery ON assignments(source_recovery_delivery_id) WHERE source_recovery_delivery_id IS NOT NULL;`);
 
     addColumnIfNeeded(this.db, 'attempts', 'session_pair_id', 'TEXT');
     addColumnIfNeeded(this.db, 'attempts', 'worker_session_id', 'TEXT');

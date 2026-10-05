@@ -17,7 +17,7 @@
  *    Electron main process and are never bundled into the renderer.
  */
 
-import { IRelayApi } from '../types/relayApi.ts';
+import { IRelayApi, OpenRuntimeSessionResult } from '../types/relayApi.ts';
 import { browserPreviewApi } from './browserPreviewApi.ts';
 
 function getLocalFallbackService(): IRelayApi {
@@ -278,6 +278,15 @@ export const relayBridge: IRelayApi = {
       return (window.relayApi as any).openRuntimeSession(sessionId);
     }
     return getLocalFallbackService().openRuntimeSession(sessionId);
+  },
+
+  openPlannerProject: async (projectId: string): Promise<OpenRuntimeSessionResult> => {
+    if (typeof window !== 'undefined' && (window.relayApi as any)?.openPlannerProject) {
+      return (window.relayApi as any).openPlannerProject(projectId);
+    }
+    const local: any = getLocalFallbackService();
+    if (typeof local?.openPlannerProject === 'function') return local.openPlannerProject(projectId);
+    return { success: false, error: 'Opening a planner project is not supported in this environment.' };
   },
 
   recoverRuntime: async (sessionId: string) => {

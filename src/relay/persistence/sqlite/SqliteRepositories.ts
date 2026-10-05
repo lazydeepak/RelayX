@@ -773,6 +773,7 @@ export class SqliteAssignmentRepository implements IAssignmentRepository {
       instruction: row.instruction as string,
       targetSideRole: (row.target_side_role as any) || 'worker',
       sourceHandoffId: (row.source_handoff_id as HandoffId) || undefined,
+      sourceRecoveryDeliveryId: (row.source_recovery_delivery_id as DeliveryId) || undefined,
       status: row.status as any,
       currentAttemptId: (row.current_attempt_id as AttemptId) || undefined,
       activeDeliveryId: (row.active_delivery_id as DeliveryId) || undefined,
@@ -804,18 +805,28 @@ export class SqliteAssignmentRepository implements IAssignmentRepository {
     return rows.map((r) => this.mapRow(r));
   }
 
+  async findBySourceRecoveryDelivery(deliveryId: DeliveryId): Promise<Assignment | null> {
+    const row = this.db
+      .prepare('SELECT * FROM assignments WHERE source_recovery_delivery_id = ?')
+      .get(deliveryId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.mapRow(row);
+  }
+
   async save(assignment: Assignment): Promise<void> {
     const stmt = this.db.prepare(`
       INSERT INTO assignments (
-        id, pair_id, project_id, title, instruction, target_side_role, source_handoff_id, status,
+        id, pair_id, project_id, title, instruction, target_side_role, source_handoff_id,
+        source_recovery_delivery_id, status,
         current_attempt_id, active_delivery_id, active_handoff_id,
         created_at, updated_at, completed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         instruction = excluded.instruction,
         target_side_role = excluded.target_side_role,
         source_handoff_id = excluded.source_handoff_id,
+        source_recovery_delivery_id = excluded.source_recovery_delivery_id,
         status = excluded.status,
         current_attempt_id = excluded.current_attempt_id,
         active_delivery_id = excluded.active_delivery_id,
@@ -831,6 +842,7 @@ export class SqliteAssignmentRepository implements IAssignmentRepository {
       assignment.instruction,
       assignment.targetSideRole,
       assignment.sourceHandoffId ?? null,
+      assignment.sourceRecoveryDeliveryId ?? null,
       assignment.status,
       assignment.currentAttemptId ?? null,
       assignment.activeDeliveryId ?? null,

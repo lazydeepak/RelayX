@@ -194,6 +194,24 @@ export type SideVerificationCapability = 'exact_session_verifiable' | 'not_verif
 export const NO_IDENTITY_CAPABILITY = 'none';
 
 /**
+ * Capability name for a provider that can address and read ONE exact external session, but
+ * only through DOM observation of that session's own rendered turns (no provider-side
+ * identity resolver).
+ *
+ * This exists because "the provider exposes no exact-session identity capability, so the
+ * side can never be verified" was a statement about the OLD ChatGPT provider surface, and it
+ * became FALSE once the provider gained exact-session Open, a verified BrowserHandle,
+ * `captureTransportBoundary`, `observeSide` and `readExactSessionTurnsForReconciliation`.
+ *
+ * Naming it separately matters: `not_verifiable` means a PERMANENT provider property
+ * (freeze §9.5). Claiming a provider is permanently unverifiable while it can demonstrably
+ * read the exact conversation's real turns would repeat that error. This name asserts
+ * CAPABILITY only — identity/verification/existence dimensions stay `unknown` until an
+ * actual observation succeeds, because having a capability is not having verified anything.
+ */
+export const DOM_EXACT_SESSION_IDENTITY_CAPABILITY = 'exact_session_dom_observation';
+
+/**
  * The durable, per-side record of what RelayX most recently and TRUTHFULLY
  * observed of one exact bound external session.
  *
@@ -875,3 +893,47 @@ export type PlanFirstRunStatus = 'ready' | 'running' | 'blocked' | 'completed' |
 export const WORK_UNIT_TERMINAL_STATES: readonly WorkUnitStatus[] = ['completed'] as const;
 
 export type WorkUnitStatus = 'pending' | 'in_progress' | 'blocked' | 'completed';
+
+
+/**
+ * How a provider can be made to talk about ONE exact external session.
+ *
+ *  resolver        — the provider resolves identity itself (`resolveSideIdentity`).
+ *  dom_observation — no resolver, but the exact session's own rendered turns can be read.
+ *  none            — neither route exists, so the side is permanently unverifiable.
+ */
+export type ExactSessionCapabilityRoute = 'resolver' | 'dom_observation' | 'none';
+
+/**
+ * Single decision point for exact-session capability, extracted so the routing rule is
+ * testable on its own and cannot drift from the classification it drives.
+ */
+export function classifyExactSessionCapabilityRoute(provider: unknown): ExactSessionCapabilityRoute {
+  const p = provider as Record<string, unknown> | null | undefined;
+  if (!p) return 'none';
+  if (typeof p.resolveSideIdentity === 'function') return 'resolver';
+  if (
+    typeof p.captureTransportBoundary === 'function' &&
+    typeof p.readExactSessionTurnsForReconciliation === 'function'
+  ) {
+    return 'dom_observation';
+  }
+  return 'none';
+}
+
+/**
+ * The dimensions written for a side whose capability route is known.
+ *
+ * Every DECIDED dimension stays `unknown` with a null value regardless of route. A known
+ * capability says what RelayX *could* do, never what it observed, so `identityState`,
+ * `verificationState` and `existenceState` must not be promoted here (I-6, C-8).
+ */
+export function identityDimensionsForCapabilityRoute(
+  route: ExactSessionCapabilityRoute,
+): { capability: SideVerificationCapability; sourceCapability: string } {
+  if (route === 'resolver') return { capability: 'exact_session_verifiable', sourceCapability: 'provider_identity_resolver' };
+  if (route === 'dom_observation') {
+    return { capability: 'exact_session_verifiable', sourceCapability: DOM_EXACT_SESSION_IDENTITY_CAPABILITY };
+  }
+  return { capability: 'not_verifiable', sourceCapability: NO_IDENTITY_CAPABILITY };
+}

@@ -1,0 +1,98 @@
+/* RelayX component primitives — containment and semantic grouping only.
+ *
+ * These never force layout direction or display: a card that declares
+ * `flex flex-col` or `md:flex-row` in JSX keeps that decision, because these
+ * rules live in @layer components and Tailwind utilities win over it.
+ *
+ * Authoritative definitions live here (single source of truth).
+ */
+@layer components {
+  /* A RelayX card: must stay inside its grid/flex track. */
+  .rx-card {
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+
+  /* Card header: two logical regions — content, then actions.
+   * The header may wrap *between* regions; controls inside a region are
+   * never split by this rule. */
+  .rx-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  /* A region inside a header (identity, content, or actions).
+   * Shrinks to fit; never forces the card wider. */
+  .rx-card-region {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    min-width: 0;
+    flex: 0 1 auto;
+    flex-wrap: nowrap;
+  }
+
+  /* Explicit opt-in for a region that may wrap its own contents when its
+   * available width is insufficient (e.g. badge clusters). */
+  .rx-card-region-wrap {
+    flex-wrap: wrap;
+  }
+
+  /* A single control that belongs to an action group but must never wrap on its
+   * own (e.g. a lone archive toggle sitting at the end of a group). */
+  .rx-action-region {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    min-width: 0;
+    flex-wrap: nowrap;
+    flex: 0 0 auto;
+  }
+
+  /* Action region: one semantic group of controls. Default stays nowrap so
+   * buttons never cascade unpredictably. */
+  .rx-action-group {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    min-width: 0;
+    flex-wrap: nowrap;
+  }
+
+  /* Explicit opt-in: the group wraps onto further lines only when the width
+   * available to the group itself is insufficient. Gaps and order preserved. */
+  .rx-action-group-wrap {
+    flex-wrap: wrap;
+  }
+
+  /* Form controls: shrink within their container instead of widening it. */
+  .rx-control {
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+
+  .rx-control > select,
+  .rx-control > input,
+  .rx-control > textarea {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  /* Opaque values (session IDs, URLs, paths).
+   * Use only where the full value stays reachable via title/copy/detail. */
+  .rx-value {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}

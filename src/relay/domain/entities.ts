@@ -610,9 +610,96 @@ export class RuntimeSession {
   }
 
   /**
+   * Is this runtime in the terminal state, and is that terminal state merely a
+   * LOCAL BELIEF about RelayX's own ability to observe a window?
+   *
+   * ## Why this distinction is load-bearing
+   *
+   * `terminated` is reached ONLY through `recordObservationFailure`, i.e. by counting
+   * consecutive failures of RelayX's own probes (`inspectRuntime` -> AppleScript
+   * window/process enumeration). Those probes answer "can I currently SEE this
+   * application?", which is a fact about RelayX's observation channel, NOT a fact
+   * about whether the provider-owned conversation still exists.
+   *
+   * The two come apart constantly: a probe times out, Accessibility permission lapses,
+   * the app is relaunched under a new pid, or the conversation lives in a browser while
+   * the probe enumerates a native process. In every one of those cases the conversation
+   * is intact while the status says `terminated`.
+   *
+   * So `terminated` must never be read as external truth about the conversation. It is
+   * this method's whole job to say so, and callers gate on the AUTHORITATIVE
+   * conversation read (`providers.confirmExactSessionReachable` /
+   * `readExactSessionTurnsForReconciliation`) rather than on this flag.
+   */
+  public isObservationallyTerminal(): boolean {
+    return this.status === 'terminated';
+  }
+
+  /**
+   * Leave `terminated` — but ONLY on positive external evidence.
+   *
+   * ## The invariant this makes structural
+   *
+   * Previously the terminal state had no exit other than a generic
+   * `recordObservationSuccess` call, which the continuity path could never reach because
+   * it refused on `terminated` before observing. The state was therefore ABSORBING in
+   * the automated lifecycle: a runtime that failed three probes could never be revived
+   * by a supervision tick or by startup recovery, no matter what the provider could
+   * actually see. That is the defect this method closes.
+   *
+   * The precondition is enforced, not documented: reviving from a terminal state REQUIRES
+   * observable evidence, because the only honest reason to claim a dead conversation is
+   * alive again is that something authoritative just said so. Callers that have evidence
+   * call this; callers that do not must keep refusing.
+   *
+   * Idempotent by construction: the evidence is idempotent, the counter resets to 0, and
+   * a second call with the same evidence is a no-op, so repeated restarts converge rather
+   * than churn.
+   */
+  public recordExternalRevival(
+    status: RuntimeSessionStatus,
+    evidence: ObservableEvidence,
+    windowTitle?: string,
+    pid?: number,
+  ): { previousStatus: RuntimeSessionStatus; newStatus: RuntimeSessionStatus } {
+    if (!evidence) {
+      throw new RelayDomainError(
+        `Runtime ${this.id} cannot leave '${this.status}' without observable evidence of the ` +
+          'conversation being reachable again. "We stopped being able to see it" is not evidence ' +
+          'that it is gone.',
+        'RUNTIME_REVIVAL_REQUIRES_EVIDENCE',
+      );
+    }
+    const { previousStatus, newStatus } = this.recordObservationSuccess(
+      status,
+      evidence,
+      windowTitle,
+      pid,
+    );
+    // Name the transition in the evidence so an auditor can distinguish "recovered by
+    // provider evidence" from "we merely re-listed the window".
+    if (this.lastEvidence) {
+      this.lastEvidence = {
+        ...this.lastEvidence,
+        details: {
+          ...(this.lastEvidence.details ?? {}),
+          revivedFromTerminal: previousStatus === 'terminated' ? true : undefined,
+        },
+      };
+    }
+    return { previousStatus, newStatus };
+  }
+
+  /**
    * Hard Architectural Invariant #8 & #20:
    * A single observation failure NEVER immediately marks a runtime permanently dead.
    * Transition: working/available -> suspended -> inspect/retry -> available OR terminated (after thresholds).
+   *
+   * NOTE ON `terminated`: this counter measures RelayX's OBSERVATION CHANNEL, not the
+   * provider-owned conversation. Reaching `terminated` therefore proves only that RelayX
+   * could not observe the application `maxFailuresBeforeTermination` times in a row. It is
+   * reversible on positive external evidence via `recordExternalRevival`, and it must never
+   * be used as a proxy for "this conversation no longer exists".
    */
   public recordObservationFailure(maxFailuresBeforeTermination = 3): {
     previousStatus: RuntimeSessionStatus;
@@ -627,6 +714,56 @@ export class RuntimeSession {
       this.status = 'suspended';
     } else if (this.consecutiveObservationFailures >= maxFailuresBeforeTermination) {
       this.status = 'terminated';
+    }
+
+    return { previousStatus: prev, newStatus: this.status };
+  }
+
+  /**
+   * Record that RelayX could not READ the conversation, without touching liveness belief.
+   *
+   * ## Why this is not `recordObservationFailure`
+   *
+   * On the automated supervision path the two are routinely confused, and doing so is what
+   * produced the live `consecutive_observation_failures = 3` / `terminated` planner runtime:
+   *
+   *   `observeBatonOwner` could not read the transcript  ->  `recordObservationFailure()`
+   *   ->  three ticks later `terminated`  ->  `resolveBatonSide` refused to address the side
+   *   ->  `session_identity_unproven`, forever.
+   *
+   * But "the transcript was unreadable" and "the conversation is gone" are different claims.
+   * A provider can render a conversation perfectly well while exposing nothing RelayX can parse —
+   * virtualized history behind a "load older messages" control, per-turn nodes without stable ids,
+   * a DOM that is rewritten between reads. Every one of those is unreadable AND alive. On the live
+   * Pair the transcript was unreadable for exactly that reason while the conversation was open and
+   * titled "Planner session ready".
+   *
+   * Counting those reads toward termination therefore does not merely mislabel a side: it
+   * manufactures a terminal state out of a parsing limitation, and because the terminal state is
+   * absorbing on the automated path, it converts a recoverable "I could not read it" into a
+   * permanent "I will not address it".
+   *
+   * So this method deliberately CANNOT reach `terminated`. It still counts the miss (so repeated
+   * unreadability stays visible as a trend), still suspends a live runtime (so the side is visibly
+   * not being read), and leaves `terminated` reachable only from `recordObservationFailure`, which
+   * is fed by genuine process/window observation.
+   *
+   * Reversibility matches `recordExternalRevival`: a later readable transcript resets the counter
+   * through `recordObservationSuccess`, so this is a retry signal, not a verdict.
+   */
+  public recordUnreadableObservation(): {
+    previousStatus: RuntimeSessionStatus;
+    newStatus: RuntimeSessionStatus;
+  } {
+    const prev = this.status;
+    this.consecutiveObservationFailures += 1;
+    this.updatedAt = Date.now();
+
+    // `terminated` is intentionally NOT reachable from here. If the runtime is already there from
+    // an earlier genuine observation failure, it is left alone — this method neither hides that
+    // nor compounds it.
+    if (this.status !== 'terminated') {
+      this.status = 'suspended';
     }
 
     return { previousStatus: prev, newStatus: this.status };
@@ -777,6 +914,13 @@ export class Delivery {
     }
     this.status = 'delivered';
     this.evidence = evidence;
+    // A failure reason describes why an outcome could NOT be established. Once evidence
+    // establishes the outcome, keeping it would leave a `delivered` Delivery asserting a
+    // failure that no longer applies — and reconciliation is exactly the path that recovers
+    // an intent previously marked ambiguous, so this stale text is the normal case, not an
+    // edge case. The evidence row records how the outcome was reached; `failureReason` is
+    // only meaningful while the outcome is unestablished.
+    this.failureReason = undefined;
     this.deliveredAt = Date.now();
     this.updatedAt = Date.now();
   }
@@ -1100,6 +1244,34 @@ export interface AssignmentProps {
   targetSideRole?: PairSideRole;
   /** Present when this Assignment was deterministically derived from a Handoff. */
   sourceHandoffId?: HandoffId;
+  /**
+   * Present when this Assignment is a relay RECOVERY NOTICE, and names the confirmed
+   * Delivery whose unresolved baton episode triggered it.
+   *
+   * ## What this marker means — and what it deliberately does not
+   *
+   * It means exactly: **"RelayX already issued the recovery notice for this unresolved
+   * baton episode."** That is a transport fact, and nothing more.
+   *
+   * It does NOT mean the side failed, produced an invalid result, drifted, or left the
+   * task incomplete. Those are semantic conclusions RelayX is not permitted to draw, and
+   * a field that implied any of them would put the judgment back inside the relay engine.
+   * The recovery notice reports one mechanical fact: a confirmed Delivery left the baton
+   * with its recipient and no confirmed completed return turn came back.
+   *
+   * ## Why it is keyed to the triggering Delivery
+   *
+   * A generic "recovery already happened" flag would be wrong in both directions: it
+   * would suppress a recovery that is genuinely owed after a NEW baton episode, and it
+   * would let a Planner that simply never answered accumulate prompts inside one episode.
+   *
+   * Keying it to the Delivery scopes it to the episode. A UNIQUE partial index over this
+   * column makes "at most one recovery notice per triggering Delivery" a schema
+   * guarantee, so repeated ticks, restarts, and pause/resume cycles cannot each mint
+   * another one — the exactly-once property survives process death because it does not
+   * depend on in-memory state.
+   */
+  sourceRecoveryDeliveryId?: DeliveryId;
   status: AssignmentStatus;
   currentAttemptId?: AttemptId;
   activeDeliveryId?: DeliveryId;
@@ -1117,6 +1289,7 @@ export class Assignment {
   public instruction: string;
   public readonly targetSideRole: PairSideRole;
   public readonly sourceHandoffId?: HandoffId;
+  public readonly sourceRecoveryDeliveryId?: DeliveryId;
   public status: AssignmentStatus;
   public currentAttemptId?: AttemptId;
   public activeDeliveryId?: DeliveryId;
@@ -1133,6 +1306,7 @@ export class Assignment {
     this.instruction = props.instruction;
     this.targetSideRole = props.targetSideRole ?? 'worker';
     this.sourceHandoffId = props.sourceHandoffId;
+    this.sourceRecoveryDeliveryId = props.sourceRecoveryDeliveryId;
     this.status = props.status;
     this.currentAttemptId = props.currentAttemptId;
     this.activeDeliveryId = props.activeDeliveryId;
@@ -1149,6 +1323,7 @@ export class Assignment {
     instruction: string,
     targetSideRole: PairSideRole = 'worker',
     sourceHandoffId?: HandoffId,
+    sourceRecoveryDeliveryId?: DeliveryId,
   ): Assignment {
     const now = Date.now();
     return new Assignment({
@@ -1159,6 +1334,7 @@ export class Assignment {
       instruction,
       targetSideRole,
       sourceHandoffId,
+      sourceRecoveryDeliveryId,
       status: 'pending',
       createdAt: now,
       updatedAt: now,

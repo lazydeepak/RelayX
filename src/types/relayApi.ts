@@ -278,6 +278,27 @@ export interface UIHealthIncidentDetail extends UIHealthIncident {
   unavailableFields: string[];
 }
 
+/**
+ * Structured, VERIFIED result of opening/focusing an exact runtime session.
+ *
+ * `success` is true ONLY when a real window/tab handle was resolved AND its read-back
+ * URL still represents the requested conversation. A provider that merely ran without
+ * throwing must NOT produce `success: true`.
+ */
+export interface OpenRuntimeSessionResult {
+  success: boolean;
+  /** Authoritative URL RelayX attempted; echoed for diagnostics even on failure. */
+  url?: string;
+  /** URL read back from the verified handle. Present only on success. */
+  observedUrl?: string;
+  /** True when an already-open exact tab was focused instead of creating one. */
+  reused?: boolean;
+  windowId?: number;
+  tabId?: number;
+  /** Concrete failure reason. Present only on failure. */
+  error?: string;
+}
+
 export interface IRelayApi {
   getAppStatus(): Promise<AppStatus>;
   getDashboardState(): Promise<DashboardState>;
@@ -336,7 +357,19 @@ export interface IRelayApi {
   discoverRuntime(providerType: ProviderType): Promise<{ success: boolean; runtime?: UIRuntimeSession; isNew?: boolean; error?: string }>;
   inspectRuntime(sessionId: string): Promise<{ success: boolean; evidence?: ObservableEvidence; error?: string }>;
   activateRuntime(sessionId: string): Promise<boolean>;
-  openRuntimeSession(sessionId: string): Promise<{ success: boolean; url?: string; error?: string }>;
+
+  openRuntimeSession(sessionId: string): Promise<OpenRuntimeSessionResult>;
+  /**
+   * Opens the project's ChatGPT PROJECT URL (`/g/<g-p-…>/project`) in the browser.
+   *
+   * This is PROJECT identity, distinct from `openRuntimeSession`, which opens the
+   * exact conversation (`/c/<id>`) of a bound runtime. Both open in the browser and
+   * never activate the ChatGPT desktop app.
+   *
+   * Required, so a caller can rely on it existing rather than feature-detecting.
+   * The inert browser-preview implementation reports an explicit unsupported error.
+   */
+  openPlannerProject(projectId: string): Promise<OpenRuntimeSessionResult>;
   /**
    * S6 CLOSURE — `error` is populated ONLY when the attempt was refused by the I-2
    * runtime->Pair governance guard (the owning Pair is IDLE, or its ownership is

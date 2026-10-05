@@ -37,7 +37,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   ];
 
   return (
-    <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col select-none">
+    <aside className="rx-sidebar w-64 bg-slate-900 border-r border-slate-800 flex flex-col select-none">
       {/* Blank header space for mac controls */}
       <div className="h-12 border-b border-slate-800/80"></div>
 

@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { SqliteRelayDatabase } from '../src/relay/persistence/sqlite/SqliteDatabase.ts';
 import { RelayEngine } from '../src/relay/application/RelayEngine.ts';
+import { PlannerObserverClient } from '../src/relay/providers/plannerObserverClient.ts';
 import { RelayApiService } from '../src/relay/application/RelayApiService.ts';
 import {
   ChatGPTProvider,
@@ -122,7 +123,13 @@ function initializeEngine(): RelayApiService {
   console.log(`[RelayX Engine] Initializing durable SQLite database at: ${dbPath}`);
 
   sqliteDb = new SqliteRelayDatabase(dbPath);
-  relayEngine = new RelayEngine(sqliteDb);
+
+  // The Planner side is watched by the in-page Planner Observer (a Chrome extension content
+  // script reporting to a loopback bridge). The client below is HTTP-only: it cannot open,
+  // activate, focus or navigate the Planner tab, and it never runs AppleScript. Only Delivery
+  // touches the UI.
+  relayEngine = new RelayEngine(sqliteDb, undefined, undefined, new PlannerObserverClient());
+  console.log('[RelayX Engine] Planner Observer client wired (loopback HTTP, read-only)');
 
   // Register providers with explicit integration status
   const chatgpt = new ChatGPTProvider();

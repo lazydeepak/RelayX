@@ -8,3 +8,21 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Runtime artifacts produced by local tools while RelayX runs.
+#
+# These are DATA, never source. They must stay out of version control AND out of the paths
+# that Tailwind/Vite treat as scanned source: `@tailwindcss/vite` answers a change to any
+# scanned file with a `{ type: 'full-reload' }`, which the Vite client turns into
+# `location.reload()`. A tool appending to one of these files inside the repo therefore
+# reloads the whole renderer and destroys in-memory UI state (this is what made the Add
+# Project wizard disappear during ChatGPT planner discovery).
+*.jsonl
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

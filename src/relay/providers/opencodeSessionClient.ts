@@ -289,6 +289,19 @@ export interface OpenCodeSessionClientConfig {
 const DEFAULT_TIMEOUT_MS = 5_000;
 const MAX_TEXT_CHARS = 2_000;
 const DEFAULT_LIST_LIMIT = 100;
+/**
+ * HARD provider page size for the message endpoint.
+ *
+ * The OpenCode shared service IGNORES `limit` and `offset` on
+ * `GET /api/session/{id}/message` (observed against live service 2.0.22: any `limit`
+ * yields an empty `data` array, and `offset` is a no-op). It always returns exactly one
+ * page of at most this many rows, and the page is selected by `order`, not by offset.
+ *
+ * Consequence, and it is a correctness matter rather than a performance one: the DEFAULT
+ * order is newest-first, so for any session longer than one page the earliest messages —
+ * which is exactly where a session's first dispatched instruction lives — are NOT in the
+ * default window. A dispatch-correlation read must ask for `order: 'asc'`.
+ */
 const DEFAULT_TRANSCRIPT_LIMIT = 50;
 
 function timeoutSignal(ms: number): AbortSignal | undefined {
@@ -316,6 +329,11 @@ function asString(value: unknown): string | undefined {
 
 function asNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/** Only `order` is a real query parameter on the message endpoint; nothing else is sent. */
+function orderQuery(order: 'asc' | 'desc' | undefined): string {
+  return order ? `?order=${order}` : '';
 }
 
 function roleFromType(type: string | undefined): OpenCodeMessageSummary['role'] {
@@ -459,14 +477,21 @@ export class OpenCodeSessionClient {
     };
   }
 
-  /** Bounded read-only transcript (text parts only). */
+  /**
+   * Bounded read-only transcript (text parts only).
+   *
+   * `order` selects WHICH page of the session comes back — `'desc'` (default) is the newest
+   * page, `'asc'` is the oldest page. See `DEFAULT_TRANSCRIPT_LIMIT`: the provider has no
+   * offset, so these two windows are the only two readable, and a caller that must
+   * corroborate an early event has to ask for `'asc'` explicitly.
+   */
   async getTranscript(
     sessionId: string,
-    options: { limit?: number } = {},
+    options: { limit?: number; order?: 'asc' | 'desc' } = {},
   ): Promise<TranscriptResult> {
     return this.readMessages(
       sessionId,
-      `/api/session/${encodeURIComponent(sessionId)}/message`,
+      `/api/session/${encodeURIComponent(sessionId)}/message${orderQuery(options.order)}`,
       options.limit ?? DEFAULT_TRANSCRIPT_LIMIT,
     );
   }
@@ -474,11 +499,11 @@ export class OpenCodeSessionClient {
   /** Bounded read-only model context (text parts only). */
   async getContext(
     sessionId: string,
-    options: { limit?: number } = {},
+    options: { limit?: number; order?: 'asc' | 'desc' } = {},
   ): Promise<TranscriptResult> {
     return this.readMessages(
       sessionId,
-      `/api/session/${encodeURIComponent(sessionId)}/context`,
+      `/api/session/${encodeURIComponent(sessionId)}/context${orderQuery(options.order)}`,
       options.limit ?? DEFAULT_TRANSCRIPT_LIMIT,
     );
   }
@@ -503,6 +528,10 @@ export class OpenCodeSessionClient {
     const messages = slice
       .map((row) => this.mapMessage(row))
       .filter((m): m is OpenCodeMessageSummary => m !== undefined);
+    // `totalMessages` is the size of the ONE page the provider returned, not the size of the
+    // session: the endpoint exposes no session-wide count, so `truncated` can only report that
+    // the page itself was cut short, and a caller must NOT read `totalMessages` as
+    // "the session has N messages". Reconciliation treats this as a bounded window.
     return {
       sessionId,
       messages,

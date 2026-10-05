@@ -25,6 +25,7 @@ import {
   reconcileTransportOutcome,
   buildWatermark,
   instructionFingerprint,
+  observeWorkerCompletion,
   reconstructWatermarkFromIntentTime,
   normalizeInstructionText,
   type ExactSessionWatermark,
@@ -457,5 +458,367 @@ describe('Exact-session reconciliation — the exit code is not the verdict', ()
       'reconstructed_from_intent_time',
       'a reader must be able to see the verdict rests on a derived boundary',
     );
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Phase F: supervision-time completion observation                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Worker completion observation — the supervisor's read of "did this instruction finish".
+ *
+ * ## The defect this exists to prevent
+ *
+ * `OpenCodeProvider.detectCompletionState` used to read message arrays off
+ * `opencode session list --format json`, whose rows carry session METADATA only — no
+ * `messages` key exists, so the array was permanently `[]` and the method reported
+ * `no_post_dispatch_assistant_response` for every session, forever. Because
+ * `promoteAttemptToRunning` is gated on execution evidence, the Attempt stayed `prepared`
+ * indefinitely even with a completed worker response sitting in the transcript.
+ *
+ * The seam that hid it: the supervisor had a second, private completion detector in the
+ * transcript fallback, and it had its own, different definition. It read the newest 50 turns,
+ * took `assistantTurns[0]` — which is the in-flight turn whenever the worker is running — and
+ * then demanded a `finish`, so a busy worker was permanently unreadable; and it accepted
+ * `finish: 'tool-calls'` as completion, which is a turn yielding to a tool, not an answer.
+ *
+ * ## The rule these tests pin down
+ *
+ *   Completion is a property of a SPECIFIC, IDENTIFIED turn that the provider terminated
+ *   with a run-ending reason AND that produced text. It is never inferred from idleness,
+ *   never from turn count, and never from a turn that merely stopped to call a tool.
+ *
+ * The verdict is monotone (a completed response does not un-complete), while `inFlight` is
+ * volatile (it tracks the newest turn). They are reported separately because both are true
+ * at once whenever a worker answers and then goes back to work — and a single flag would
+ * force a choice between losing a real answer and waiting forever for silence.
+ */
+describe('Worker completion observation — a named terminated turn, never idleness', () => {
+  /** A tool-calls turn: real, finished as a TURN, and not an answer. */
+  function assistantToolCalls(id: string, text: string, createdAt: number): ReconciliationMessage {
+    return { messageId: id, role: 'assistant', createdAt, text, finish: 'tool-calls', error: null };
+  }
+
+  /** A turn the provider has emitted but not terminated. */
+  function assistantInFlight(id: string, text: string | undefined, createdAt: number): ReconciliationMessage {
+    return { messageId: id, role: 'assistant', createdAt, text, finish: null, error: null };
+  }
+
+  it('THE WEDGE: a tool-calls turn is not a completed response', () => {
+    // The live shape: a worker that used tools answers by ending on `tool-calls` while it
+    // keeps working. Treating that as completion hands off a narration, not the answer.
+    const observation = observeWorkerCompletion({
+      expectedText: INSTRUCTION,
+      messages: [
+        userTurn('msg_instr', INSTRUCTION, 1_000),
+        assistantToolCalls('msg_t1', 'Let me look at the adapter.', 1_100),
+        assistantToolCalls('msg_t2', 'Found the CLI read; checking now.', 1_200),
+      ],
+    });
+
+    assert.strictEqual(observation.hasCompletedResponse, false);
+    assert.strictEqual(observation.response, null);
+    // The boundary is the instruction turn itself, not a timestamp.
+    assert.strictEqual(observation.boundary.source, 'matched_dispatched_user_turn');
+    assert.strictEqual(observation.boundary.instructionTurnId, 'msg_instr');
+    assert.strictEqual(observation.assistantTurnCount, 2);
+  });
+
+  it('THE WEDGE: a busy worker is in flight, not complete, and not silent', () => {
+    // Exactly the state the old fallback could never read: newest turn still running.
+    const observation = observeWorkerCompletion({
+      expectedText: INSTRUCTION,
+      messages: [
+        userTurn('msg_instr', INSTRUCTION, 1_000),
+        assistantToolCalls('msg_t1', 'Working.', 1_100),
+        assistantOk('msg_done', 'The answer.', 1_200),
+        assistantInFlight('msg_live', undefined, 1_300),
+      ],
+    });
+
+    assert.strictEqual(observation.inFlight, true);
+    assert.strictEqual(observation.newestAssistantMessageId, 'msg_live');
+    assert.strictEqual(observation.assistantTurnCount, 3);
+  });
+
+  it('captures the response that already completed while a newer turn is still running', () => {
+    // A completed response does not un-complete because the worker went back to work. This
+    // is the case a single flag cannot express, and it is why the supervisor reads both.
+    const observation = observeWorkerCompletion({
+      expectedText: INSTRUCTION,
+      messages: [
+        userTurn('msg_instr', INSTRUCTION, 1_000),
+        assistantToolCalls('msg_t1', 'Checking.', 1_100),
+        assistantOk('msg_done', 'Done: the adapter reads the transcript.', 1_200),
+        assistantInFlight('msg_live', undefined, 1_300),
+      ],
+    });
+
+    assert.strictEqual(observation.hasCompletedResponse, true);
+    assert.strictEqual(observation.inFlight, true);
+    assert.strictEqual(observation.response?.messageId, 'msg_done');
+    assert.strictEqual(observation.response?.finish, 'stop');
+    assert.strictEqual(observation.response?.text, 'Done: the adapter reads the transcript.');
+    // The captured turn is named, so "completed" is checkable against the provider later.
+    assert.strictEqual(observation.newestAssistantMessageId, 'msg_live');
+  });
+
+  it('an answer is not complete while a bare tool-calls turn is still the newest one', () => {
+    // Order matters: the terminal answer came first, then the worker kept calling tools. The
+    // completed response is still reportable, but the newest turn is NOT what got captured —
+    // conflating them would attribute the answer to the wrong turn.
+    const observation = observeWorkerCompletion({
+      expectedText: INSTRUCTION,
+      messages: [
+        userTurn('msg_instr', INSTRUCTION, 1_000),
+        assistantOk('msg_done', 'First answer.', 1_100),
+        assistantToolCalls('msg_t1', 'Now running more tools.', 1_200),
+      ],
+    });
+
+    assert.strictEqual(observation.hasCompletedResponse, true);
+    assert.strictEqual(observation.response?.messageId, 'msg_done');
+    // `tool-calls` means the turn ended so a tool could run and the RUN continues, so the
+    // newest turn is still in progress. It used to read `false` here, which left a working
+    // worker indistinguishable from an idle one and made the supervisor escalate.
+    assert.strictEqual(observation.inFlight, true);
+    assert.strictEqual(observation.newestAssistantMessageId, 'msg_t1');
+  });
+
+  it('a terminated turn with no text is not a response', () => {
+    const observation = observeWorkerCompletion({
+      expectedText: INSTRUCTION,
+      messages: [
+        userTurn('msg_instr', INSTRUCTION, 1_000),
+        { messageId: 'msg_bare', role: 'assistant', createdAt: 1_100, finish: 'stop', text: '' },
+      ],
+    });
+
+    assert.strictEqual(observation.hasCompletedResponse, false);
+  });
+
+  /**
+   * THE THIRD STATE: the run is continuing, so the newest post-boundary turn ends in
+   * `tool-calls` and NO turn in the window is terminal.
+   *
+   * This is the normal shape of a working agent — it is the state the live worker session
+   * was actually in for 28 post-boundary turns before it finally errored. It used to report
+   * `inFlight: false` and `hasCompletedResponse: false`, which is the one combination the
+   * supervisor cannot distinguish from "idle and produced nothing", so it escalated: it minted
+   * a recovery Assignment and sent a message into the Planner claiming the Worker had done
+   * nothing, while the Worker was demonstrably still working.
+   */
+  describe('a run that is continuing between turns is in flight, not idle', () => {
+    /** The live mid-run shape: a tool-calls chain and nothing terminal in the window. */
+    function midRunChain(count: number, firstCreatedAt = 1_000) {
+      const messages: ReconciliationMessage[] = [userTurn('msg_instr', INSTRUCTION, 500)];
+      for (let i = 0; i < count; i++) {
+        messages.push(
+          assistantToolCalls(`msg_t${i}`, i % 7 === 0 ? `Step ${i}.` : '', firstCreatedAt + (i + 1) * 100),
+        );
+      }
+      return messages;
+    }
+
+    it('a tool-calls chain with no terminal turn reads as WORKING, not as silence', () => {
+      const observation = observeWorkerCompletion({
+        expectedText: INSTRUCTION,
+        messages: midRunChain(6),
+        afterMessageIds: ['msg_instr'],
+      });
+
+      assert.strictEqual(observation.inFlight, true, 'the run is continuing, so this is in flight');
+      assert.strictEqual(observation.hasCompletedResponse, false, 'nothing terminal has been written');
+      assert.strictEqual(observation.terminalError, null);
+      assert.strictEqual(observation.assistantTurnCount, 6);
+      // The exact combination the supervisor escalates on. It must be unreachable while a
+      // run is genuinely continuing.
+      const stillWorking = observation.inFlight || false;
+      assert.strictEqual(
+        stillWorking || observation.hasCompletedResponse,
+        true,
+        'a working run must never be reported as idle-with-no-output',
+      );
+    });
+
+    it('holds for a long chain and for a single turn', () => {
+      for (const count of [1, 2, 28, 48]) {
+        const observation = observeWorkerCompletion({
+          expectedText: INSTRUCTION,
+          messages: midRunChain(count),
+          afterMessageIds: ['msg_instr'],
+        });
+        assert.strictEqual(observation.inFlight, true, `chain of ${count} must read as in flight`);
+        assert.strictEqual(observation.hasCompletedResponse, false, `chain of ${count} has no answer yet`);
+      }
+    });
+
+    it('still escalates once the run really has ended in a provider error', () => {
+      // The guard on the other side: marking `tool-calls` as continuing must not swallow the
+      // honest escalation. An error terminator is still terminal, so a dead run still reads
+      // as "not running, no answer" and the supervisor still raises a notice.
+      const observation = observeWorkerCompletion({
+        expectedText: INSTRUCTION,
+        messages: [
+          ...midRunChain(4),
+          assistantError('msg_err', 5_000, { type: 'provider.error', status: 500, message: 'boom' }),
+        ],
+        afterMessageIds: ['msg_instr'],
+      });
+
+      assert.strictEqual(observation.inFlight, false, 'an error ends the run');
+      assert.strictEqual(observation.hasCompletedResponse, false, 'an error produced no answer');
+      assert.strictEqual(observation.terminalError?.type, 'provider.error');
+    });
+
+    it('still hands on the answer once the run terminates normally', () => {
+      const observation = observeWorkerCompletion({
+        expectedText: INSTRUCTION,
+        messages: [...midRunChain(3), assistantOk('msg_done', 'The answer.', 9_000)],
+        afterMessageIds: ['msg_instr'],
+      });
+
+      assert.strictEqual(observation.inFlight, false);
+      assert.strictEqual(observation.hasCompletedResponse, true);
+      assert.strictEqual(observation.response?.messageId, 'msg_done');
+      assert.strictEqual(observation.response?.finish, 'stop');
+    });
+  });
+
+  it('reports the provider terminator for a terminal error AND the error itself', () => {
+    // `error` is terminal for a run. Hiding it would make a quota wall look like silence.
+    const observation = observeWorkerCompletion({
+      expectedText: INSTRUCTION,
+      messages: [
+        userTurn('msg_instr', INSTRUCTION, 1_000),
+        assistantError('msg_err', 1_100, { type: 'provider.quota', status: 402, message: 'quota' }),
+      ],
+    });
+
+    assert.strictEqual(observation.hasCompletedResponse, false, 'an error turn produced no answer');
+    assert.strictEqual(observation.inFlight, false);
+    assert.strictEqual(observation.terminalError?.type, 'provider.quota');
+    assert.strictEqual(observation.terminalError?.status, 402);
+  });
+
+  it('anchors on the instruction turn, so turns BEFORE it are never attributed', () => {
+    // A pre-existing conversation: turns before the instruction must not count.
+    const observation = observeWorkerCompletion({
+      expectedText: INSTRUCTION,
+      messages: [
+        assistantOk('msg_before', 'Unrelated earlier answer.', 500),
+        userTurn('msg_instr', INSTRUCTION, 1_000),
+        assistantOk('msg_after', 'This one answers it.', 1_100),
+      ],
+    });
+
+    assert.strictEqual(observation.response?.messageId, 'msg_after');
+    assert.strictEqual(observation.assistantTurnCount, 1);
+  });
+
+  it('with no instruction match it falls back to the caller timestamp and SAYS SO', () => {
+    // The boundary must not be silently upgraded. A reader has to be able to tell a
+    // message-id watermark from a timestamp one.
+    const observation = observeWorkerCompletion({
+      expectedText: 'an instruction that is not in the readable windows',
+      afterCreatedAt: 2_000,
+      messages: [
+        assistantOk('msg_old', 'Earlier.', 1_000),
+        assistantOk('msg_new', 'After the boundary.', 2_500),
+      ],
+    });
+
+    assert.strictEqual(observation.boundary.source, 'caller_after_created_at');
+    assert.strictEqual(observation.boundary.instructionTurnId, null);
+    assert.strictEqual(observation.boundary.instructionMatchKind, 'none');
+    assert.strictEqual(observation.response?.messageId, 'msg_new');
+    assert.strictEqual(observation.assistantTurnCount, 1);
+  });
+
+  it('with neither an instruction nor a timestamp, claims nothing at all', () => {
+    // No watermark means nothing can be attributed to this instruction. Reporting the whole
+    // session here is how a stale or foreign session gets mistaken for a finished attempt.
+    const observation = observeWorkerCompletion({
+      expectedText: 'not present',
+      messages: [assistantOk('msg_a', 'Answer.', 1_000)],
+    });
+
+    assert.strictEqual(observation.boundary.source, 'unavailable');
+    assert.strictEqual(observation.assistantTurnCount, 0);
+    assert.strictEqual(observation.hasCompletedResponse, false);
+    assert.strictEqual(observation.inFlight, false);
+  });
+
+  it('orders provider output that arrives newest-first', () => {
+    // The shared service returns newest-first by default. Picking the wrong end of that
+    // array is the original defect, so ordering is asserted explicitly.
+    const observation = observeWorkerCompletion({
+      expectedText: INSTRUCTION,
+      messages: [
+        assistantOk('msg_newest', 'Newest answer.', 1_300),
+        assistantToolCalls('msg_mid', 'Mid.', 1_200),
+        userTurn('msg_instr', INSTRUCTION, 1_000),
+      ],
+    });
+
+    assert.strictEqual(observation.response?.messageId, 'msg_newest');
+    assert.strictEqual(observation.chronologicalOrderDerived, true);
+  });
+
+  it('a provider-window gap is recorded on the observation, not hidden', () => {
+    const observation = observeWorkerCompletion({
+      expectedText: INSTRUCTION,
+      unreadableMiddle: true,
+      messages: [userTurn('msg_instr', INSTRUCTION, 1_000), assistantOk('msg_new', 'Answer.', 9_000)],
+    });
+
+    assert.strictEqual(observation.unreadableMiddle, true);
+    assert.strictEqual(observation.hasCompletedResponse, true, 'the newest window always holds the newest turn');
+    assert.strictEqual(
+      observation.capturedResponseIsNewest,
+      true,
+      'here the captured turn IS the newest, so the text is the latest answer',
+    );
+  });
+
+  it('flags an older completion when the window gap may hide a newer one', () => {
+    // The live RelayX Development case: 1230 turns, 50 readable at each end. The captured
+    // response came from the OLDEST window, so a later completion can exist in the gap. The
+    // completion claim is still true — a named, provider-terminated turn was observed — but
+    // the text must not be presented as the LATEST answer when it may not be.
+    const observation = observeWorkerCompletion({
+      expectedText: INSTRUCTION,
+      unreadableMiddle: true,
+      messages: [
+        userTurn('msg_instr', INSTRUCTION, 1_000),
+        assistantOk('msg_old_done', 'An earlier completed answer.', 1_100),
+        // The gap: turns 2..N of the session are unreadable, including a later completion.
+        assistantToolCalls('msg_newest', 'Still working on the newest turn.', 9_000),
+      ],
+    });
+
+    assert.strictEqual(observation.hasCompletedResponse, true);
+    assert.strictEqual(observation.response?.messageId, 'msg_old_done');
+    assert.strictEqual(
+      observation.capturedResponseIsNewest,
+      false,
+      'a consumer forwarding this text must be able to see it may not be the latest answer',
+    );
+  });
+
+  it('is newest when the gap is closed, so the flag means something', () => {
+    const observation = observeWorkerCompletion({
+      expectedText: INSTRUCTION,
+      unreadableMiddle: false,
+      messages: [
+        userTurn('msg_instr', INSTRUCTION, 1_000),
+        assistantOk('msg_old_done', 'An earlier answer.', 1_100),
+        assistantOk('msg_new_done', 'The latest answer.', 9_000),
+      ],
+    });
+
+    assert.strictEqual(observation.capturedResponseIsNewest, true);
+    assert.strictEqual(observation.response?.messageId, 'msg_new_done');
   });
 });

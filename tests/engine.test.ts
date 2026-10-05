@@ -23,6 +23,14 @@ describe('RelayX Engine Application Lifecycle & Supervision', () => {
     const planner = await engine.registerRuntimeSession('chatgpt', 'ChatGPT Planner');
     const worker = await engine.registerRuntimeSession('opencode', 'OpenCode Worker');
     const pair = await engine.createPair(project.id, 'Pair 1', planner.id, worker.id);
+    // The relay baton addresses ONE exact provider session per side, so these fixtures bind a
+    // real external session identity (I-11). Binding happens AFTER createPair on purpose:
+    // createPair demands verified project-association evidence for a session that already has an
+    // external id, and these fixtures exercise the relay loop rather than pairing authority.
+    planner.updateExternalIdentity('ses_chatgpt_engine_pl1', '/dev/engine_pl1');
+    worker.updateExternalIdentity('ses_opencode_engine_wr1', '/dev/engine_wr1');
+    await db.runtimes.save(planner);
+    await db.runtimes.save(worker);
     // I-2 (S6): dispatch, supervision and Tier-1 recovery all contact the provider,
     // so the Pair must be ACTIVE. Load & Activate is the ONLY authorized grantor
     // (freeze §4.4, §11.5); neither MockProvider exposes an identity capability, so
@@ -63,6 +71,14 @@ describe('RelayX Engine Application Lifecycle & Supervision', () => {
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker');
     const pair = await engine.createPair(project.id, 'Pair 1', planner.id, worker.id);
+    // The relay baton addresses ONE exact provider session per side, so these fixtures bind a
+    // real external session identity (I-11). Binding happens AFTER createPair on purpose:
+    // createPair demands verified project-association evidence for a session that already has an
+    // external id, and these fixtures exercise the relay loop rather than pairing authority.
+    planner.updateExternalIdentity('ses_chatgpt_engine_pl2', '/dev/engine_pl2');
+    worker.updateExternalIdentity('ses_opencode_engine_wr2', '/dev/engine_wr2');
+    await db.runtimes.save(planner);
+    await db.runtimes.save(worker);
     // I-2 (S6): dispatch, supervision and Tier-1 recovery all contact the provider,
     // so the Pair must be ACTIVE. Load & Activate is the ONLY authorized grantor
     // (freeze §4.4, §11.5); neither MockProvider exposes an identity capability, so
@@ -102,6 +118,18 @@ describe('RelayX Engine Application Lifecycle & Supervision', () => {
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker');
     const pair = await engine.createPair(project.id, 'Pair 1', planner.id, worker.id);
+    // The relay baton addresses ONE exact provider session on the side it inspects, so the
+    // WORKER fixture binds a real external session identity (I-11). Binding happens AFTER
+    // createPair on purpose: createPair demands verified project-association evidence for a
+    // session that already has an external id, and this fixture exercises the relay loop
+    // rather than pairing authority.
+    //
+    // The PLANNER is deliberately left unbound. This test asserts that
+    // `deliverHandoffToPlanner` rejects with "NOT delivered to the Planner", which holds only
+    // while the Planner has no addressable exact session — see the note below and
+    // external_effect_evidence.test.ts. Binding it here would silently make that send real.
+    worker.updateExternalIdentity('ses_opencode_engine_wr3', '/dev/engine_wr3');
+    await db.runtimes.save(worker);
     // I-2 (S6): dispatch, supervision and Tier-1 recovery all contact the provider,
     // so the Pair must be ACTIVE. Load & Activate is the ONLY authorized grantor
     // (freeze §4.4, §11.5); neither MockProvider exposes an identity capability, so
@@ -168,6 +196,14 @@ describe('RelayX Engine Application Lifecycle & Supervision', () => {
     const planner = await engine.registerRuntimeSession('chatgpt', 'Planner');
     const worker = await engine.registerRuntimeSession('opencode', 'Worker');
     const pair = await engine.createPair(project.id, 'Pair 1', planner.id, worker.id);
+    // The relay baton addresses ONE exact provider session per side, so these fixtures bind a
+    // real external session identity (I-11). Binding happens AFTER createPair on purpose:
+    // createPair demands verified project-association evidence for a session that already has an
+    // external id, and these fixtures exercise the relay loop rather than pairing authority.
+    planner.updateExternalIdentity('ses_chatgpt_engine_pl4', '/dev/engine_pl4');
+    worker.updateExternalIdentity('ses_opencode_engine_wr4', '/dev/engine_wr4');
+    await db.runtimes.save(planner);
+    await db.runtimes.save(worker);
     // I-2 (S6): dispatch, supervision and Tier-1 recovery all contact the provider,
     // so the Pair must be ACTIVE. Load & Activate is the ONLY authorized grantor
     // (freeze §4.4, §11.5); neither MockProvider exposes an identity capability, so

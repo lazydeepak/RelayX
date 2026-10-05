@@ -29,6 +29,7 @@ import {
 import { UIPair, UIProject, UIRuntimeSession, ObservableEvidence } from '../types/ui.ts';
 import { WorkerModelControl } from './WorkerModelControl.tsx';
 import { resolvePairDispatchEligibility } from './pairDispatchEligibility.ts';
+import { resolvePairRelayControls } from './pairRelayControls.ts';
 
 interface PairViewProps {
   pairs: UIPair[];
@@ -51,6 +52,12 @@ interface PairViewProps {
   onViewEvidence: (ev: ObservableEvidence) => void;
   onOpenSessionDetail: (sessionId: string) => void;
   onActivateRuntime: (sessionId: string) => void;
+  onOpenPlannerSession: (sessionId: string) => void;
+  /**
+   * Opens the PROJECT page (`/g/<g-p-…>/project`) in the browser. Distinct from
+   * `onOpenPlannerSession`, which opens the exact conversation.
+   */
+  onOpenPlannerProject?: (projectId: string) => void;
   onActivatePair?: (pairId: string) => void;
   onUpdatePlannerUrl?: (pairId: string, url: string) => Promise<void>;
   onStartPair?: (pairId: string) => void;
@@ -118,6 +125,8 @@ export const PairView: React.FC<PairViewProps> = ({
   onViewEvidence,
   onOpenSessionDetail,
   onActivateRuntime,
+  onOpenPlannerSession,
+  onOpenPlannerProject,
   onActivatePair,
   onUpdatePlannerUrl,
   onStartPair,
@@ -285,7 +294,7 @@ export const PairView: React.FC<PairViewProps> = ({
             title="Open full project details"
           >
             <div className="flex items-center justify-between gap-3">
-              <div className="min-w-0">
+              <div>
                 <div className="flex items-center gap-2">
                   <Layers className="w-3.5 h-3.5 text-blue-400 shrink-0" />
                   <span className="text-sm font-semibold text-slate-100 truncate">
@@ -336,12 +345,20 @@ export const PairView: React.FC<PairViewProps> = ({
             const workerSession = sessions.find((s) => s.id === pair.workerSessionId);
             const pairProject = projects.find((p) => p.id === pair.projectId);
             const plannerUrl = resolvePlannerSessionUrl(plannerSession, pairProject);
+            // The PROJECT page recorded for this pair's project. This is a different
+            // identity from `plannerUrl` (the exact conversation), so it is resolved and
+            // displayed separately rather than substituted for one another.
+            const plannerProjectUrl = pairProject?.plannerProjectUrl?.trim() || null;
             const dispatchEligibility = resolvePairDispatchEligibility(pair);
+            // Relay-execution controls derive from operationalState/relayState
+            // (dimensions A/B), never from pair.status (dimension C). See
+            // pairRelayControls.ts for the live defect this fixes.
+            const relayControls = resolvePairRelayControls(pair);
 
             return (
               <div
                 key={pair.id}
-                className={`bg-slate-900 border rounded-xl p-5 shadow-sm space-y-4 transition-all ${
+                className={`rx-card bg-slate-900 border rounded-xl p-5 shadow-sm space-y-4 transition-all ${
                   pair.status === 'archived' ? 'border-slate-800/60 opacity-80' : 'border-slate-800'
                 }`}
               >
@@ -404,8 +421,8 @@ export const PairView: React.FC<PairViewProps> = ({
                       {pair.operationalState || 'IDLE'}
                     </span>
 
-                    {/* Manual Load & Activate Button (Available if pair is IDLE) */}
-                    {pair.operationalState !== 'ACTIVE' && onActivatePair && (
+                    {/* Manual Load & Activate Button (driven by AUTHORITY, not relay state) */}
+                    {relayControls.needsActivation && onActivatePair && (
                       <button
                         onClick={() => onActivatePair(pair.id)}
                         className="px-2 py-1 rounded-lg bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-600/40 transition-colors flex items-center gap-1 text-xs font-medium"
@@ -416,8 +433,8 @@ export const PairView: React.FC<PairViewProps> = ({
                       </button>
                     )}
 
-                    {/* Pause / Resume buttons */}
-                    {pair.status === 'active' && onPausePair && (
+                    {/* Pause / Resume buttons — driven by relayState (dimension B), never by pair.status */}
+                    {relayControls.canPause && onPausePair && (
                       <button
                         onClick={() => onPausePair(pair.id)}
                         className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors"
@@ -427,7 +444,7 @@ export const PairView: React.FC<PairViewProps> = ({
                       </button>
                     )}
 
-                    {(pair.status === 'paused' || pair.status === 'idle') && onStartPair && (
+                    {relayControls.canStart && onStartPair && (
                       <button
                         onClick={() => onStartPair(pair.id)}
                         className="p-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition-colors"
@@ -512,12 +529,12 @@ export const PairView: React.FC<PairViewProps> = ({
                     {/* Architecture Node Grid: Planner <---> Worker */}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {/* Planner Card */}
-                      <div className="p-4 rounded-lg bg-slate-950/70 border border-slate-800/90 space-y-2">
-                        <div className="flex items-center justify-between">
+                      <div className="rx-card p-4 rounded-lg bg-slate-950/70 border border-slate-800/90 space-y-2">
+                        <div className="rx-card-header">
                           <span className="text-xs font-semibold uppercase text-purple-400 flex items-center gap-1.5">
                             <Cpu className="w-3.5 h-3.5" /> Planner Session
                           </span>
-                          <div className="flex items-center gap-2">
+                          <div className="rx-action-group rx-action-group-wrap">
                             <span
                               className={`text-[11px] px-2 py-0.5 rounded font-mono ${
                                 pair.plannerStatus === 'available' || pair.plannerStatus === 'idle'
@@ -527,21 +544,45 @@ export const PairView: React.FC<PairViewProps> = ({
                             >
                               {pair.plannerStatus || 'unassigned'}
                             </span>
+                            {/*
+                              "Open Project" — the primary planner Open. Opens the
+                              project's ChatGPT PROJECT page (`/g/<g-p-…>/project`) in
+                              the browser via RelayX's own opener. This MUST NOT be an
+                              <a target="_blank">: main.ts intercepts window.open with
+                              shell.openExternal(), which hands the URL to the OS. The
+                              app-handler also verifies the read-back URL and does not
+                              activate the ChatGPT desktop app.
+                            */}
+                            {plannerProjectUrl && onOpenPlannerProject && (
+                              <button
+                                type="button"
+                                onClick={() => onOpenPlannerProject(pair.projectId)}
+                                className="px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-semibold flex items-center gap-1 transition-colors"
+                                title={`Open the ChatGPT project page in your browser: ${plannerProjectUrl}`}
+                              >
+                                <ExternalLink className="w-3 h-3" />
+                                <span>Open Project</span>
+                              </button>
+                            )}
                             {pair.plannerSessionId && (
                               plannerUrl ? (
-                                <a
-                                  href={plannerUrl}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
+                                <button
+                                  type="button"
                                   onClick={() => {
-                                    onActivateRuntime(pair.plannerSessionId!);
+                                    // Exact-CONVERSATION Open. This MUST NOT be an <a target="_blank">:
+                                    // main.ts intercepts window.open with shell.openExternal(),
+                                    // which hands the URL to the OS instead of RelayX's own
+                                    // opener — observed result was zero Chrome tabs for the exact
+                                    // conversation. openRuntimeSession() reads runtime.sessionUrl
+                                    // verbatim (RelayApiService.openRuntimeSession).
+                                    onOpenPlannerSession(pair.plannerSessionId!);
                                   }}
-                                  className="px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-semibold flex items-center gap-1 transition-colors"
-                                  title={`Open exact attached ChatGPT conversation: ${plannerUrl}`}
+                                  className="px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-white text-[10px] font-semibold flex items-center gap-1 transition-colors"
+                                  title={`Open the exact attached ChatGPT conversation in your browser: ${plannerUrl}`}
                                 >
                                   <ExternalLink className="w-3 h-3" />
-                                  <span>Open</span>
-                                </a>
+                                  <span>Open Chat</span>
+                                </button>
                               ) : (
                                 <button
                                   type="button"
@@ -550,7 +591,7 @@ export const PairView: React.FC<PairViewProps> = ({
                                   title="No exact session URL or conversation ID recorded for this planner"
                                 >
                                   <ExternalLink className="w-3 h-3" />
-                                  <span>Open</span>
+                                  <span>Open Chat</span>
                                 </button>
                               )
                             )}
@@ -576,21 +617,43 @@ export const PairView: React.FC<PairViewProps> = ({
                             )}
                           </div>
                         </div>
-                        <div className="text-sm font-semibold text-slate-200">
+                        <div className="text-sm font-semibold text-slate-200 truncate" title={pair.plannerName || '(No Planner Runtime Bound)'}>
                           {pair.plannerName || '(No Planner Runtime Bound)'}
                         </div>
                         <div className="flex items-center justify-between text-xs text-slate-400">
-                          <span>Provider: <span className="font-mono text-slate-300">{pair.plannerProvider || 'None'}</span></span>
+                          <span>Provider: <span className="font-mono text-slate-300 truncate max-w-[120px]" title={pair.plannerProvider || 'None'}>{pair.plannerProvider || 'None'}</span></span>
+                          {/*
+                            The PROJECT URL is rendered as text, never as an <a
+                            target="_blank">: main.ts intercepts window.open with
+                            shell.openExternal(), which hands the URL to the OS and can
+                            route chatgpt.com to the ChatGPT desktop app instead of the
+                            browser. Opening is the "Open Project" button above.
+                          */}
+                          {plannerProjectUrl ? (
+                            <span
+                              className="font-mono text-[10px] text-blue-300 truncate max-w-[200px]"
+                              title={`ChatGPT project URL: ${plannerProjectUrl}`}
+                            >
+                              {plannerProjectUrl}
+                            </span>
+                          ) : (
+                            <span className="text-[10px] text-amber-400/80 italic">No project URL</span>
+                          )}
+                        </div>
+                        {/*
+                          The exact conversation is a DIFFERENT identity from the project
+                          page above and is shown on its own row, labelled as such, so the
+                          two are never mistaken for each other.
+                        */}
+                        <div className="flex items-center justify-between text-xs text-slate-400">
+                          <span>Conversation:</span>
                           {plannerUrl ? (
-                            <a
-                              href={plannerUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="font-mono text-[10px] text-purple-300 hover:text-purple-200 underline truncate max-w-[200px]"
+                            <span
+                              className="font-mono text-[10px] text-purple-300 truncate max-w-[200px]"
                               title={`Exact conversation URL: ${plannerUrl}`}
                             >
                               {plannerUrl}
-                            </a>
+                            </span>
                           ) : plannerSession?.externalSessionId ? (
                             <span className="font-mono text-[10px] text-purple-300 truncate max-w-[180px]" title={plannerSession.externalSessionId}>
                               {plannerSession.externalSessionId}
@@ -602,12 +665,12 @@ export const PairView: React.FC<PairViewProps> = ({
                       </div>
 
                       {/* Worker Card */}
-                      <div className="p-4 rounded-lg bg-slate-950/70 border border-slate-800/90 space-y-2">
-                        <div className="flex items-center justify-between">
+                      <div className="rx-card p-4 rounded-lg bg-slate-950/70 border border-slate-800/90 space-y-2">
+                        <div className="rx-card-header">
                           <span className="text-xs font-semibold uppercase text-emerald-400 flex items-center gap-1.5">
                             <Cpu className="w-3.5 h-3.5" /> Worker Session
                           </span>
-                          <div className="flex items-center gap-2">
+                          <div className="rx-action-group rx-action-group-wrap">
                             <span
                               className={`text-[11px] px-2 py-0.5 rounded font-mono ${
                                 pair.workerStatus === 'working'
@@ -667,11 +730,11 @@ export const PairView: React.FC<PairViewProps> = ({
                             )}
                           </div>
                         </div>
-                        <div className="text-sm font-semibold text-slate-200">
+                        <div className="text-sm font-semibold text-slate-200 truncate" title={pair.workerName || '(No Worker Runtime Bound)'}>
                           {pair.workerName || '(No Worker Runtime Bound)'}
                         </div>
                         <div className="flex items-center justify-between text-xs text-slate-400">
-                          <span>Provider: <span className="font-mono text-slate-300">{pair.workerProvider || 'None'}</span></span>
+                          <span>Provider: <span className="font-mono text-slate-300 truncate max-w-[120px]" title={pair.workerProvider || 'None'}>{pair.workerProvider || 'None'}</span></span>
                           {workerSession?.externalSessionId && (
                             <span className="font-mono text-[10px] text-emerald-300 truncate max-w-[180px]" title={workerSession.externalSessionId}>
                               {workerSession.externalSessionId}

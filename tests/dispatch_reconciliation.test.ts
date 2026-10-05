@@ -198,7 +198,10 @@ describe('Dispatch-intent reconciliation', () => {
     provider.sendCount = 0; // ignore the setup dispatch itself
 
     // Model the crash: outcome never committed.
-    db.db.prepare(`UPDATE deliveries SET status = 'delivering' WHERE id = ?`).run(delivery.id);
+    // `delivered_at` is cleared with the status because Phase 3 is what sets it — a crash
+    // inside Phase 2 commits NO outcome, which is why the live stranded record carries a
+    // NULL `delivered_at`.
+    db.db.prepare(`UPDATE deliveries SET status = 'delivering', delivered_at = NULL WHERE id = ?`).run(delivery.id);
     db.db.prepare(`UPDATE attempts SET status = 'prepared' WHERE id = ?`).run(attempt.id);
 
     const stranded = await db.deliveries.findById(delivery.id);
@@ -368,7 +371,7 @@ describe('Dispatch-intent reconciliation', () => {
     assert.ok(critical[0].message.includes('reconciliation probe exploded'));
   });
 
-  it('R7 — repeated reconciliation is a no-op and never duplicates anything', async () => {
+  it('R7 — repeated reconciliation never duplicates anything and never dispatches', async () => {
     const { assignment, attemptId, deliveryId } = await strandDispatch('R7');
     provider.outcome = 'unknown';
 
@@ -380,18 +383,33 @@ describe('Dispatch-intent reconciliation', () => {
       attempt: await db.attempts.findById(attemptId),
       critical: (await db.attention.findOpen()).filter((a) => a.severity === 'critical').length,
     };
-    const probesAfterFirst = provider.probeCount;
+    const criticalId = (await db.attention.findOpen())[0]?.id;
 
     // Repeated passes.
     const second = await engine.reconcileUnresolvedDispatches();
     const third = await engine.reconcileUnresolvedDispatches();
 
-    assert.strictEqual(second.examined, 0, 'terminal intents are no longer examined');
-    assert.strictEqual(third.examined, 0);
-    assert.strictEqual(provider.probeCount, probesAfterFirst, 'no further provider probing');
+    // `ambiguous` IS re-examined: it means "ground truth unresolved", which is exactly the
+    // open question a probe answers, so the intent is not finished work. What must hold on
+    // every repeat is that re-examining CHANGES NOTHING unless the probe becomes
+    // authoritative — no duplicate attention, no status change, no rewritten evidence.
+    assert.strictEqual(second.ambiguousRaised, 1, 'the intent is still reported as unresolved');
+    assert.strictEqual(third.ambiguousRaised, 1);
+    assert.strictEqual(
+      second.dispositions[0]?.attentionItemId,
+      criticalId,
+      'a repeat pass must reuse the existing Attention item, never mint a new one',
+    );
+    assert.strictEqual(third.dispositions[0]?.attentionItemId, criticalId);
+    assert.strictEqual(provider.probeCount, 3, 'each pass re-probes the unresolved intent');
     assert.strictEqual(provider.sendCount, 0, 'no dispatch, ever');
 
     assert.strictEqual((await db.deliveries.findById(deliveryId))?.status, afterFirst.delivery?.status);
+    assert.strictEqual(
+      (await db.deliveries.findById(deliveryId))?.failureReason,
+      afterFirst.delivery?.failureReason,
+      'an inconclusive re-probe must not rewrite the recorded reason',
+    );
     assert.strictEqual((await db.attempts.findById(attemptId))?.status, afterFirst.attempt?.status);
     assert.strictEqual(
       (await db.attention.findOpen()).filter((a) => a.severity === 'critical').length,
@@ -400,6 +418,55 @@ describe('Dispatch-intent reconciliation', () => {
     );
     assert.strictEqual(await countAttempts(assignment.id), 1);
     assert.strictEqual(await countDeliveries(assignment.id), 1);
+  });
+
+  it('R9 — an intent left ambiguous ONLY because the probe was missing is re-resolved', async () => {
+    // The real-world wedge: R5 strands an intent as `ambiguous` with the reason
+    // "exposes no dispatch reconciliation probe". Nothing about the external world has
+    // settled it — RelayX simply could not look. Once a probe exists, re-examination must
+    // resolve it, with NO resend.
+    const { attemptId, deliveryId } = await strandDispatch('R9');
+
+    // Pass 1: no probe at all → ambiguous + operator visibility.
+    const bare = new MockProvider('opencode') as MockProvider;
+    assert.strictEqual((bare as unknown as IRuntimeProvider).reconcileDispatch, undefined);
+    engine.registerProvider(bare);
+    const stranded = await engine.reconcileUnresolvedDispatches();
+    assert.strictEqual(stranded.ambiguousRaised, 1);
+    assert.strictEqual((await db.deliveries.findById(deliveryId))?.status, 'ambiguous');
+    assert.strictEqual((await db.attempts.findById(attemptId))?.status, 'prepared');
+    assert.strictEqual((await db.deliveries.findById(deliveryId))?.deliveredAt, undefined);
+
+    // Pass 2: the probe exists and answers authoritatively.
+    engine.registerProvider(provider);
+    provider.outcome = 'delivered';
+    const sendsBefore = provider.sendCount;
+    const resolved = await engine.reconcileUnresolvedDispatches();
+
+    assert.strictEqual(resolved.deliveredConfirmed, 1);
+    assert.strictEqual(resolved.ambiguousRaised, 0);
+    const delivery = await db.deliveries.findById(deliveryId);
+    assert.strictEqual(delivery?.status, 'delivered');
+    assert.ok(delivery?.deliveredAt, 'delivered_at must be populated from reconciliation evidence');
+    assert.ok(delivery?.evidence, 'delivery evidence is the probe evidence, not a synthetic id');
+    assert.strictEqual(delivery?.evidence?.source, 'reconciliation_probe');
+    assert.strictEqual(
+      (await db.attempts.findById(attemptId))?.status,
+      'prepared',
+      'delivery is not execution proof — the Attempt is never promoted here',
+    );
+    assert.strictEqual(provider.sendCount, sendsBefore, 'resolution must never resend');
+
+    // The doubt the CRITICAL item expressed is answered, so it must not stay open.
+    assert.strictEqual(
+      (await db.attention.findOpen()).filter((a) => a.severity === 'critical').length,
+      0,
+      'a resolved ambiguity must not leave a CRITICAL item open',
+    );
+
+    // Terminal state must not be revisited.
+    const settled = await engine.reconcileUnresolvedDispatches();
+    assert.strictEqual(settled.examined, 0, 'a delivered intent is no longer examined');
   });
 
   it('R7b — repeated reconciliation of a DELIVERED intent does not regress the terminal state', async () => {
