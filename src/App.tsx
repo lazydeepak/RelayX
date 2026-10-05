@@ -267,10 +267,10 @@ export default function App() {
   };
 
   const handleOpenPlannerSession = async (sessionId: string) => {
-    // Exact-conversation Open for the planner: opens the bound conversation
-    // (`/c/<id>`) in Chrome, via RelayX's own opener so the persisted
-    // runtime.sessionUrl is used verbatim instead of shell.openExternal() through an
-    // <a target="_blank">. Use handleOpenPlannerProject for the PROJECT page.
+    // The planner Open: opens the bound conversation (`/c/<id>`) in Chrome, via
+    // RelayX's own opener so the persisted runtime.sessionUrl is used verbatim
+    // instead of shell.openExternal() through an <a target="_blank">. It targets
+    // the SESSION, never the project's `/g/<g-p-…>/project` main page.
     try {
       const res: any = await relayBridge.openRuntimeSession(sessionId);
       // Surface the REAL verified outcome, including the concrete failure reason.
@@ -289,29 +289,6 @@ export default function App() {
       await loadData();
     } catch (err: any) {
       notify(`Open error: ${formatFriendlyError(err)}`);
-    }
-  };
-
-  /**
-   * Opens the project's ChatGPT PROJECT page in the browser.
-   *
-   * Distinct from handleOpenPlannerSession, which opens the exact conversation. The
-   * project URL is the one captured when the project was added, and it is opened in
-   * Chrome — the ChatGPT desktop app is never brought to the front.
-   */
-  const handleOpenPlannerProject = async (projectId: string) => {
-    try {
-      const res = await relayBridge.openPlannerProject(projectId);
-      if (!res?.success) {
-        notify(
-          `Open project FAILED — ${res?.error ?? 'no reason reported'}` +
-            (res?.url ? ` (requested: ${res.url})` : ''),
-        );
-      } else {
-        notify(`Opened ChatGPT project in browser (verified): ${res.observedUrl ?? res.url}`);
-      }
-    } catch (err: any) {
-      notify(`Open project error: ${formatFriendlyError(err)}`);
     }
   };
 
@@ -714,7 +691,6 @@ export default function App() {
                 onOpenSessionDetail={handleOpenSessionDetail}
                 onActivateRuntime={handleActivateRuntime}
                 onOpenPlannerSession={handleOpenPlannerSession}
-                onOpenPlannerProject={handleOpenPlannerProject}
                 onActivatePair={handleActivatePair}
               />
             )}

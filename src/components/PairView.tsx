@@ -53,11 +53,6 @@ interface PairViewProps {
   onOpenSessionDetail: (sessionId: string) => void;
   onActivateRuntime: (sessionId: string) => void;
   onOpenPlannerSession: (sessionId: string) => void;
-  /**
-   * Opens the PROJECT page (`/g/<g-p-…>/project`) in the browser. Distinct from
-   * `onOpenPlannerSession`, which opens the exact conversation.
-   */
-  onOpenPlannerProject?: (projectId: string) => void;
   onActivatePair?: (pairId: string) => void;
   onUpdatePlannerUrl?: (pairId: string, url: string) => Promise<void>;
   onStartPair?: (pairId: string) => void;
@@ -126,7 +121,6 @@ export const PairView: React.FC<PairViewProps> = ({
   onOpenSessionDetail,
   onActivateRuntime,
   onOpenPlannerSession,
-  onOpenPlannerProject,
   onActivatePair,
   onUpdatePlannerUrl,
   onStartPair,
@@ -566,11 +560,11 @@ export const PairView: React.FC<PairViewProps> = ({
                                     // verbatim (RelayApiService.openRuntimeSession).
                                     onOpenPlannerSession(pair.plannerSessionId!);
                                   }}
-                                  className="px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-white text-[10px] font-semibold flex items-center gap-1 transition-colors"
+                                  className="px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-semibold flex items-center gap-1 transition-colors"
                                   title={`Open the exact attached ChatGPT conversation in your browser: ${plannerUrl}`}
                                 >
                                   <ExternalLink className="w-3 h-3" />
-                                  <span>Open Chat</span>
+                                  <span>Open</span>
                                 </button>
                               ) : (
                                 <button
@@ -580,7 +574,7 @@ export const PairView: React.FC<PairViewProps> = ({
                                   title="No exact session URL or conversation ID recorded for this planner"
                                 >
                                   <ExternalLink className="w-3 h-3" />
-                                  <span>Open Chat</span>
+                                  <span>Open</span>
                                 </button>
                               )
                             )}
@@ -616,7 +610,8 @@ export const PairView: React.FC<PairViewProps> = ({
                             target="_blank">: main.ts intercepts window.open with
                             shell.openExternal(), which hands the URL to the OS and can
                             route chatgpt.com to the ChatGPT desktop app instead of the
-                            browser. Opening is the "Open Project" button above.
+                            browser. The planner Open above targets the CONVERSATION, not
+                            this project page, so this row is a record only.
                           */}
                           {plannerProjectUrl ? (
                             <span
