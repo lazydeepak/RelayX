@@ -63,6 +63,16 @@ export function detailField(
 
 export interface SessionIdentity {
   externalSessionId?: string;
+  /**
+   * The exact, authoritative SESSION URL — the conversation/session route RelayX
+   * opens and addresses, e.g. `.../c/<conversationId>` for a browser Planner.
+   *
+   * This is deliberately distinct from the project-scoped page. For a ChatGPT
+   * Planner the project URL and the session URL are different pages, and Open
+   * targets the SESSION one. Showing only the project URL made the identity block
+   * describe a page RelayX never opens.
+   */
+  sessionUrl?: string;
   workspacePath?: string;
   openCodeProjectId?: string;
   projectUrl?: string;
@@ -95,11 +105,31 @@ export function extractSessionIdentity(session: UIRuntimeSession): SessionIdenti
         'authoritativeSessionId',
         'externalSessionId',
       ]) || session.externalSessionId || undefined,
+    // An observed URL from the recorded evidence outranks the stored one: it is proof of
+    // what the provider actually reported, whereas `sessionUrl` is only what RelayX
+    // intends to open. A project-scoped page is NOT accepted here — falling back to one
+    // would describe a page RelayX never opens as the session.
+    sessionUrl:
+      firstString(details, ['observedUrl', 'sessionUrl', 'finalUrl', 'conversationUrl']) ||
+      session.sessionUrl ||
+      undefined,
     workspacePath:
       firstString(details, ['workspacePath']) || session.externalProjectRef || undefined,
     openCodeProjectId: firstString(details, ['openCodeProjectId']),
     projectUrl: firstString(details, ['projectUrl']),
   };
+}
+
+/**
+ * True when the value is a web address rather than a filesystem path.
+ *
+ * A browser Planner has no directory, so its identity block carries a URL in the
+ * same slot a local Worker carries a path. Labelling that slot "Workspace /
+ * Directory" described a project page as if it were a folder, which is how the
+ * authoritative session URL came to look absent.
+ */
+function looksLikeUrl(value: string | undefined): boolean {
+  return typeof value === 'string' && /^https?:\/\//i.test(value.trim());
 }
 
 /* --- Saved-vs-discovered binding model ---
@@ -963,6 +993,7 @@ export interface SessionDetailViewModel {
   association: SessionAssociation;
   identity: {
     externalSessionId: DetailField;
+    sessionUrl: DetailField;
     workspacePath: DetailField;
     providerReference: DetailField;
   };
@@ -1070,10 +1101,21 @@ export function buildSessionDetail(
         mono: true,
         copyable: true,
       }),
-      workspacePath: detailField('Workspace / Directory', identity.workspacePath, {
+      // The exact route Open targets, stated plainly, so the identity block cannot be
+      // read as "the project page is the session".
+      sessionUrl: detailField('Session URL', identity.sessionUrl, {
         mono: true,
         copyable: true,
       }),
+      // Labelled for what it actually is: a browser Planner has no directory.
+      workspacePath: detailField(
+        looksLikeUrl(identity.workspacePath) ? 'Project URL' : 'Workspace / Directory',
+        identity.workspacePath,
+        {
+          mono: true,
+          copyable: true,
+        },
+      ),
       providerReference: detailField(
         'Provider Reference',
         identity.projectUrl ?? identity.openCodeProjectId,

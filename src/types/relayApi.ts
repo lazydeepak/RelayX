@@ -359,6 +359,9 @@ export interface IRelayApi {
   activateRuntime(sessionId: string): Promise<boolean>;
 
   openRuntimeSession(sessionId: string): Promise<OpenRuntimeSessionResult>;
+
+  /** Get the authoritative recovery state for a pair, from the engine's durable evidence. */
+  getPairRecoveryState(pairId: string): Promise<{ pairId: string; recoveryState: import('../relay/domain/recoveryAuthority').RecoveryState | null }>;
   /**
    * S6 CLOSURE — `error` is populated ONLY when the attempt was refused by the I-2
    * runtime->Pair governance guard (the owning Pair is IDLE, or its ownership is

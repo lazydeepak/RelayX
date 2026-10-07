@@ -509,22 +509,134 @@ test('detailField trims values and honours custom empty text', () => {
 test('extractSessionIdentity reads only known evidence keys', () => {
   assert.deepEqual(extractSessionIdentity(workerSession), {
     externalSessionId: 'sess_abc',
+    sessionUrl: undefined,
     workspacePath: '/Users/dev/RelayX',
     openCodeProjectId: undefined,
     projectUrl: undefined,
   });
   assert.deepEqual(extractSessionIdentity(plannerSession), {
     externalSessionId: undefined,
+    sessionUrl: undefined,
     workspacePath: undefined,
     openCodeProjectId: undefined,
     projectUrl: 'https://chatgpt.com/p/relayx',
   });
   assert.deepEqual(extractSessionIdentity(unboundSession), {
     externalSessionId: undefined,
+    sessionUrl: undefined,
     workspacePath: undefined,
     openCodeProjectId: undefined,
     projectUrl: undefined,
   });
+});
+
+/* --- Session URL is surfaced, and never conflated with the project page --- */
+
+test('the authoritative session URL is surfaced from the stored runtime record', () => {
+  const session: UIRuntimeSession = {
+    ...plannerSession,
+    externalSessionId: '6ac3cbd7-9e4c-83ec-b050-3ec55ebea9b5',
+    sessionUrl:
+      'https://chatgpt.com/g/g-p-relayx/c/6ac3cbd7-9e4c-83ec-b050-3ec55ebea9b5',
+  };
+  assert.equal(
+    extractSessionIdentity(session).sessionUrl,
+    'https://chatgpt.com/g/g-p-relayx/c/6ac3cbd7-9e4c-83ec-b050-3ec55ebea9b5',
+    'the exact conversation route must be surfaced, not only the project page',
+  );
+});
+
+test('an observed URL outranks the stored one, because it is proof rather than intent', () => {
+  const session: UIRuntimeSession = {
+    ...plannerSession,
+    sessionUrl: 'https://chatgpt.com/g/g-p-relayx/c/6ac3cbd7',
+    lastEvidence: {
+      id: 'ev',
+      timestamp: 1,
+      source: 'reconciliation_probe',
+      details: { observedUrl: 'https://chatgpt.com/c/6ac3cbd7' },
+    },
+  };
+  assert.equal(extractSessionIdentity(session).sessionUrl, 'https://chatgpt.com/c/6ac3cbd7');
+});
+
+test('the project URL is never substituted for the missing session URL', () => {
+  const session: UIRuntimeSession = {
+    ...plannerSession,
+    externalProjectRef: 'https://chatgpt.com/g/g-p-relayx/project',
+    sessionUrl: null,
+  };
+  const identity = extractSessionIdentity(session);
+  assert.equal(
+    identity.sessionUrl,
+    undefined,
+    'a project page is not the session, and must not be presented as one',
+  );
+  assert.equal(identity.workspacePath, 'https://chatgpt.com/g/g-p-relayx/project');
+});
+
+test('the session detail view model renders a Session URL row with the exact route', () => {
+  const session: UIRuntimeSession = {
+    ...plannerSession,
+    externalSessionId: '6ac3cbd7',
+    sessionUrl: 'https://chatgpt.com/g/g-p-relayx/c/6ac3cbd7',
+  };
+  const vm = selectSessionDetail({
+    sessionId: session.id,
+    sessions: [session],
+    projects: [project],
+    pairs: [pair],
+    assignments: [],
+    events: [],
+  });
+  assert.equal(vm.identity.sessionUrl.label, 'Session URL');
+  assert.equal(vm.identity.sessionUrl.value, 'https://chatgpt.com/g/g-p-relayx/c/6ac3cbd7');
+  assert.equal(vm.identity.sessionUrl.copyable, true);
+});
+
+test('a browser Planner with no directory is labelled Project URL, not Workspace / Directory', () => {
+  const session: UIRuntimeSession = {
+    ...plannerSession,
+    externalProjectRef: 'https://chatgpt.com/g/g-p-relayx/project',
+  };
+  const vm = selectSessionDetail({
+    sessionId: session.id,
+    sessions: [session],
+    projects: [project],
+    pairs: [pair],
+    assignments: [],
+    events: [],
+  });
+  assert.equal(
+    vm.identity.workspacePath.label,
+    'Project URL',
+    'a URL must not be presented as a filesystem directory',
+  );
+});
+
+test('a local Worker keeps the Workspace / Directory label', () => {
+  const vm = selectSessionDetail({
+    sessionId: workerSession.id,
+    sessions: [plannerSession, workerSession],
+    projects: [project],
+    pairs: [pair],
+    assignments: [],
+    events: [],
+  });
+  assert.equal(vm.identity.workspacePath.label, 'Workspace / Directory');
+});
+
+test('a session with no session URL reports it honestly rather than borrowing another field', () => {
+  const vm = selectSessionDetail({
+    sessionId: plannerSession.id,
+    sessions: [plannerSession],
+    projects: [project],
+    pairs: [pair],
+    assignments: [],
+    events: [],
+  });
+  assert.equal(vm.identity.sessionUrl.state, 'empty');
+  assert.equal(vm.identity.sessionUrl.copyable, false);
 });
 
 /* --- Saved-vs-discovered binding verification --- */

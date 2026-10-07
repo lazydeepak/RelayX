@@ -92,7 +92,10 @@ export interface BatonBoundary {
   messageIds: readonly string[];
   messageCount: number;
   capturedAt: number;
-  provenance: 'captured_pre_dispatch' | 'reconstructed_from_intent_time';
+  provenance:
+    | 'captured_pre_dispatch'
+    | 'reconstructed_from_intent_time'
+    | 'recovered_from_exact_session';
 }
 
 /** One confirmed Delivery together with everything needed to interpret it. */

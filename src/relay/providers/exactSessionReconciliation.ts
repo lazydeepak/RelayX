@@ -155,6 +155,17 @@ export interface ExactSessionWatermark {
   /** Newest `time.created` seen at capture time. Evidence only; never the deciding comparison. */
   latestCreatedAt: number | null;
   messageCount: number;
+  /**
+   * Exact provider identity of the newest USER turn present at capture time.
+   *
+   * Added so a reader can state the boundary in one unambiguous identity term ("everything
+   * after user turn msg_x") instead of a count. It is derived from the SAME ordered turn list
+   * as `messageIds`, so it can never disagree with them, and it is never compared against a
+   * timestamp.
+   */
+  latestUserTurnId?: string | null;
+  /** Position of `latestUserTurnId` in the captured provider order. Never a wall-clock value. */
+  latestUserTurnOrdinal?: number | null;
   capturedAt: number;
   /**
    * How this boundary was obtained. Never omitted, because the two kinds are not equally
@@ -171,7 +182,47 @@ export interface ExactSessionWatermark {
    *   dispatched before id-set boundaries were recorded, and it is reported as weaker
    *   everywhere it is used. It must never be used to authorise a resend on its own.
    */
-  provenance: 'captured_pre_dispatch' | 'reconstructed_from_intent_time';
+  provenance:
+    | 'captured_pre_dispatch'
+    | 'reconstructed_from_intent_time'
+    | 'recovered_from_exact_session';
+}
+
+/**
+ * Recover a missing boundary from an authoritative exact-session transcript.
+ *
+ * This is intentionally stricter than timestamp reconstruction: the dispatched instruction
+ * must occur exactly once in the transcript, and the boundary is the provider-id set before
+ * that user turn. No match, multiple matches, or an unidentifiable message fails closed.
+ */
+export function recoverBoundaryFromExactSession(input: {
+  sessionId: string;
+  messages: readonly ReconciliationMessage[];
+  expectedText: string;
+}): ExactSessionWatermark | null {
+  const expected = normalizeInstructionText(input.expectedText);
+  if (!input.sessionId || !expected) return null;
+  const { ordered } = toChronological(input.messages);
+  const matches = ordered.filter(
+    (message) => message.role === 'user' && normalizeInstructionText(message.text) === expected,
+  );
+  if (matches.length !== 1) return null;
+  const matched = matches[0];
+  if (!matched.messageId) return null;
+  const index = ordered.findIndex((message) => message.messageId === matched.messageId);
+  if (index < 0) return null;
+  const prior = ordered.slice(0, index).filter((message) => Boolean(message.messageId));
+  const latestUser = [...prior].reverse().find((message) => message.role === 'user');
+  return {
+    sessionId: input.sessionId,
+    messageIds: prior.map((message) => message.messageId),
+    messageCount: prior.length,
+    latestCreatedAt: prior.length ? prior[prior.length - 1].createdAt : null,
+    latestUserTurnId: latestUser?.messageId ?? null,
+    latestUserTurnOrdinal: latestUser?.ordinal ?? null,
+    capturedAt: Date.now(),
+    provenance: 'recovered_from_exact_session',
+  };
 }
 
 export interface TransportReconciliationInput {
@@ -964,14 +1015,38 @@ export function buildWatermark(
       latestCreatedAt = message.createdAt;
     }
   }
+  const { latestUserTurnId, latestUserTurnOrdinal } = lastUserTurn(messages);
+
   return {
     sessionId,
     messageIds: ids,
+    latestUserTurnId,
+    latestUserTurnOrdinal,
     latestCreatedAt,
     messageCount: messages.length,
     capturedAt,
     provenance: 'captured_pre_dispatch',
   };
+}
+
+/**
+ * Identity + ordinal of the newest USER turn in provider order.
+ *
+ * Turn identity, never a clock: two runs that disagree about wall time still agree about
+ * "the last user turn was this provider message id, at this position in the transcript".
+ */
+function lastUserTurn(messages: ReconciliationMessage[]): {
+  latestUserTurnId: string | null;
+  latestUserTurnOrdinal: number | null;
+} {
+  let latestUserTurnId: string | null = null;
+  let latestUserTurnOrdinal: number | null = null;
+  messages.forEach((message, index) => {
+    if (message.role !== 'user') return;
+    latestUserTurnId = message.messageId;
+    latestUserTurnOrdinal = index;
+  });
+  return { latestUserTurnId, latestUserTurnOrdinal };
 }
 
 /**
@@ -1011,9 +1086,12 @@ export function reconstructWatermarkFromIntentTime(
       : after;
     if (!target.includes(message.messageId)) target.push(message.messageId);
   }
+  const lastUser = lastUserTurn(messages);
   return {
     sessionId,
     messageIds: before,
+    latestUserTurnId: lastUser.latestUserTurnId,
+    latestUserTurnOrdinal: lastUser.latestUserTurnOrdinal,
     latestCreatedAt: before.length === 0 ? null : intentCommittedAt - 1,
     messageCount: before.length,
     capturedAt: intentCommittedAt,

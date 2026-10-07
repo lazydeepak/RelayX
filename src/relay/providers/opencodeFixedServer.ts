@@ -347,28 +347,79 @@ export class OpenCodeFixedServerClient {
     return { readable: true, messages, reason: `${messages.length} messages via fixed server`, endpoint: this.endpoint };
   }
 
-  /** Whether the session currently has an in-flight run (a tool part still running). */
+  /**
+   * Whether the session currently has an in-flight run.
+   *
+   * ## Why this does not read a single row
+   *
+   * The previous implementation read `order=desc&limit=1` and then treated
+   * "the first assistant row, else rows[0]" as the session's turn state. OpenCode interleaves
+   * rows that carry NO turn state into that newest position:
+   *
+   *   - `idle`      — the provider's own run-outcome marker
+   *   - `agent-switched`, `model-switched` — bookkeeping rows
+   *
+   * When one of those was newest, `rows[0]` was used as if it were the assistant turn, it has
+   * no `finish`, and `working` became `true` because of a missing field on a row that was never
+   * a turn at all. A session that had genuinely finished therefore reported itself as working
+   * forever, which is precisely what freezes the relay at `observe_baton_owner_working` and
+   * prevents a handoff from ever being produced.
+   *
+   * ## What is decided, and on what evidence
+   *
+   * Only rows that actually carry turn state are considered, newest first:
+   *   - an `assistant` row: in flight iff a tool part is non-terminal, or its `finish` is
+   *     absent / `tool-calls` (a tool round-trip CONTINUES and is not an answer);
+   *   - an `idle` row: terminal by definition — it is the provider stating the run ended.
+   *
+   * Nothing is inferred from a window title, a session title, or an app-level process check, and
+   * there is no "assume idle" default: a stream whose state cannot be read stays `working`,
+   * because being wrong in that direction only costs a deferral, while being wrong the other
+   * way would manufacture a handoff from a turn that never finished.
+   */
   async isSessionWorking(sessionId: string): Promise<{ working: boolean; reason: string }> {
     const { status, body } = await this.request(
-      `/api/session/${encodeURIComponent(sessionId)}/message?order=desc&limit=1`,
+      `/api/session/${encodeURIComponent(sessionId)}/message?order=desc&limit=10`,
     );
     if (status !== 200 || !body || typeof body !== 'object') {
       return { working: false, reason: `could not read newest message (${status})` };
     }
     const rows = (body as { data?: RawMessage[] }).data ?? [];
-    const newest = rows.find((r) => r?.type === 'assistant') ?? rows[0];
-    if (!newest) return { working: false, reason: 'no assistant message present' };
-    const running = (newest.content ?? []).some(
-      (p) => p?.type === 'tool' && String(p?.state?.status ?? '') === 'running',
-    );
-    const hasTerminal = newest.finish === 'stop' || newest.finish === 'error';
+    if (rows.length === 0) return { working: false, reason: 'no message present' };
+
+    const toolIsInFlight = (status: unknown): boolean => {
+      const s = String(status ?? '');
+      return s === '' || s === 'running' || s === 'pending';
+    };
+
+    // Newest row that actually carries run state, skipping pure bookkeeping rows.
+    for (const row of rows) {
+      if (row?.type === 'idle') {
+        return { working: false, reason: 'newest state-bearing row is an idle run-outcome marker' };
+      }
+      if (row?.type !== 'assistant') continue;
+
+      const running = (row.content ?? []).some(
+        (p) => p?.type === 'tool' && toolIsInFlight(p?.state?.status),
+      );
+      const hasTerminal = row.finish === 'stop' || row.finish === 'error';
+      return {
+        working: running || !hasTerminal,
+        reason: running
+          ? 'newest assistant message has a tool part still in flight'
+          : hasTerminal
+            ? `newest assistant message is terminated (finish=${row.finish})`
+            : `newest assistant message has no terminal finish (finish=${String(row.finish ?? 'absent')})`,
+      };
+    }
+
+    // Every row in the window was bookkeeping: no turn state either way, so report idle
+    // rather than inventing a run.
     return {
-      working: running || !hasTerminal,
-      reason: running
-        ? 'newest assistant message has a tool part with state.status=running'
-        : hasTerminal
-          ? `newest assistant message is terminated (finish=${newest.finish})`
-          : 'newest assistant message has no terminal finish',
+      working: false,
+      reason: `no assistant or idle row in the newest ${rows.length} messages (saw ${rows
+        .map((r) => r?.type)
+        .join(',')})`,
     };
   }
 

@@ -28,9 +28,41 @@ import {
   observeWorkerCompletion,
   reconstructWatermarkFromIntentTime,
   normalizeInstructionText,
+  recoverBoundaryFromExactSession,
   type ExactSessionWatermark,
   type ReconciliationMessage,
 } from '../src/relay/providers/exactSessionReconciliation.ts';
+
+describe('legacy boundary recovery', () => {
+  it('derives the exact pre-instruction id set from one unique worker user turn', () => {
+    const boundary = recoverBoundaryFromExactSession({
+      sessionId: 'ses_worker',
+      expectedText: 'Fix the relay boundary and verify tests',
+      messages: [
+        { messageId: 'u0', role: 'user', createdAt: 1, text: 'Earlier task' },
+        { messageId: 'a0', role: 'assistant', createdAt: 2, text: 'Earlier answer', finish: 'stop' },
+        { messageId: 'u1', role: 'user', createdAt: 3, text: 'Fix the relay boundary and verify tests' },
+        { messageId: 'a1', role: 'assistant', createdAt: 4, text: 'Working', finish: null },
+      ],
+    });
+    assert.deepStrictEqual(boundary?.messageIds, ['u0', 'a0']);
+    assert.equal(boundary?.provenance, 'recovered_from_exact_session');
+    assert.equal(boundary?.latestUserTurnId, 'u0');
+  });
+
+  it('fails closed when the instruction is absent or duplicated', () => {
+    const base = [{ messageId: 'u1', role: 'user' as const, text: 'same' }];
+    assert.equal(recoverBoundaryFromExactSession({ sessionId: 'ses_worker', expectedText: 'missing', messages: base }), null);
+    assert.equal(
+      recoverBoundaryFromExactSession({
+        sessionId: 'ses_worker',
+        expectedText: 'same',
+        messages: [...base, { messageId: 'u2', role: 'user' as const, text: 'same' }],
+      }),
+      null,
+    );
+  });
+});
 
 const SESSION = 'ses_f182a4ebeffeY5UgDTsU8XzoJG';
 

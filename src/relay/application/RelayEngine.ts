@@ -70,6 +70,25 @@ import {
 } from '../domain/planFirstVerification.ts';
 import { projectEventToActivity } from '../domain/activityProjection.ts';
 import {
+  RECOVERY_AUTHORITY,
+  getRecoveryOwner,
+  assertRecoveryAuthorityIndependentOfBaton,
+  assertNoSelectableRecoveryDestination,
+  createRecoveryState,
+  recordRecoveryIngressDeliveryCreated,
+  recordRecoveryIngressConfirmed,
+  recordPlannerDecision,
+  authorizeContinuation,
+  recordContinuationDeliveryCreated,
+  recordContinuationDispatched,
+  validateRecoveryOperation,
+  type RecoveryState,
+  type RecoveryPhase,
+  type RecoveryOperation,
+  type RecoveryAuthorization,
+  type RecoveryEvidence,
+} from '../domain/recoveryAuthority.ts';
+import {
   DuplicateDeliveryAttemptError,
   AmbiguousDeliveryResendError,
   RuntimeNotAvailableError,
@@ -2501,6 +2520,194 @@ export class RelayEngine {
   }
 
   /**
+   * Compute the current RecoveryState for a Pair by inspecting durable Assignment/Delivery evidence.
+   *
+   * Recovery lifecycle:
+   *   required → planner_intervention → planner_decided → continuation_authorized → resolved
+   *
+   * Each phase is driven by durable observed evidence:
+   *   - ingress delivery CREATED but not confirmed → still 'required'
+   *   - ingress delivery CONFIRMED → 'planner_intervention'
+   *   - planner decision Assignment observed → 'planner_decided'
+   *   - relay engine authorized continuation → 'continuation_authorized'
+   *   - continuation delivery CONFIRMED dispatched → 'resolved'
+   *
+   * Trigger delivery, Planner-ingress delivery, Planner decision assignment,
+   * and Planner→Worker continuation delivery are separate durable identities.
+   */
+  private async getCurrentRecoveryState(pairId: PairId): Promise<RecoveryState | null> {
+    const assignments = await this.repos.assignments.findByPairId(pairId);
+    const recoveryAssignments = assignments.filter(a => a.sourceRecoveryDeliveryId !== null);
+
+    if (recoveryAssignments.length === 0) {
+      return null;
+    }
+
+    // Find the active (non-resolved) recovery episode, preferring the most recent
+    const activeRecovery = recoveryAssignments
+      .slice()
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .find(a => a.status === 'pending' || a.status === 'delivering');
+
+    if (!activeRecovery) {
+      // All recovery assignments are terminal → recovery is resolved
+      const latestResolved = recoveryAssignments
+        .slice()
+        .sort((a, b) => b.createdAt - a.createdAt)[0];
+      return {
+        episodeId: latestResolved.id,
+        phase: 'resolved',
+        initiatedAt: latestResolved.createdAt,
+        triggerDeliveryId: latestResolved.sourceRecoveryDeliveryId,
+        recoveryAssignmentId: latestResolved.id,
+        continuationDispatchedAt: latestResolved.completedAt,
+      };
+    }
+
+    // Build recovery state from durable evidence
+    const triggerDeliveryId = activeRecovery.sourceRecoveryDeliveryId!;
+    const recoveryAssignmentId = activeRecovery.id;
+    const initiatedAt = activeRecovery.createdAt;
+
+    // Check if the recovery notice delivery is confirmed delivered
+    const recoveryDelivery = activeRecovery.activeDeliveryId
+      ? await this.repos.deliveries.findById(activeRecovery.activeDeliveryId)
+      : null;
+
+    const state: RecoveryState = {
+      episodeId: recoveryAssignmentId,
+      phase: 'required',
+      initiatedAt,
+      triggerDeliveryId,
+      recoveryAssignmentId,
+    };
+
+    if (!recoveryDelivery) {
+      return state; // required — delivery not yet created
+    }
+
+    // Ingress delivery exists
+    const ingressState = recordRecoveryIngressDeliveryCreated(state, recoveryDelivery.id);
+
+    // Check if ingress delivery is confirmed
+    if (recoveryDelivery.status === 'delivered') {
+      // Ingress confirmed → planner_intervention
+      const interventionState = recordRecoveryIngressConfirmed(
+        ingressState,
+        recoveryDelivery.deliveredAt ?? initiatedAt
+      );
+
+      // R8: Check if a concrete Planner decision Assignment exists for this episode
+      // A Planner decision is represented by a child Assignment whose sourceRecoveryDeliveryId
+      // points to the recovery notice delivery, AND that Assignment has been dispatched.
+      const plannerDecisions = assignments.filter(
+        a => a.sourceRecoveryDeliveryId === recoveryDelivery.id
+      );
+
+      if (plannerDecisions.length > 0) {
+        // Planner decision observed → planner_decided
+        const decision = plannerDecisions[0];
+        const decidedState = recordPlannerDecision(
+          interventionState,
+          decision.id,
+          decision.createdAt
+        );
+
+        // Check if continuation was explicitly authorized by relay engine
+        // (via authorizeContinuation call, recorded as a special event)
+        // For now, we check if a continuation delivery exists that is confirmed dispatched
+        if (decision.activeDeliveryId) {
+          const continuationDelivery = await this.repos.deliveries.findById(decision.activeDeliveryId);
+          if (continuationDelivery && continuationDelivery.status === 'delivered') {
+            // Continuation authorized and dispatched → resolved
+            const withContinuation = recordContinuationDeliveryCreated(decidedState, continuationDelivery.id);
+            return recordContinuationDispatched(
+              withContinuation,
+              continuationDelivery.deliveredAt ?? decidedState.initiatedAt
+            );
+          } else if (continuationDelivery && continuationDelivery.status === 'delivering') {
+            // Continuation in progress — check if we have explicit authorization
+            return authorizeContinuation(decidedState, decidedState.initiatedAt);
+          }
+        }
+
+        // Planner decided, but no continuation yet
+        return decidedState;
+      }
+
+      // Ingress confirmed, but no planner decision yet
+      return interventionState;
+    }
+
+    // Ingress delivery not yet confirmed
+    return ingressState;
+  }
+
+  /**
+   * Continuation guard: validate that a relay continuation dispatch during recovery
+   * is only permitted when recovery phase is CONTINUATION_AUTHORIZED and
+   * the continuation is Planner → Worker.
+   *
+   * This is the lowest shared relay-advance/dispatch boundary.
+   * Enforcement here protects supervision, restart, resume, queued dispatch, etc.
+   */
+  private async assertRecoveryContinuationAuthorized(
+    assignment: Assignment,
+    context: AuthorityContext,
+    trail: string[],
+  ): Promise<void> {
+    const recovery = await this.getCurrentRecoveryState(assignment.pairId);
+    if (!recovery || recovery.phase === 'resolved') {
+      // No active recovery or resolved — defer to normal baton authority
+      return;
+    }
+
+    // Determine if this assignment is part of a recovery episode
+    const isRecoveryAssignment = assignment.sourceRecoveryDeliveryId !== null;
+
+    if (isRecoveryAssignment) {
+      // This IS a recovery assignment — validate the recovery operation
+      // Recovery assignments go Planner side (the recovery notice), then
+      // the continuation assignment goes Worker side
+      const operation: RecoveryOperation = assignment.targetSideRole === 'planner'
+        ? { kind: 'recovery_ingress', destination: 'planner' }
+        : { kind: 'relay_continuation', from: 'planner', to: 'worker' };
+
+      const auth = validateRecoveryOperation(recovery, operation);
+
+      if (auth.decision === 'deny') {
+        trail.push(`RECOVERY GUARD DENY: ${auth.reason}`);
+        throw new RelayDomainError(
+          `Recovery continuation blocked: ${auth.reason}`,
+          'RECOVERY_CONTINUATION_DENIED',
+        );
+      }
+      // 'allow' or 'defer_to_normal_authority' — both pass through
+      trail.push(`RECOVERY GUARD allow: ${auth.reason}`);
+      return;
+    }
+
+    // Non-recovery assignment dispatched during active recovery — this would be
+    // a Worker-originated dispatch during recovery, which is denied (R7)
+    if (assignment.targetSideRole === 'worker') {
+      const operation: RecoveryOperation = {
+        kind: 'relay_continuation',
+        from: 'worker',
+        to: 'worker',
+      };
+
+      const auth = validateRecoveryOperation(recovery, operation);
+      if (auth.decision === 'deny') {
+        trail.push(`RECOVERY GUARD DENY (worker dispatch during recovery): ${auth.reason}`);
+        throw new RelayDomainError(
+          `Recovery continuation blocked: ${auth.reason}`,
+          'RECOVERY_CONTINUATION_DENIED',
+        );
+      }
+    }
+  }
+
+  /**
    * Dispatch precondition: the worker session must be bound to an identity that exists.
    */
   public async dispatchAssignment(
@@ -2522,6 +2729,15 @@ export class RelayEngine {
     // `recoverOnStartup` (before any runtime observation) and `dispatchPlanFirstUnit`
     // (before a Plan-First unit is sent). Both are engine-level, not controller-level.
 
+    // ---- Recovery continuation guard (§RECOVERY_FREEZE) ----
+    // Enforcement at the lowest shared relay-advance/dispatch boundary.
+    // This protects supervision, restart, resume, queued dispatch, retry/reconciliation,
+    // and any future producer that dispatches Assignments.
+    const guardTrail: string[] = [];
+    const assignmentForGuard = await this.repos.assignments.findById(assignmentId);
+    if (assignmentForGuard) {
+      await this.assertRecoveryContinuationAuthorized(assignmentForGuard, context, guardTrail);
+    }
     // ---- Phase 1: durable dispatch intent, COMMITTED before the external send ----
     // ATTEMPT_LIFECYCLE.md Case 1: if RelayX crashes during the provider call, the
     // prepared Attempt + delivering Delivery must already be durable, so recovery can

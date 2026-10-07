@@ -37,6 +37,7 @@ import {
   PairCheckpoint,
 } from '../domain/entities.ts';
 import type { VerificationResult as VerificationResultRecord } from '../domain/repoBoundary.ts';
+import type { RelayIngress } from '../../domain/relayIngress.ts';
 
 export interface IProjectRepository {
   findById(id: ProjectId): Promise<Project | null>;
@@ -386,6 +387,14 @@ export interface IHealthIncidentRepository {
   save(incident: HealthIncident): Promise<void>;
 }
 
+export interface IRelayIngressRepository {
+  findById(id: string): Promise<RelayIngress | null>;
+  findByUniqueKey(stablePairId: string, sourceSide: string, externalSessionId: string, providerTurnIdentity: string): Promise<RelayIngress | null>;
+  findActiveForPair(pairId: string): Promise<RelayIngress | null>;
+  save(ingress: RelayIngress): Promise<void>;
+  updateState(id: string, state: RelayIngress['state'], materializedAssignmentId?: string | null): Promise<void>;
+}
+
 export interface IRelayRepositories {
   projects: IProjectRepository;
   pairs: IPairRepository;
@@ -408,5 +417,6 @@ export interface IRelayRepositories {
   providerSettings: IProviderSettingsRepository;
   healthObservations: IHealthObservationRepository;
   healthIncidents: IHealthIncidentRepository;
+  relayIngresses: IRelayIngressRepository;
   runInTransaction<T>(work: () => Promise<T>): Promise<T>;
 }

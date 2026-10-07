@@ -41,6 +41,7 @@ import {
 } from './SqliteRepositories.ts';
 import { SqliteProviderSettingsRepository } from './SqliteProviderSettingsRepository.ts';
 import { SqliteHealthObservationRepository, SqliteHealthIncidentRepository } from './SqliteHealthRepository.ts';
+import { SqliteRelayIngressRepository } from './SqliteRelayIngressRepository.ts';
 
 function tableExists(db: DatabaseSync, tableName: string): boolean {
   const rows = db
@@ -89,6 +90,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
   public readonly providerSettings: SqliteProviderSettingsRepository;
   public readonly healthObservations: SqliteHealthObservationRepository;
   public readonly healthIncidents: SqliteHealthIncidentRepository;
+  public readonly relayIngresses: SqliteRelayIngressRepository;
 
   constructor(filePath = ':memory:') {
     this.db = new DatabaseSync(filePath);
@@ -115,6 +117,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     this.providerSettings = new SqliteProviderSettingsRepository(this.db);
     this.healthObservations = new SqliteHealthObservationRepository(this.db);
     this.healthIncidents = new SqliteHealthIncidentRepository(this.db);
+    this.relayIngresses = new SqliteRelayIngressRepository(this.db);
   }
 
   private initSchema(): void {
@@ -968,7 +971,27 @@ CREATE TABLE IF NOT EXISTS handoffs (
         ON verification_results(attempt_id)`);
     }
 
-    this.db.exec('PRAGMA user_version = 3;');
+    // --- relay_ingress: durable bootstrap root (schema v5) ---
+    this.db.exec(`CREATE TABLE IF NOT EXISTS relay_ingress (
+      ingress_id TEXT PRIMARY KEY,
+      stable_pair_id TEXT NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,
+      source_side TEXT NOT NULL DEFAULT 'planner',
+      provider_type TEXT NOT NULL,
+      external_session_id TEXT NOT NULL,
+      provider_turn_identity TEXT NOT NULL,
+      observed_text TEXT NOT NULL,
+      content_hash TEXT,
+      arm_evidence_json TEXT,
+      state TEXT NOT NULL DEFAULT 'armed',
+      materialized_assignment_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      observed_at INTEGER,
+      UNIQUE (stable_pair_id, source_side, external_session_id, provider_turn_identity)
+    );`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_relay_ingress_pair_state ON relay_ingress(stable_pair_id, state)`);
+
+    this.db.exec('PRAGMA user_version = 5;');
   }
 
   public async runInTransaction<T>(work: () => Promise<T>): Promise<T> {

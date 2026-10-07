@@ -67,6 +67,7 @@ import {
 } from './interfaces.ts';
 import {
   OpenCodeServiceError,
+  discoverOpenCodeService,
   discoverOpenCodeSessionClient,
   type DiscoveredSessionClient,
   type OpenCodeServiceErrorCode,
@@ -112,6 +113,7 @@ export interface OpenCodeWorkerOpenResult {
 }
 import {
   buildWatermark,
+  instructionFingerprint,
   reconcileTransportOutcome,
   type ExactSessionWatermark,
   type ReconciliationMessage,
@@ -1247,6 +1249,48 @@ export interface BrowserHandle {
   tabId: number;
 }
 
+/**
+ * The ONLY shape a ChatGPT conversation id ever takes.
+ *
+ * `/c/<uuid>` is the conversation route and nothing else produces a UUID there, so requiring
+ * this shape is what stops a Pair Name, a window title or a project key from being passed off
+ * as a session identity. A bound value that does not satisfy it is refused outright — see
+ * `parseChatGPTConversationTarget`.
+ */
+const CHATGPT_CONVERSATION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Resolve a bound planner session reference to the ONE exact conversation it names.
+ *
+ * A bound session is persisted either as the bare conversation id or as the conversation URL
+ * that was captured when the session was opened; both are provider-owned identity and both are
+ * accepted. Anything that is not a conversation — a Pair Name, a window title, a project key,
+ * an empty value — resolves to `null`, which callers must treat as "fail closed", never as
+ * "pick something else to send into" (I-11).
+ *
+ * When the bound value is a full URL it is preserved VERBATIM (the project segment included),
+ * because the opener verifies identity against the `/c/<id>` segment of that exact URL and a
+ * reconstructed URL would be a different string than the one that was bound.
+ */
+export function parseChatGPTConversationTarget(
+  externalSessionId: string | null | undefined,
+): { conversationId: string; exactUrl: string } | null {
+  const raw = typeof externalSessionId === 'string' ? externalSessionId.trim() : '';
+  if (!raw) return null;
+
+  const isUrl = /^https?:\/\//i.test(raw);
+  // Only a real conversation URL carries an id; a bare id is the id itself.
+  const fromUrl = isUrl ? /\/c\/([^/?#]+)/.exec(raw)?.[1] ?? null : null;
+  const conversationId = (fromUrl ?? raw).trim();
+  if (!CHATGPT_CONVERSATION_ID_PATTERN.test(conversationId)) return null;
+
+  return {
+    conversationId,
+    exactUrl: fromUrl ? raw : `https://chatgpt.com/c/${conversationId}`,
+  };
+}
+
 export class ChatGPTProvider extends BaseMacOSProvider {
   readonly providerType: ProviderType = 'chatgpt';
   readonly integrationStatus: ProviderIntegrationStatus = 'partial';
@@ -1255,134 +1299,241 @@ export class ChatGPTProvider extends BaseMacOSProvider {
   readonly candidateProcessNames = ['ChatGPT', 'chatgpt'];
   readonly defaultWindowTitle = 'ChatGPT';
 
+  /**
+   * PLANNER DELIVERY — THE EXACT BOUND CHROME CONVERSATION, AND NOTHING ELSE.
+   *
+   * ## The assumption this removes
+   *
+   * This method used to require the ChatGPT **macOS desktop application** to be running, raise
+   * it with `tell application "ChatGPT" to activate`, paste the instruction with System Events,
+   * press Return, and then report `delivered` with `composerCleared: true` and
+   * `responseActivityObserved: true` written as literals. Three defects that are one defect seen
+   * from three sides:
+   *
+   *   1. It required, probed and FOCUSED a different surface from the one that holds the planner
+   *      identity. The bound planner session is the persisted ChatGPT conversation opened in
+   *      Chrome. The desktop app is not that conversation and was never asserted to be, so the
+   *      send could land in an unrelated conversation — or in nothing at all.
+   *   2. Its success signal was a button's visibility in that window, not a read of the target
+   *      conversation, so a Chrome-bound planner could never be delivered to at all while the
+   *      desktop app was closed, and a desktop-bound one could never be proven.
+   *   3. It could silently switch surfaces: no conversation was ever asserted, so "the desktop
+   *      app was the one running" quietly became "that is where the instruction went".
+   *
+   * ## What runs now, in this order
+   *
+   *   1. RESOLVE   the exact bound conversation (`openExactSessionInChrome`): reuse the tab
+   *                already showing it, or open it, and require the read-back URL to still be
+   *                that conversation. Anything else is a failure, never a fallback.
+   *   2. CAPTURE   the pre-send boundary from THAT conversation, through THAT verified handle.
+   *   3. SEND      into THAT conversation only, with the instruction verbatim.
+   *   4. CONFIRM   only from an exact post-boundary readback: a user turn whose identity is
+   *                absent from the boundary set AND whose text is this instruction.
+   *   5. FAIL CLOSED when the exact Chrome session cannot be verified — before any send.
+   *
+   * No desktop-app probe, activation, focus, clipboard, keystroke or desktop bundle id remains
+   * on this path. The ChatGPT macOS application is neither required nor consulted, and this
+   * method never falls back to it.
+   */
   override async deliverInstruction(
     request: DeliveryInstructionRequest,
   ): Promise<DeliveryInstructionResult> {
-    const probe = this.probeMacOSProcess(this.defaultProcessName);
+    const self = this as any;
 
-    if (!probe.running) {
-      const evidence: ObservableEvidence = {
-        id: `ev_chatgpt_absent_${Date.now()}`,
-        timestamp: Date.now(),
-        source: 'reconciliation_probe',
-        runtimeSessionId: request.runtimeSessionId,
-        bundleIdentifier: this.defaultBundleId,
-        details: { reason: 'ChatGPT desktop application is not running on host system' },
-      };
+    const result = (
+      outcome: DeliveryInstructionResult['outcome'],
+      reason: string,
+      details: Record<string, unknown>,
+      extra: Partial<ObservableEvidence> = {},
+    ): DeliveryInstructionResult => {
+      const now = Date.now();
       return {
-        outcome: 'failed',
-        reason: 'ChatGPT macOS desktop application is not running on host system',
-        evidence,
+        outcome,
+        reason,
+        evidence: {
+          id: `ev_chatgpt_delivery_${outcome}_${now}`,
+          timestamp: now,
+          // A Chrome DOM write, read back from the same conversation. Deliberately NOT
+          // `macos_system_events`: that is the desktop-app evidence source this method no
+          // longer produces anything for.
+          source: 'reconciliation_probe',
+          runtimeSessionId: request.runtimeSessionId,
+          details: {
+            phase: 'chatgpt_exact_conversation_delivery',
+            surface: 'chrome_browser',
+            outcome,
+            ...details,
+          },
+          ...extra,
+        },
       };
-    }
-
-    if ((typeof process === 'undefined' || process.platform !== 'darwin') && !probe.details?.testEnvironment) {
-      const evidence: ObservableEvidence = {
-        id: `ev_chatgpt_nondarwin_${Date.now()}`,
-        timestamp: Date.now(),
-        source: 'reconciliation_probe',
-        runtimeSessionId: request.runtimeSessionId,
-        bundleIdentifier: this.defaultBundleId,
-        details: { reason: 'macOS UI automation requires darwin platform' },
-      };
-      return {
-        outcome: 'failed',
-        reason: 'macOS UI automation requires darwin platform',
-        evidence,
-      };
-    }
-
-    // 1. Visibly focus ChatGPT window
-    const targetProcess = (probe.details?.matchedProcessName as string) || this.defaultProcessName;
-    const focusResult = this.runAppleScript(`
-      tell application "${targetProcess}" to activate
-      delay 0.3
-      tell application "System Events"
-        set procs to (every application process whose name is "${targetProcess}")
-        if (count of procs) > 0 then
-          set frontmost of (item 1 of procs) to true
-          return "focused"
-        end if
-      end tell
-      return "failed"
-    `);
-
-    if (!focusResult.success || focusResult.output !== 'focused') {
-      const evidence: ObservableEvidence = {
-        id: `ev_focus_fail_${Date.now()}`,
-        timestamp: Date.now(),
-        source: 'macos_system_events',
-        runtimeSessionId: request.runtimeSessionId,
-        applicationPid: probe.pid,
-        windowTitle: probe.windowTitle,
-        details: { error: focusResult.error || 'Failed to focus ChatGPT' },
-      };
-      return {
-        outcome: 'failed',
-        reason: `Could not visibly focus ChatGPT: ${focusResult.error || 'Window not accessible'}`,
-        evidence,
-      };
-    }
-
-    // 2. Insert prompt into composer and trigger Send
-    const escapedText = escapeAppleScriptStringLiteral(request.instructionText);
-    const sendResult = this.runAppleScript(`
-      tell application "System Events"
-        tell application process "${targetProcess}"
-          set the clipboard to "${escapedText}"
-          delay 0.1
-          keystroke "v" using command down
-          delay 0.2
-          key code 36 -- Return key
-          delay 0.4
-          
-          set hasStop to false
-          try
-            set stopButtons to (every button of window 1 whose name contains "Stop" or description contains "Stop")
-            if (count of stopButtons) > 0 then set hasStop to true
-          end try
-          return "sent::" & (hasStop as string)
-        end tell
-      end tell
-    `, 4000);
-
-    const now = Date.now();
-    if (!sendResult.success) {
-      const evidence: ObservableEvidence = {
-        id: `ev_chatgpt_ambiguous_${now}`,
-        timestamp: now,
-        source: 'macos_system_events',
-        runtimeSessionId: request.runtimeSessionId,
-        applicationPid: probe.pid,
-        windowTitle: probe.windowTitle,
-        details: { error: sendResult.error, unverifiedAction: 'Send triggered in ChatGPT but confirmation timed out' },
-      };
-      return {
-        outcome: 'ambiguous',
-        reason: 'Unverified Send: instruction was dispatched to ChatGPT but post-send confirmation timed out. Automated resend blocked.',
-        evidence,
-      };
-    }
-
-    const hasStopButton = sendResult.output.includes('true');
-    const evidence: ObservableEvidence = {
-      id: `ev_chatgpt_delivered_${now}`,
-      timestamp: now,
-      source: 'macos_system_events',
-      runtimeSessionId: request.runtimeSessionId,
-      applicationPid: probe.pid,
-      windowTitle: probe.windowTitle,
-      composerSignature: `sha256_${request.instructionText.length}`,
-      composerCleared: true,
-      responseActivityObserved: true,
-      visibleButtonState: {
-        sendButtonVisible: !hasStopButton,
-        stopButtonVisible: hasStopButton,
-      },
-      details: { method: 'chatgpt_ui_send', hasStopButton },
     };
 
-    return { outcome: 'delivered', evidence };
+    // ---- 1. IDENTITY. The bound planner session IS the persisted Chrome conversation. ----
+    const target = parseChatGPTConversationTarget(request.externalSessionId);
+    if (!target) {
+      return result(
+        'failed',
+        'This delivery carries no bound ChatGPT conversation identity, so there is no exact ' +
+          'conversation to send into. RelayX does not substitute a window, a frontmost ' +
+          'application, or the ChatGPT macOS desktop app for a conversation id.',
+        {
+          stage: 'identity',
+          externalSessionId: request.externalSessionId ?? null,
+        },
+      );
+    }
+
+    // ---- 2. RESOLVE the exact conversation in Chrome (verified, never assumed). ----
+    const opened = await self.openExactSessionInChrome(target.exactUrl, target.conversationId);
+    if (!opened || opened.success !== true) {
+      return result(
+        'failed',
+        `The exact bound ChatGPT conversation ${target.conversationId} could not be verified in ` +
+          `Chrome, so nothing was sent. ` +
+          `${opened?.reason ?? 'The exact-session opener returned no verifiable result.'}`,
+        {
+          stage: 'resolve_exact_conversation',
+          conversationId: target.conversationId,
+          requestedUrl: target.exactUrl,
+          observedUrl: opened?.observedUrl ?? null,
+          reusedExistingTab: opened?.reused === true,
+          openerDiagnostics: opened?.diagnostics ?? [],
+        },
+      );
+    }
+    const handle: BrowserHandle = { windowId: opened.windowId, tabId: opened.tabId };
+
+    // ---- 3. BOUNDARY from that exact conversation, through that exact handle. ----
+    const pre = await readExactChatGPTConversation(self, target.conversationId, handle);
+    if (!pre.ok) {
+      return result(
+        'failed',
+        `The pre-send boundary of the exact bound ChatGPT conversation ${target.conversationId} ` +
+          `could not be read (${pre.reason}). Without that boundary no later turn can be shown to ` +
+          `belong to this delivery, so nothing was sent.`,
+        {
+          stage: 'capture_pre_send_boundary',
+          conversationId: target.conversationId,
+          observedUrl: opened.observedUrl ?? null,
+          failure: pre.reason,
+        },
+      );
+    }
+    const boundary = buildChatGPTTransportBoundary(target.conversationId, pre.turns);
+
+    // ---- 4. SEND into that exact conversation only, verbatim. ----
+    const submitted = await self.submitExactSessionTurn(
+      handle,
+      target.exactUrl,
+      target.conversationId,
+      request.instructionText,
+    );
+
+    // ---- 5. CONFIRM only from an exact post-boundary readback of that conversation. ----
+    //
+    // The new user turn renders asynchronously, so the readback is polled for a BOUNDED time.
+    // The bound is finite so a genuinely failed send still terminates, and the wait stops as
+    // soon as the post-boundary turn is observed.
+    let post = await readExactChatGPTConversation(self, target.conversationId, handle);
+    let observedTurn = post.ok
+      ? findPostBoundaryChatGPTUserTurn(post.turns, boundary.messageIds, request.instructionText)
+      : null;
+    for (
+      let attempt = 1;
+      attempt <= CHATGPT_POST_BOUNDARY_READ_ATTEMPTS && post.ok && !observedTurn;
+      attempt++
+    ) {
+      await this.sleep(CHATGPT_POST_BOUNDARY_READ_DELAY_MS);
+      post = await readExactChatGPTConversation(self, target.conversationId, handle);
+      observedTurn = post.ok
+        ? findPostBoundaryChatGPTUserTurn(post.turns, boundary.messageIds, request.instructionText)
+        : null;
+    }
+
+    const transportFacts: Record<string, unknown> = {
+      conversationId: target.conversationId,
+      requestedUrl: target.exactUrl,
+      observedUrl: opened.observedUrl ?? null,
+      handle: `WIN:${handle.windowId}|TAB:${handle.tabId}`,
+      reusedExistingTab: opened.reused === true,
+      boundarySource: boundary.provenance,
+      preDispatchBoundaryCapturedAt: boundary.capturedAt,
+      preDispatchBoundaryMessageCount: boundary.messageCount,
+      preDispatchBoundaryMessageIds: boundary.messageIds,
+      // The caller's own recorded boundary, for audit only. It never decides the verdict:
+      // the boundary that decides is the one read from the exact handle used to send.
+      callerBoundaryMessageCount: request.preDispatchWatermark?.messageCount ?? null,
+      submitMechanism: submitted?.submitMechanism ?? null,
+      editorSelectorUsed: submitted?.editorSelectorUsed ?? null,
+      submitDiagnostics: submitted?.diagnostics ?? [],
+      postBoundaryReadReadable: post.ok === true,
+    };
+
+    if (observedTurn) {
+      const postAssistantTurn =
+        post.ok
+          ? post.turns.find(
+              (t) =>
+                t.role === 'assistant' &&
+                !boundary.messageIds.includes(`assistant:${t.ref}`),
+            ) ?? null
+          : null;
+      return result(
+        'delivered',
+        `The exact bound ChatGPT conversation ${target.conversationId} durably holds this ` +
+          `instruction as a NEW user turn (${observedTurn.ref}, ordinal ${observedTurn.ordinal}) ` +
+          `whose identity was absent from the pre-send boundary.`,
+        {
+          ...transportFacts,
+          stage: 'post_boundary_readback',
+          observedTurnRef: observedTurn.ref,
+          observedTurnOrdinal: observedTurn.ordinal,
+        },
+        {
+          composerSignature: instructionFingerprint(request.instructionText),
+          // Both are OBSERVED. Neither is a literal: the composer flag comes from the submit
+          // result, and response activity only when a post-boundary assistant turn exists.
+          composerCleared: submitted?.composerCleared === true,
+          responseActivityObserved: postAssistantTurn !== null,
+        },
+      );
+    }
+
+    if (!post.ok) {
+      // Could not read the conversation back, so neither delivery nor non-delivery is
+      // establishable. `ambiguous`, never `failed`: calling this `failed` would authorise a
+      // blind resend into a session RelayX cannot currently see.
+      return result(
+        'ambiguous',
+        `The instruction was submitted into the exact bound ChatGPT conversation ` +
+          `${target.conversationId}, but that conversation could not be read back afterwards ` +
+          `(${post.reason}), so delivery is neither confirmed nor refuted. Automated resend blocked.`,
+        {
+          ...transportFacts,
+          stage: 'post_boundary_readback',
+          postBoundaryReadFailure: post.reason,
+        },
+        {
+          unverifiedAction:
+            'Send submitted into the exact conversation; post-send confirmation unavailable.',
+        },
+      );
+    }
+
+    // The conversation WAS read and holds no new user turn carrying this instruction after the
+    // boundary. That is an evidence-backed negative, not an unknown.
+    return result(
+      'failed',
+      `The exact bound ChatGPT conversation ${target.conversationId} was read back successfully ` +
+        `and contains no new user turn carrying this instruction after the pre-send boundary ` +
+        `(${boundary.messageCount} pre-existing turn(s) were in that boundary). The instruction ` +
+        `was not inserted.`,
+      {
+        ...transportFacts,
+        stage: 'post_boundary_readback',
+      },
+    );
   }
 
   /**
@@ -4102,10 +4253,70 @@ export class OpenCodeProvider extends BaseMacOSProvider {
    */
   private fixedServerRef: OpenCodeFixedServerClient | null = null;
 
+  /**
+   * Connection overrides for the managed fixed-endpoint client.
+   *
+   * ## Why this exists
+   *
+   * The fixed client used to be constructed with NOTHING but a session directory, so every
+   * exact-session read fell back to the compiled-in default endpoint (`127.0.0.1:4096`) with
+   * no credentials. On this machine the real OpenCode service is registered at a different
+   * port with a password, so the probe produced the honest but useless
+   *
+   *     "server reachable but rejected our credentials (401)"
+   *
+   * and — because `readExactSessionMessages()` returns that as an unreadable transcript —
+   * `captureTransportBoundary()` produced a NULL watermark. A null watermark means no
+   * pre-dispatch boundary is persisted on the Delivery, which is exactly why later
+   * reconciliation could only report "no pre-dispatch message-id boundary was recorded ...
+   * 'after the boundary' cannot be decided by message id".
+   *
+   * The fix is to talk to the SAME service the visible OpenCode app serves: resolve the
+   * registered shared service (`~/.local/state/opencode/service.json`) and use its host,
+   * port and password. Reading a different session store than the one the user can see is
+   * what this whole layer exists to prevent, so the endpoint is resolved rather than guessed.
+   *
+   * An explicitly pinned `RELAYX_OPENCODE_PORT` / `RELAYX_OPENCODE_SERVER_PASSWORD` still
+   * wins, so an operator override and the existing test seams keep working unchanged.
+   */
+  private async fixedServerConnectionOverrides(): Promise<{
+    host?: string;
+    port?: number;
+    password?: string;
+  }> {
+    let host = process.env.RELAYX_OPENCODE_HOST ?? undefined;
+    const pinnedPort = process.env.RELAYX_OPENCODE_PORT;
+    let port = pinnedPort ? Number(pinnedPort) : undefined;
+    let password =
+      process.env.RELAYX_OPENCODE_SERVER_PASSWORD ?? process.env.OPENCODE_SERVER_PASSWORD ?? undefined;
+
+    const needsRegistration = port == null || !host || !password;
+    if (needsRegistration) {
+      const discovery = await discoverOpenCodeService();
+      if (discovery.status === 'available') {
+        try {
+          const url = new URL(discovery.registration.url);
+          if (!host) host = url.hostname;
+          if (port == null) port = Number(url.port) || undefined;
+          if (!password) password = discovery.registration.password;
+        } catch {
+          // Malformed URL in the registration: keep env/defaults and let the probe report it.
+        }
+      }
+    }
+
+    return {
+      ...(host ? { host } : {}),
+      ...(port ? { port } : {}),
+      ...(password ? { password } : {}),
+    };
+  }
+
   private async fixedServerClient(): Promise<OpenCodeFixedServerClient> {
     if (this.fixedServerRef) return this.fixedServerRef;
     const client = new OpenCodeFixedServerClient({
       sessionDirectory: process.cwd(),
+      ...(await this.fixedServerConnectionOverrides()),
     });
     const readiness = await client.ensureReady();
     if (!readiness.ready) {
@@ -6228,6 +6439,16 @@ export function canonicalizeChatGPTMessageText(raw: string): string {
  *   real, older turn can be scrolled out of view and must still appear in the transcript.
  *   Geometry is used only to tell an entirely detached MIRROR ROOT from the live one.
  */
+const CHATGPT_TURN_TEXT_CAP = 2000;
+
+/**
+ * The exact-conversation extraction expression, exported so the selector/role/createdAt
+ * contract is directly testable against a DOM stub and cannot regress silently.
+ *
+ * `CHATGPT_TURN_TEXT_CAP` caps one turn's text. That cap is also what tells the post-boundary
+ * matcher whether a short observed text is the turn's REAL text or OUR truncated one, so the
+ * two must always be changed together.
+ */
 export function composeChatGPTConversationReadScript(): string {
   return (
     `(() => {` +
@@ -6349,7 +6570,7 @@ export function composeChatGPTConversationReadScript(): string {
     `     turns.push({` +
     `       ordinal: turns.length,` +
     `       role: role,` +
-    `       text: text.slice(0, 2000),` +
+    `       text: text.slice(0, ${CHATGPT_TURN_TEXT_CAP}),` +
     `       createdAt: null,` +
         `       turnKey: tk ? tk.getAttribute(TURNKEY_SEL.slice(1, -1)) : null,` +
     `       occurrence: 0,` +
@@ -6371,10 +6592,100 @@ export function composeChatGPTConversationReadScript(): string {
   );
 }
 
+/**
+ * Bounded settle window for the post-send readback. ChatGPT renders the submitted turn
+ * asynchronously, so an immediate read can legitimately observe the pre-send state. Finite, so a
+ * genuinely failed send still terminates with a verdict instead of waiting forever.
+ */
+const CHATGPT_POST_BOUNDARY_READ_ATTEMPTS = 5;
+const CHATGPT_POST_BOUNDARY_READ_DELAY_MS = 500;
+
+/**
+ * The ONE pre-dispatch boundary builder for a ChatGPT exact conversation.
+ *
+ * Shared by `captureTransportBoundary` (the engine's Phase-1 read) and by the delivery path's
+ * own pre-send capture, so the boundary a delivery is confirmed against can never be shaped
+ * differently from the boundary the engine recorded.
+ *
+ * Ids are `${role}:${ref}` and `ref` is content-addressed, so the set does NOT churn when
+ * ChatGPT virtualises the transcript and ordinals shift. Ordinal is deliberately NOT in the id.
+ */
+function buildChatGPTTransportBoundary(
+  externalSessionId: string,
+  turns: readonly ChatGPTObservedTurn[],
+): ExactSessionWatermark {
+  const messageIds = turns.map((t) => `${t.role}:${t.ref}`);
+
+  // Evidence only; post-boundary detection uses the messageIds set (I-7). Taken from the
+  // provider-exposed <time datetime> of the newest rendered turn, or null when the DOM exposes
+  // none. Observation time is NEVER substituted (I-7).
+  const observedTimes = turns
+    .map((t) => t.createdAt)
+    .filter((v): v is number => typeof v === 'number' && isFinite(v));
+
+  return {
+    sessionId: externalSessionId,
+    messageCount: turns.length,
+    messageIds,
+    latestCreatedAt: observedTimes.length ? Math.max(...observedTimes) : null,
+    provenance: 'captured_pre_dispatch',
+    capturedAt: Date.now(),
+  };
+}
+
+/**
+ * The ONE definition of "this post-boundary user turn is the instruction just sent".
+ *
+ * Two independent conditions, both required:
+ *
+ *   1. IDENTITY — the turn's `${role}:${ref}` is absent from the boundary id set. A byte-identical
+ *      turn that already existed before the send therefore cannot confirm it. This is what makes
+ *      re-delivering the same instruction text safe to reason about.
+ *   2. TEXT — the canonical text equals the canonical instruction, or the observed text is the
+ *      extraction cap long and is a strict prefix of it. The cap condition is what makes the
+ *      prefix branch safe: the only truncation in this read is OURS (`CHATGPT_TURN_TEXT_CAP`), so
+ *      a short observed text is the turn's real, complete text and must match exactly. Without it
+ *      any short prefix ("Plan") would confirm an unrelated instruction, which is precisely the
+ *      kind of false delivery this path exists to prevent.
+ *
+ * Exported so the rule is directly testable and cannot drift from the delivery path.
+ */
+export function findPostBoundaryChatGPTUserTurn(
+  turns: readonly ChatGPTObservedTurn[],
+  boundaryMessageIds: readonly string[],
+  expectedText: string,
+): ChatGPTObservedTurn | null {
+  const expected = canonicalizeChatGPTMessageText(expectedText);
+  if (!expected) return null;
+  const prior = new Set(boundaryMessageIds);
+
+  for (const turn of turns) {
+    if (turn.role !== 'user') continue;
+    if (prior.has(`${turn.role}:${turn.ref}`)) continue;
+    const observed = canonicalizeChatGPTMessageText(turn.text);
+    if (!observed) continue;
+    if (observed === expected) return turn;
+    if (
+      observed.length >= CHATGPT_TURN_TEXT_CAP &&
+      expected.length > observed.length &&
+      expected.startsWith(observed)
+    ) {
+      return turn;
+    }
+  }
+  return null;
+}
+
 /** Bound, single-shot DOM read of the EXACT conversation. Never partial. */
 async function readExactChatGPTConversation(
   self: any,
   externalSessionId: string,
+  /**
+   * Read through an ALREADY-VERIFIED handle for this conversation instead of opening a new
+   * dedicated window. Passing it keeps the read on the exact tab the caller resolved — and on
+   * the delivery path, the exact tab the instruction was typed into.
+   */
+  existingHandle?: BrowserHandle | null,
 ): Promise<
   | { ok: true; readable: true; url: string; handle: BrowserHandle; virtualized: boolean; turns: ChatGPTObservedTurn[] }
   | { ok: false; readable: false; reason: string }
@@ -6383,7 +6694,7 @@ async function readExactChatGPTConversation(
   if (!ext) return { ok: false, readable: false, reason: 'No external session id (I-11).' };
 
   const url = /^https?:\/\//i.test(ext) ? ext : `https://chatgpt.com/c/${ext}`;
-  const handle: BrowserHandle | null = self.openDedicatedWindowAndCaptureId(url);
+  const handle: BrowserHandle | null = existingHandle ?? self.openDedicatedWindowAndCaptureId(url);
   if (!handle) {
     return {
       ok: false,
@@ -6552,29 +6863,8 @@ Object.assign(ChatGPTProvider.prototype, {
     // A readable conversation with ZERO turns is a genuine empty state (what a freshly
     // created planner conversation looks like), not a failure, and yields a usable
     // (empty) boundary rather than a false alarm.
-    //
-    // Ids are `${role}:${ref}` and `ref` is content-addressed, so the set does NOT churn when
-    // ChatGPT virtualises the transcript and ordinals shift. Ordinal is deliberately NOT in
-    // the id for that reason.
-    const messageIds = read.turns.map((t) => `${t.role}:${t.ref}`);
-
-    // Evidence only; post-boundary detection uses the messageIds set (I-7). Taken from the
-    // provider-exposed <time datetime> of the newest rendered turn, or null when the DOM
-    // exposes none. Observation time is NEVER substituted (I-7).
-    const observedTimes = read.turns
-      .map((t) => t.createdAt)
-      .filter((v): v is number => typeof v === 'number' && isFinite(v));
-    const latestCreatedAt = observedTimes.length ? Math.max(...observedTimes) : null;
-
     return {
-      watermark: {
-        sessionId: ext,
-        messageCount: read.turns.length,
-        messageIds,
-        latestCreatedAt,
-        provenance: 'captured_pre_dispatch',
-        capturedAt: Date.now(),
-      },
+      watermark: buildChatGPTTransportBoundary(ext, read.turns),
       failure: null,
     };
   },
@@ -6718,6 +7008,17 @@ export interface ExactSessionOpenResult {
   conversationId: string;
   /** URL read back from the verified handle. Present only on success. */
   observedUrl?: string;
+  /**
+   * True when the verified tab is on the SAME route that was requested.
+   *
+   * `false` is a real, observable outcome, not a failure: ChatGPT serves a project-scoped
+   * conversation on the canonical `/c/<id>` route too, and it does so on its own. Reporting it
+   * keeps "the project-scoped URL is open" from being claimed when the canonical route is what is
+   * actually showing. Identity is unaffected — see `canonicalizedByProvider`.
+   */
+  routePreserved?: boolean;
+  /** True when the provider served the conversation on the canonical route instead of the requested one. */
+  canonicalizedByProvider?: boolean;
   /** Concrete failure reason. Present only on failure. */
   reason?: string;
   /** Ordered diagnostics: which stage actually ran/failed. */
@@ -6735,7 +7036,101 @@ export interface ExactSessionOpenResult {
  */
 function urlCarriesConversationId(url: string | null | undefined, conversationId: string): boolean {
   if (!url || !conversationId) return false;
-  return url.includes(conversationId);
+  const parsed = parseChatGPTConversationUrl(url);
+  return parsed !== null && parsed.conversationId === conversationId;
+}
+
+/**
+ * Reads the conversation id out of an OBSERVED tab URL, accepting both routes ChatGPT serves
+ * the SAME conversation on:
+ *
+ *   /g/<project>/c/<id>   (project-scoped; the route RelayX requests)
+ *   /c/<id>               (canonical; what Chrome lands on after navigation)
+ *
+ * `parseChatGPTConversationUrl` deliberately requires the project-scoped shape, so on its own it
+ * cannot answer "is this canonical tab the same conversation?" — it returns null for `/c/<id>`
+ * and the opener then misreports a correct tab as "a different conversation".
+ *
+ * PROVEN LIVE: ChatGPT canonicalizes `/g/<project>/c/<id>` to `/c/<id>`. Five live Chrome tabs
+ * held the bound conversation ONLY as bare `/c/<id>`, so the project segment is not preserved by
+ * the provider and cannot be preserved by anything RelayX does. Requiring it is therefore not a
+ * stricter check; it is an unsatisfiable one, and it turned a real, correct tab into a failure.
+ *
+ * Both routes name the conversation by the SAME provider-owned id, so identity is decided on
+ * that id alone. Which route the tab is actually on is reported, never assumed.
+ */
+function readObservedChatGPTConversation(url: string | null | undefined): {
+  conversationId: string;
+  projectId: string | null;
+  route: 'project_scoped' | 'canonical';
+} | null {
+  if (!url || typeof url !== 'string') return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (!(parsed.hostname === 'chatgpt.com' || parsed.hostname.endsWith('.chatgpt.com'))) return null;
+
+  const projectScoped = /^\/g\/(g-p-[^/]+)\/c\/([^/?#]+)$/.exec(parsed.pathname);
+  if (projectScoped?.[2]) {
+    return {
+      conversationId: projectScoped[2],
+      projectId: projectScoped[1],
+      route: 'project_scoped',
+    };
+  }
+  const canonical = /^\/c\/([^/?#]+)$/.exec(parsed.pathname);
+  if (canonical?.[1]) {
+    return { conversationId: canonical[1], projectId: null, route: 'canonical' };
+  }
+  return null;
+}
+
+/**
+ * The verification verdict for one OBSERVED tab URL against the request.
+ *
+ * `ok` is decided ONLY by exact conversation-id equality on chatgpt.com — that is what proves
+ * both routes resolve to the same active conversation. `routePreserved` and `canonicalizedByProvider`
+ * are reported so a caller can see WHAT happened instead of inferring it from a bare success.
+ *
+ * A different conversation id, a non-chatgpt.com host, or an unreadable URL all fail closed.
+ */
+function verifyExactConversationUrl(
+  observedUrl: string | null | undefined,
+  requestedUrl: string,
+  conversationId: string,
+): {
+  ok: boolean;
+  routePreserved: boolean | null;
+  canonicalizedByProvider: boolean | null;
+  observedProjectId: string | null;
+  observedRoute: string | null;
+} {
+  const none = {
+    ok: false,
+    routePreserved: null,
+    canonicalizedByProvider: null,
+    observedProjectId: null,
+    observedRoute: null,
+  } as const;
+  if (!observedUrl || !conversationId) return none;
+
+  const observed = readObservedChatGPTConversation(observedUrl);
+  if (!observed || observed.conversationId !== conversationId) return none;
+
+  const requestedParsed = readObservedChatGPTConversation(requestedUrl);
+  const requestWasProjectScoped = requestedParsed?.route === 'project_scoped';
+
+  return {
+    ok: true,
+    // Project scope is preserved only when the request was project-scoped AND the tab still is.
+    routePreserved: !requestWasProjectScoped || observed.route === 'project_scoped',
+    canonicalizedByProvider: requestWasProjectScoped && observed.route === 'canonical',
+    observedProjectId: observed.projectId,
+    observedRoute: observed.route,
+  };
 }
 
 async function openChatGPTUrlInChrome(
@@ -6847,15 +7242,25 @@ async function openChatGPTUrlInChrome(
     const observedUrl = parts.slice(3, parts.length - 1).join('::');
     diagnostics.push(`stage:reuse-match handle=WIN:${windowId}|TAB:${tabId} observedUrl=${observedUrl}`);
     // Verification uses the SAME identity rule as the search: the conversation id.
-    if (!urlCarriesConversationId(observedUrl, matchToken)) {
+    const reuseVerify = verifyExactConversationUrl(observedUrl, exactUrl, matchToken);
+    if (!reuseVerify.ok) {
       diagnostics.push('stage:verification-failed (reused tab is a different conversation)');
       return fail(`Reused tab resolved to a different conversation: ${observedUrl}`);
+    }
+    if (reuseVerify.canonicalizedByProvider) {
+      // ChatGPT itself serves this conversation on the canonical route. That is still the SAME
+      // provider-owned conversation (identity is the id), so it is a success — but the route
+      // loss is recorded, because "the project-scoped URL is open" would be a false claim.
+      diagnostics.push(
+        `stage:provider-canonicalized reuse-route=canonical requested=${exactUrl}`,
+      );
     }
     // Read back through the SAME handle used for observation, so the focus result is
     // verified the same way a created tab is. An unverifiable focus is a failure.
     const readBack = self.readHandleUrl({ windowId, tabId });
     diagnostics.push(`stage:reuse-read-back observedUrl=${readBack ?? 'null'}`);
-    if (!readBack || !urlCarriesConversationId(readBack, matchToken)) {
+    const reuseReadVerify = verifyExactConversationUrl(readBack, exactUrl, matchToken);
+    if (!reuseReadVerify.ok) {
       diagnostics.push('stage:verification-failed (reuse read-back mismatch)');
       return {
         success: false,
@@ -6869,8 +7274,22 @@ async function openChatGPTUrlInChrome(
         diagnostics,
       };
     }
+    if (reuseReadVerify.canonicalizedByProvider) {
+      diagnostics.push('stage:provider-canonicalized reuse-read-back-route=canonical');
+    }
     diagnostics.push('stage:verified-reused');
-    return { success: true, reused: true, windowId, tabId, requestedUrl: exactUrl, conversationId, observedUrl: readBack, diagnostics };
+    return {
+      success: true,
+      reused: true,
+      windowId,
+      tabId,
+      requestedUrl: exactUrl,
+      conversationId,
+      observedUrl: readBack,
+      routePreserved: reuseReadVerify.routePreserved === true,
+      canonicalizedByProvider: reuseReadVerify.canonicalizedByProvider === true,
+      diagnostics,
+    };
   }
   diagnostics.push(`stage:no-existing-tab (${raw})`);
 
@@ -6897,7 +7316,8 @@ async function openChatGPTUrlInChrome(
       diagnostics,
     };
   }
-  if (!urlCarriesConversationId(observedUrl, conversationId)) {
+  const newVerify = verifyExactConversationUrl(observedUrl, exactUrl, conversationId);
+  if (!newVerify.ok) {
     diagnostics.push('stage:verification-failed (conversation mismatch)');
     return {
       success: false,
@@ -6912,8 +7332,22 @@ async function openChatGPTUrlInChrome(
       diagnostics,
     };
   }
+  if (newVerify.canonicalizedByProvider) {
+    diagnostics.push('stage:provider-canonicalized created-route=canonical');
+  }
   diagnostics.push('stage:verified-created');
-  return { success: true, reused: false, windowId: handle.windowId, tabId: handle.tabId, requestedUrl: exactUrl, conversationId, observedUrl, diagnostics };
+  return {
+    success: true,
+    reused: false,
+    windowId: handle.windowId,
+    tabId: handle.tabId,
+    requestedUrl: exactUrl,
+    conversationId,
+    observedUrl,
+    routePreserved: newVerify.routePreserved === true,
+    canonicalizedByProvider: newVerify.canonicalizedByProvider === true,
+    diagnostics,
+  };
 }
 
 async function openExactChatGPTSessionInChrome(

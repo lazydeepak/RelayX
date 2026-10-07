@@ -167,6 +167,7 @@ export const SessionDetailModal: React.FC<SessionDetailModalProps> = ({
             title="Runtime Identity"
           >
             <FieldRow field={viewModel.identity.externalSessionId} />
+            <FieldRow field={viewModel.identity.sessionUrl} />
             <FieldRow field={viewModel.identity.workspacePath} />
             <FieldRow field={viewModel.identity.providerReference} />
             <FieldRow

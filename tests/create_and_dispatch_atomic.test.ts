@@ -112,9 +112,12 @@ describe('Create Assignment modal blocks dispatch on an occupied slot', () => {
     assert.match(appSource, /onCreate=\{handleCreateAssignment\}/);
   });
 
-  it('App uses the orchestration command for Create & Dispatch and the PairView create-branch', () => {
+  it('App uses the orchestration command for Create & Dispatch through the modal submit; PairView create-branch opens the modal instead', () => {
     const calls = appSource.match(/relayBridge\.createAndDispatchAssignment\(/g) ?? [];
-    assert.ok(calls.length >= 2, `expected both create-and-dispatch call sites, saw ${calls.length}`);
+    // Only handleCreateAssignment (modal submit) calls the governed pipeline;
+    // handleDispatchPair now opens the modal for eligible pairs with no active assignment.
+    assert.strictEqual(calls.length, 1, `expected single governed call site, saw ${calls.length}`);
+    assert.match(appSource, /setPendingSelectedPairId\(pair\.id\)/, 'PairView branch opens modal with preselection');
   });
 });
 

@@ -60,6 +60,7 @@ export default function App() {
   const [isAddProjectWizardOpen, setIsAddProjectWizardOpen] = useState(false);
   // Pair id the assignment modal should auto-select once the refreshed list contains it.
   const [pendingSelectedPairId, setPendingSelectedPairId] = useState<string | null>(null);
+  const [recoveryStates, setRecoveryStates] = useState<Record<string, { pairId: string; recoveryState: import('../relay/domain/recoveryAuthority').RecoveryState | null }>>({});
 
   useEffect(() => {
     localStorage.setItem('relay_theme', theme);
@@ -150,6 +151,14 @@ export default function App() {
         relayBridge.getAppStatus(),
       ]);
 
+      // Fetch recovery states for all pairs
+      const pairIds = pList.map((p) => p.id);
+      const recoveryStatesMap: Record<string, { pairId: string; recoveryState: import('../relay/domain/recoveryAuthority').RecoveryState | null }> = {};
+      for (const pairId of pairIds) {
+        const { recoveryState } = await relayBridge.getPairRecoveryState(pairId);
+        recoveryStatesMap[pairId] = { pairId, recoveryState };
+      }
+
       setMetrics(dash.metrics);
       setProjects(prjList);
       setPairs(pList);
@@ -158,6 +167,7 @@ export default function App() {
       setEvents(eList);
       setAttentionItems(attList);
       setAppStatus(status);
+      setRecoveryStates(recoveryStatesMap);
     } catch (err) {
       console.error('Failed to load RelayX state from bridge:', err);
     }
@@ -417,36 +427,28 @@ export default function App() {
     const pair = pairs.find((p) => p.id === pairId);
     if (!pair) return;
     try {
-      // Auto-activate pair if it is IDLE before dispatching work
-      if (pair.operationalState !== 'ACTIVE') {
-        notify('Auto-activating pair (verifying sessions)...');
-        await relayBridge.loadAndActivatePair(pairId);
-      }
-
       // If the pair already has an active assignment, retry/continue through its
       // legal lifecycle rather than silently creating a new one.
       if (pair.activeAssignmentId) {
+        // Auto-activate pair if it is IDLE before dispatching work
+        if (pair.operationalState !== 'ACTIVE') {
+          notify('Auto-activating pair (verifying sessions)...');
+          await relayBridge.loadAndActivatePair(pairId);
+        }
         await relayBridge.dispatchAssignment(pair.activeAssignmentId);
         notify('Existing assignment dispatched/retried');
+        await loadData();
       } else {
-        // Atomic create+dispatch — no orphan if a concurrent caller takes the slot.
-        const result = await relayBridge.createAndDispatchAssignment(
-          pair.id,
-          'Next Planner Iteration',
-          'Execute planned subtask and verify observable test results',
-        );
-        if (result.created && !result.dispatchError) {
-          notify('New assignment dispatched to worker runtime');
-        } else if (result.created) {
-          notify(
-            `Assignment created, but dispatch failed: ${formatFriendlyError({ message: result.dispatchError })} ` +
-              'It is saved and can be retried from the Pair.',
-          );
-        } else {
-          notify(`Dispatch error: ${formatFriendlyError({ message: result.error })}`);
+        // No active assignment — open the creation modal with this pair
+        // preselected. Preserve pre-existing activation semantics: an IDLE
+        // Pair must be verified / activated before any dispatch can proceed.
+        if (pair.operationalState !== 'ACTIVE') {
+          notify('Auto-activating pair (verifying sessions)...');
+          await relayBridge.loadAndActivatePair(pairId);
         }
+        setPendingSelectedPairId(pair.id);
+        setIsNewAssignmentOpen(true);
       }
-      await loadData();
     } catch (err: any) {
       notify(`Dispatch error: ${formatFriendlyError(err)}`);
     }

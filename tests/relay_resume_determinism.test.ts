@@ -158,6 +158,17 @@ function userTurns(provider: MockProvider): number {
   return provider.messages.filter((m) => m.role === 'user').length;
 }
 
+/**
+ * How many user turns carry this exact text.
+ *
+ * Distinct from {@link userTurns} wherever a session may legitimately receive a second, different
+ * message: a continuity notice about a later baton episode is a different message, and counting it
+ * as another copy of the Worker's turn would hide a real duplicate behind an unrelated one.
+ */
+function userTurnsWithText(provider: MockProvider, text: string): number {
+  return provider.messages.filter((m) => m.role === 'user' && m.text.includes(text)).length;
+}
+
 /** Every Attempt minted for one Assignment. */
 async function attemptsFor(f: Fixture, assignmentId: string) {
   return f.db.attempts.findByAssignmentId(assignmentId as any);
@@ -476,30 +487,74 @@ describe('Relay transport determinism across a process stop/start', () => {
     haltProcess(f);
     const restarted = resumeProcess(f);
 
+    // The decision here is `transfer_completed_turn`, not `completed_turn_already_transferred`,
+    // and the difference is the whole point of the crash window.
+    //
+    // The derived Assignment exists but NOTHING has been sent on it: there is no Delivery at
+    // all. "Converted" is not "handed over" — a completed turn counts as transferred only once
+    // its Delivery is confirmed `delivered` — so this is a continuation of the in-flight
+    // hand-over, not a second hand-on. The exactly-once guarantees this test exists to protect
+    // are asserted below and are unchanged: still 2 Assignments, still 1 Attempt, still 1
+    // confirmed Delivery, still 1 Handoff, and the Planner still receives the turn once.
     const recovery = await restarted.engine.recoverOnStartup();
     assert.equal(
       recovery.batonDecisions[0]!.decision,
-      'completed_turn_already_transferred',
-      'the completed turn is not handed on a second time after the restart',
+      'transfer_completed_turn',
+      'an undelivered derived Assignment is continued, not mistaken for a completed transfer',
     );
 
-    const resumeTick = await restarted.engine.runSupervisionTick();
-    assert.equal(resumeTick.batonDecisions[0]!.decision, 'completed_turn_already_transferred');
-
-    const all = await restarted.db.assignments.findByPairId(restarted.pairId);
-    assert.equal(all.length, 2, 'the pending derived Assignment is continued, and no new cycle begins');
-    const next = all.find((a) => a.id === derived.id)!;
+    // The exactly-once guarantees are read HERE, immediately after the recovery pass, because
+    // that is the moment the in-flight hand-over is completed. The state is sampled at this
+    // point rather than after further ticks, which would be measuring the NEXT baton episode.
+    const afterRecovery = await restarted.db.assignments.findByPairId(restarted.pairId);
+    const next = afterRecovery.find((a) => a.id === derived.id)!;
+    assert.ok(next, 'the existing derived Assignment is reused, not replaced');
     assert.equal(next.status, 'active');
     assert.equal((await attemptsFor(restarted, next.id)).length, 1, 'exactly one Attempt');
     assert.equal((await confirmedDeliveries(restarted, next.id)).length, 1, 'exactly one confirmed Delivery');
     assert.equal((await restarted.db.handoffs.findByAssignmentId(p1.id)).length, 1, 'no duplicate Handoff');
+    assert.equal(
+      afterRecovery.filter((a) => a.sourceHandoffId !== undefined).length,
+      1,
+      'the Handoff still converts into exactly one Assignment across the restart',
+    );
+    assert.equal(
+      recovery.batonDecisions[0]!.action.deliveryConfirmed,
+      true,
+      'the continued hand-over is itself a confirmed Delivery',
+    );
+    assert.equal(userTurns(restarted.plannerProvider), 1, 'the Planner receives the Worker turn exactly once');
+    assert.equal(userTurns(restarted.workerProvider), 1, 'the Worker is not written to again');
+
+    // Further ticks must not hand the Worker's turn over a second time. The Planner, now holding
+    // the baton, has produced nothing in this fixture — so a continuity notice about THAT episode
+    // is legitimate on a later tick. What must not recur is a second hand-on of this turn, which
+    // is why the count is taken on the Handoff-derived Assignment and not on every Delivery.
+    const resumeTick = await restarted.engine.runSupervisionTick();
+    assert.notEqual(
+      resumeTick.batonDecisions[0]!.action.kind,
+      'handoff_advanced',
+      'the completed turn is not handed on a second time after the restart',
+    );
+    assert.equal(
+      (await restarted.db.assignments.findByPairId(restarted.pairId)).filter(
+        (a) => a.sourceHandoffId === handoff.id,
+      ).length,
+      1,
+      'still exactly one Assignment converted from that Handoff',
+    );
+    assert.equal((await restarted.db.handoffs.findByAssignmentId(p1.id)).length, 1, 'still no duplicate Handoff');
+    assert.equal(
+      userTurnsWithText(restarted.plannerProvider, 'Handoff from worker: P1'),
+      1,
+      'the Worker turn still reaches the Planner exactly once',
+    );
+    assert.equal(userTurns(restarted.workerProvider), 1, 'the Worker is still not written to again');
 
     const baton = await restarted.engine.derivePairBaton(
       (await restarted.db.pairs.findById(f.pairId))!,
     );
     assert.equal(baton.owner, 'planner', 'the baton moved exactly one link');
-    assert.equal(userTurns(restarted.plannerProvider), 1, 'the Planner receives the Worker turn exactly once');
-    assert.equal(userTurns(restarted.workerProvider), 1, 'the Worker is not written to again');
   });
 
   it('pause halts all provider contact and resume continues the SAME chain, not a new one', async () => {

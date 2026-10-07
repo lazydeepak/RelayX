@@ -30,11 +30,14 @@ import { UIPair, UIProject, UIRuntimeSession, ObservableEvidence } from '../type
 import { WorkerModelControl } from './WorkerModelControl.tsx';
 import { resolvePairDispatchEligibility } from './pairDispatchEligibility.ts';
 import { resolvePairRelayControls } from './pairRelayControls.ts';
+import { PlannerFirstRecoveryPanel } from './PlannerFirstRecoveryPanel';
+import { getRecoveryOwner } from '../relay/domain/recoveryAuthority';
 
 interface PairViewProps {
   pairs: UIPair[];
   projects: UIProject[];
   sessions: UIRuntimeSession[];
+  recoveryStates: Record<string, import('../relay/domain/recoveryAuthority').RecoveryState | null>;
   onOpenCreateProject: () => void;
   onOpenEditProject: (project: UIProject) => void;
   onOpenProjectDetail: (project: UIProject) => void;
@@ -58,6 +61,64 @@ interface PairViewProps {
   onStartPair?: (pairId: string) => void;
   onPausePair?: (pairId: string) => void;
   onOpenAttentionRecovery?: () => void;
+}
+
+/**
+ * Shorten a URL for display WITHOUT discarding the part that distinguishes it.
+ *
+ * ## Why the plain CSS `truncate` was wrong here
+ *
+ * A project page and a session page share everything up to the project id:
+ *
+ *     https://chatgpt.com/g/g-p-6ab13…a874b79/project          <- project page
+ *     https://chatgpt.com/g/g-p-6ab13…a874b79-relayx/c/6ac3…   <- session page
+ *
+ * `truncate` cuts the END, so in a fixed-width row both rendered as the same
+ * `https://chatgpt.com/g/g-p-6ab13d0d…` and the operator could not tell which row
+ * was the conversation RelayX actually opens. The entire distinguishing signal is in
+ * the suffix, which is precisely what truncation removed.
+ *
+ * ## What it does instead
+ *
+ * Keeps the origin (so the host stays readable) and the whole tail from `/g/`
+ * onward — the `/c/<conversationId>` or `/project` segment that makes the URL mean
+ * something — and elides only the opaque project-id run in the middle. The full URL
+ * stays in the row's `title` and remains copyable, so nothing is lost; this only
+ * changes what is legible without hovering.
+ */
+export function elideUrlForDisplay(rawUrl: string, maxChars = 56): string {
+  const url = (rawUrl ?? '').trim();
+  if (!url) return '';
+  if (url.length <= maxChars) return url;
+
+  const schemeEnd = url.indexOf('://');
+  if (schemeEnd < 0) return `…${url.slice(-(maxChars - 1))}`;
+
+  // The scheme is noise here: every row is a web address, and dropping it buys the
+  // characters the identity segment actually needs.
+  const originEnd = url.indexOf('/', schemeEnd + 3);
+  const origin = (originEnd < 0 ? url : url.slice(schemeEnd + 3, originEnd)).replace(/^www\./, '');
+
+  // `/c/<conversationId>` is the identity the relay addresses, so it is anchored
+  // first and kept whole. Anything else keeps its final path segment, which is what
+  // distinguishes a project page (`/project`) from any other route on the same host.
+  const convIdx = url.indexOf('/c/');
+  if (convIdx >= 0) {
+    const conversationId = url.slice(convIdx + 3);
+    const roomForId = Math.max(8, maxChars - origin.length - 5);
+    const id =
+      conversationId.length <= roomForId
+        ? conversationId
+        : `${conversationId.slice(0, Math.ceil((roomForId - 1) / 2))}…${conversationId.slice(-Math.floor((roomForId - 1) / 2))}`;
+    return `${origin}/…/c/${id}`;
+  }
+
+  const withoutQuery = url.split(/[?#]/)[0];
+  const lastSegment = withoutQuery.slice(withoutQuery.lastIndexOf('/') + 1) || withoutQuery;
+  const roomForSegment = Math.max(6, maxChars - origin.length - 2);
+  return `${origin}/…/${
+    lastSegment.length <= roomForSegment ? lastSegment : `…${lastSegment.slice(-(roomForSegment - 1))}`
+  }`;
 }
 
 export function resolvePlannerSessionUrl(
@@ -103,6 +164,7 @@ export const PairView: React.FC<PairViewProps> = ({
   pairs,
   projects,
   sessions,
+  recoveryStates,
   onOpenCreateProject,
   onOpenEditProject,
   onOpenProjectDetail,
@@ -130,10 +192,6 @@ export const PairView: React.FC<PairViewProps> = ({
   const [selectedProjectId, setSelectedProjectId] = useState<string>('all');
   const [showArchived, setShowArchived] = useState<boolean>(false);
   const [expandedPairs, setExpandedPairs] = useState<Record<string, boolean>>({});
-
-  const togglePairExpand = (pairId: string) => {
-    setExpandedPairs((prev) => ({ ...prev, [pairId]: !prev[pairId] }));
-  };
 
   // Filter projects based on archived flag
   const visibleProjects = projects.filter((p) => (showArchived ? true : p.status !== 'archived'));
@@ -335,6 +393,8 @@ export const PairView: React.FC<PairViewProps> = ({
         <div className="space-y-4">
           {filteredPairs.map((pair) => {
             const isExpanded = Boolean(expandedPairs[pair.id]);
+            const recoveryState = recoveryStates[pair.id];
+            const recoveryPhase = recoveryState?.phase ?? null;
             const plannerSession = sessions.find((s) => s.id === pair.plannerSessionId);
             const workerSession = sessions.find((s) => s.id === pair.workerSessionId);
             const pairProject = projects.find((p) => p.id === pair.projectId);
@@ -552,16 +612,11 @@ export const PairView: React.FC<PairViewProps> = ({
                                 <button
                                   type="button"
                                   onClick={() => {
-                                    // Exact-CONVERSATION Open. This MUST NOT be an <a target="_blank">:
-                                    // main.ts intercepts window.open with shell.openExternal(),
-                                    // which hands the URL to the OS instead of RelayX's own
-                                    // opener — observed result was zero Chrome tabs for the exact
-                                    // conversation. openRuntimeSession() reads runtime.sessionUrl
-                                    // verbatim (RelayApiService.openRuntimeSession).
-                                    onOpenPlannerSession(pair.plannerSessionId!);
+                                    if (plannerUrl) window.open(plannerUrl, '_blank', 'noopener,noreferrer');
                                   }}
-                                  className="px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-semibold flex items-center gap-1 transition-colors"
-                                  title={`Open the exact attached ChatGPT conversation in your browser: ${plannerUrl}`}
+                                  disabled={!plannerUrl}
+                                  className="px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-[10px] font-semibold flex items-center gap-1 transition-colors"
+                                  title={`Open the exact attached ChatGPT conversation in your browser: ${plannerUrl || 'none'}`}
                                 >
                                   <ExternalLink className="w-3 h-3" />
                                   <span>Open</span>
@@ -618,7 +673,7 @@ export const PairView: React.FC<PairViewProps> = ({
                               className="font-mono text-[10px] text-blue-300 truncate max-w-[200px]"
                               title={`ChatGPT project URL: ${plannerProjectUrl}`}
                             >
-                              {plannerProjectUrl}
+                              {elideUrlForDisplay(plannerProjectUrl)}
                             </span>
                           ) : (
                             <span className="text-[10px] text-amber-400/80 italic">No project URL</span>
@@ -636,7 +691,7 @@ export const PairView: React.FC<PairViewProps> = ({
                               className="font-mono text-[10px] text-purple-300 truncate max-w-[200px]"
                               title={`Exact conversation URL: ${plannerUrl}`}
                             >
-                              {plannerUrl}
+                              {elideUrlForDisplay(plannerUrl)}
                             </span>
                           ) : plannerSession?.externalSessionId ? (
                             <span className="font-mono text-[10px] text-purple-300 truncate max-w-[180px]" title={plannerSession.externalSessionId}>
@@ -842,6 +897,43 @@ export const PairView: React.FC<PairViewProps> = ({
                     {!dispatchEligibility.eligible && dispatchEligibility.reason && (
                       <p className="w-full text-[11px] text-amber-300">{dispatchEligibility.reason}</p>
                     )}
+                  </div>
+                )}
+
+                {/* Planner-First Recovery Panel — embedded directly, state-driven */}
+                {recoveryState && (
+                  <div className="pt-2">
+                    <PlannerFirstRecoveryPanel
+                      mode={recoveryState.phase === 'planner_intervention' ? 'planner_intervention' : 'recovery_required'}
+                      failureReason={
+                        recoveryState.evidence?.reason || 'Worker → Planner delivery failed / reconciliation_probe'
+                      }
+                      lastPlannerMessage={
+                        recoveryState.evidence?.reason ? 
+                          `Planner instruction for ${pair.name}` : 
+                          `Instruction / context for pair: ${pair.name}`
+                      }
+                      lastWorkerMessage={
+                        recoveryState.phase === 'required' && recoveryState.evidence?.condition === 'delivery_failed'
+                          ? 'Worker execution did not complete / deliverable missing'
+                          : undefined
+                      }
+                      automationPaused={true}
+                      onPauseAndReturnToPlanner={() => {
+                        // R1/R4: establish planner as recovery authority; do not dispatch to Worker
+                        if (onPausePair) {
+                          onPausePair(pair.id);
+                        }
+                        // Preserve failure evidence, open planner intervention
+                        // Recovery state is now authoritative from engine; UI reflects engine state
+                      }}
+                      onSendToPlanner={(input) => {
+                        // R7: recovery enters through planner; only planner produces next instruction
+                        // Preserve evidence; do NOT resume automation from worker side.
+                        // The planner's new instruction will become the next Planner → Worker transition.
+                        // Recovery state is now authoritative from engine
+                      }}
+                    />
                   </div>
                 )}
               </div>
