@@ -20,6 +20,9 @@ export function registerRelayIpcHandlers(service: RelayApiService): void {
 
   ipcMain.handle(RELAY_IPC_CHANNELS.LIST_PAIRS, () => service.listPairs());
   ipcMain.handle(RELAY_IPC_CHANNELS.GET_PAIR, (_event, id) => service.getPair(id));
+  ipcMain.handle(RELAY_IPC_CHANNELS.GET_PAIR_RECOVERY_STATE, (_event, pairId) =>
+    service.getPairRecoveryState(pairId),
+  );
   ipcMain.handle(
     RELAY_IPC_CHANNELS.CREATE_PAIR,
     (_event, projId, name, plannerId, workerId, plannerConversationUrl) =>

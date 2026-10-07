@@ -2537,7 +2537,13 @@ export class RelayEngine {
    */
   private async getCurrentRecoveryState(pairId: PairId): Promise<RecoveryState | null> {
     const assignments = await this.repos.assignments.findByPairId(pairId);
-    const recoveryAssignments = assignments.filter(a => a.sourceRecoveryDeliveryId !== null);
+    // A recovery episode is keyed to the recovery NOTICE delivery via
+    // sourceRecoveryDeliveryId. Only a non-undefined value marks a genuine
+    // recovery Assignment — handoff-derived assignments use sourceHandoffId and
+    // ordinary work is unflagged.
+    const recoveryAssignments = assignments.filter(a =>
+      a.sourceRecoveryDeliveryId !== undefined && a.sourceRecoveryDeliveryId !== null,
+    );
 
     if (recoveryAssignments.length === 0) {
       return null;
@@ -6772,6 +6778,7 @@ private isRuntimeSuspensionItemFor(
     const batonAssignment = baton.assignment!;
 
     const alreadyTransferred = await this.hasCompletedTurnBeenTransferred(pair, baton);
+
     if (alreadyTransferred.transferred) {
       trail.push('completed turn already converted into an opposite-side Assignment');
       return report(
@@ -6976,10 +6983,27 @@ private isRuntimeSuspensionItemFor(
     const handoffs = await this.repos.handoffs.findByAssignmentId(batonAssignment.id);
     if (handoffs.length > 0) {
       const handoffIds = new Set(handoffs.map((h) => h.id));
+      // The transferred check is scoped to the handoff-derived assignment, not to
+      // whatever the current baton points at. The derived Assignment is the durable
+      // marker of the in-flight hand-over.
       const derived = (await this.repos.assignments.findByPairId(pair.id)).find(
         (a) => a.sourceHandoffId !== undefined && handoffIds.has(a.sourceHandoffId),
       );
-      if (derived) return { transferred: true, viaAssignmentId: derived.id };
+      if (derived) {
+        // "Converted" is not "handed over": the transfer is complete only when the
+        // derived Assignment has a confirmed Delivery. The derived Assignment may
+        // exist with no Delivery yet (crash between conversion and dispatch) — in
+        // that window the hand-over is in-flight and must be continued, not skipped.
+        if (derived.activeDeliveryId) {
+          const delivery = await this.repos.deliveries.findById(derived.activeDeliveryId);
+          if (delivery && delivery.status === 'delivered') {
+            return { transferred: true, viaAssignmentId: derived.id };
+          }
+        }
+        // Derived exists but undelivered (or no Delivery recorded) -> in-flight
+        // hand-over: not yet transferred.
+        return { transferred: false, viaAssignmentId: null };
+      }
     }
     if (RelayEngine.TERMINAL_ASSIGNMENT_STATES.has(batonAssignment.status)) {
       return { transferred: true, viaAssignmentId: null };

@@ -475,6 +475,18 @@ export class RelayApiService implements IRelayApi {
   }
 
   /**
+   * Authoritative recovery state for a pair, computed directly from the engine's
+   * durable evidence. No local phase-mutating function is involved.
+   */
+  public async getPairRecoveryState(pairId: string): Promise<{
+    pairId: string;
+    recoveryState: import('../domain/recoveryAuthority').RecoveryState | null;
+  }> {
+    const recovery = await this.engine.getCurrentRecoveryState(pairId as PairId);
+    return { pairId, recoveryState: recovery };
+  }
+
+  /**
    * Record verified adoption/setup evidence for (runtime, project), replacing
    * any existing row for that pair. At most one association may exist per
    * runtime+project, so confirming a conversation on a runtime that already has

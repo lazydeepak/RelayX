@@ -1,11 +1,13 @@
 import React, { useState } from 'react';
 import { AlertTriangle, Pause, Send, ShieldAlert, ShieldCheck, MessageSquare, ArrowRight } from 'lucide-react';
 
+import type { RecoveryState } from '../relay/domain/recoveryAuthority';
+
 export interface PlannerFirstRecoveryPanelProps {
-  /** Whether the initial recovery-required block or the planner-intervention block is shown. */
-  mode: 'recovery_required' | 'planner_intervention';
+  /** The engine-driven recovery phase; read-only display only. */
+  phase: RecoveryState['phase'];
   /** Failure reason visible to planner. */
-  failureReason: string;
+  failureReason?: string;
   /** Last planner message (visible for context). */
   lastPlannerMessage?: string;
   /** Last worker message (visible as evidence). */
@@ -27,7 +29,7 @@ export interface PlannerFirstRecoveryPanelProps {
  * Recovery always enters through Planner; never directly to Worker.
  */
 export const PlannerFirstRecoveryPanel: React.FC<PlannerFirstRecoveryPanelProps> = ({
-  mode,
+  phase,
   failureReason,
   lastPlannerMessage,
   lastWorkerMessage,
@@ -35,6 +37,8 @@ export const PlannerFirstRecoveryPanel: React.FC<PlannerFirstRecoveryPanelProps>
   onPauseAndReturnToPlanner,
   onSendToPlanner,
 }) => {
+  // No local phase mutation here: this is a read-only projection of the engine's
+  // RecoveryState (R2/R3 — normal baton and recovery authority are separate).
   const [goal, setGoal] = useState('');
   const [method, setMethod] = useState('');
   const [direction, setDirection] = useState('');
@@ -44,8 +48,94 @@ export const PlannerFirstRecoveryPanel: React.FC<PlannerFirstRecoveryPanelProps>
 
   return (
     <div className="space-y-4">
+      {/* ─── CONTINUATION_AUTHORIZED — relay authorized continuation in flight ─── */}
+      {phase === 'continuation_authorized' && (
+        <section
+          role="status"
+          aria-label="continuation authorized"
+          className="rounded-xl border border-amber-700/50 bg-amber-950/30 text-amber-100 p-6 shadow-lg"
+        >
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 shrink-0">
+              <ArrowRight className="w-6 h-6 text-amber-400" />
+            </div>
+            <div className="space-y-3 w-full">
+              <h2 className="text-lg font-bold tracking-tight flex items-center gap-2">
+                <span className="text-amber-300">CONTINUATION AUTHORIZED</span>
+                <span className="text-sm font-normal text-amber-200"> Planner → Worker</span>
+              </h2>
+              <p className="text-amber-200/90 leading-relaxed">
+                A concrete Planner decision was observed and the relay engine has authorized the
+                Planner → Worker continuation. The continuation delivery is confirmed dispatched;
+                no further manual intervention is required.
+              </p>
+              <div className="rounded-lg bg-slate-900/60 border border-slate-700/50 p-3 text-xs font-mono text-slate-300 space-y-1">
+                <div>
+                  <span className="text-slate-500">Recovery owner (fixed):</span>{' '}
+                  <span className="font-bold text-amber-300">{recoveryOwner}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500">Selection permitted:</span>{' '}
+                  <span className="font-bold text-red-400">NONE — fixed to PLANNER</span>
+                </div>
+                <div>
+                  <span className="text-slate-500">Next permitted automated transition:</span>{' '}
+                  <span className="font-bold text-emerald-300">Planner → Worker</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* ─── PLANNER_DECIDED — planner decision observed, awaiting continuation ─── */}
+      {phase === 'planner_decided' && (
+        <section
+          role="status"
+          aria-label="planner decision observed"
+          className="rounded-xl border border-amber-700/50 bg-slate-900/80 text-slate-100 p-6 shadow-lg"
+        >
+          <div className="space-y-4">
+            <h2 className="text-xl font-bold tracking-tight flex items-center gap-2 text-amber-200">
+              <ShieldCheck className="w-6 h-6 text-amber-400" />
+              PLANNER DECISION OBSERVED
+            </h2>
+            <p className="text-amber-200/90 leading-relaxed">
+              A concrete Planner decision for this recovery episode has been observed. The relay
+              engine validates the Planner → Worker continuation against durable evidence before
+              permitting the continuation delivery.
+            </p>
+            {lastPlannerMessage && (
+              <div className="rounded-lg border border-slate-700 bg-slate-950/60 p-4 space-y-2">
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-blue-300">
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  LAST PLANNER MESSAGE
+                </div>
+                <div className="text-sm text-slate-300 leading-relaxed whitespace-pre-wrap">
+                  {lastPlannerMessage}
+                </div>
+              </div>
+            )}
+            <div className="rounded-lg bg-slate-900/60 border border-slate-700/50 p-3 text-xs font-mono text-slate-300 space-y-1">
+              <div>
+                <span className="text-slate-500">Recovery owner (fixed):</span>{' '}
+                <span className="font-bold text-amber-300">{recoveryOwner}</span>
+              </div>
+              <div>
+                <span className="text-slate-500">Selection permitted:</span>{' '}
+                <span className="font-bold text-red-400">NONE — fixed to PLANNER</span>
+              </div>
+              <div>
+                <span className="text-slate-500">Next permitted automated transition:</span>{' '}
+                <span className="font-bold text-emerald-300">Planner → Worker</span>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
       {/* ─── RECOVERY REQUIRED (initial state) ─── */}
-      {mode === 'recovery_required' && (
+      {phase === 'required' && (
         <section
           aria-label="Recovery required"
           className="rounded-xl border border-amber-700/50 bg-amber-950/30 text-amber-100 p-6 shadow-lg"
@@ -103,8 +193,9 @@ export const PlannerFirstRecoveryPanel: React.FC<PlannerFirstRecoveryPanelProps>
       )}
 
       {/* ─── PLANNER INTERVENTION (after pause) ─── */}
-      {mode === 'planner_intervention' && (
+      {phase === 'planner_intervention' && (
         <section
+          role="status"
           aria-label="Planner intervention"
           className="rounded-xl border border-amber-700/50 bg-slate-900/80 text-slate-100 p-6 shadow-lg"
         >

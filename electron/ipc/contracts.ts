@@ -11,6 +11,7 @@ export const RELAY_IPC_CHANNELS = {
   DELETE_PROJECT: 'relay:delete-project',
   LIST_PAIRS: 'relay:list-pairs',
   GET_PAIR: 'relay:get-pair',
+  GET_PAIR_RECOVERY_STATE: 'relay:get-pair-recovery-state',
   CREATE_PAIR: 'relay:create-pair',
   UPDATE_PAIR: 'relay:update-pair',
   REBIND_PAIR_PLANNER: 'relay:rebind-pair-planner',

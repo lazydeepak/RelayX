@@ -18,6 +18,8 @@ const relayApi: IRelayApi = {
   deleteProject: (id: string) => ipcRenderer.invoke(RELAY_IPC_CHANNELS.DELETE_PROJECT, id),
   listPairs: () => ipcRenderer.invoke(RELAY_IPC_CHANNELS.LIST_PAIRS),
   getPair: (id: string) => ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_PAIR, id),
+  getPairRecoveryState: (pairId: string) =>
+    ipcRenderer.invoke(RELAY_IPC_CHANNELS.GET_PAIR_RECOVERY_STATE, pairId),
   createPair: (
     projectId: string,
     name: string,

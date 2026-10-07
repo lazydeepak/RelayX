@@ -904,7 +904,7 @@ export const PairView: React.FC<PairViewProps> = ({
                 {recoveryState && (
                   <div className="pt-2">
                     <PlannerFirstRecoveryPanel
-                      mode={recoveryState.phase === 'planner_intervention' ? 'planner_intervention' : 'recovery_required'}
+                  phase={recoveryState.phase}
                       failureReason={
                         recoveryState.evidence?.reason || 'Worker → Planner delivery failed / reconciliation_probe'
                       }
