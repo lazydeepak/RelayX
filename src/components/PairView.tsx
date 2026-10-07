@@ -193,6 +193,12 @@ export const PairView: React.FC<PairViewProps> = ({
   const [showArchived, setShowArchived] = useState<boolean>(false);
   const [expandedPairs, setExpandedPairs] = useState<Record<string, boolean>>({});
 
+  // Expand/collapse one pair's detail section. Single source of truth for both the
+  // chevron control and the "Expand Details" button, so the two can never disagree.
+  const togglePairExpand = (pairId: string) => {
+    setExpandedPairs((prev) => ({ ...prev, [pairId]: !prev[pairId] }));
+  };
+
   // Filter projects based on archived flag
   const visibleProjects = projects.filter((p) => (showArchived ? true : p.status !== 'archived'));
 

@@ -60,7 +60,7 @@ export default function App() {
   const [isAddProjectWizardOpen, setIsAddProjectWizardOpen] = useState(false);
   // Pair id the assignment modal should auto-select once the refreshed list contains it.
   const [pendingSelectedPairId, setPendingSelectedPairId] = useState<string | null>(null);
-  const [recoveryStates, setRecoveryStates] = useState<Record<string, { pairId: string; recoveryState: import('../relay/domain/recoveryAuthority').RecoveryState | null }>>({});
+  const [recoveryStates, setRecoveryStates] = useState<Record<string, import('../relay/domain/recoveryAuthority').RecoveryState | null>>({});
 
   useEffect(() => {
     localStorage.setItem('relay_theme', theme);
@@ -140,24 +140,28 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [dash, prjList, pList, rList, aList, eList, attList, status] = await Promise.all([
-        relayBridge.getDashboardState(),
-        relayBridge.listProjects(),
-        relayBridge.listPairs(),
-        relayBridge.listRuntimeSessions(),
-        relayBridge.listAssignments(),
-        relayBridge.listEvents(100),
-        relayBridge.listAttentionItems(),
-        relayBridge.getAppStatus(),
-      ]);
+      const dash = await relayBridge.getDashboardState();
+      const prjList = await relayBridge.listProjects();
+      const pList = await relayBridge.listPairs();
+      const rList = await relayBridge.listRuntimeSessions();
+      const aList = await relayBridge.listAssignments();
+      const eList = await relayBridge.listEvents(100);
+      const attList = await relayBridge.listAttentionItems();
+      const status = await relayBridge.getAppStatus();
 
-      // Fetch recovery states for all pairs
-      const pairIds = pList.map((p) => p.id);
-      const recoveryStatesMap: Record<string, { pairId: string; recoveryState: import('../relay/domain/recoveryAuthority').RecoveryState | null }> = {};
-      for (const pairId of pairIds) {
-        const { recoveryState } = await relayBridge.getPairRecoveryState(pairId);
-        recoveryStatesMap[pairId] = { pairId, recoveryState };
-      }
+      const pairIds = pList?.map?.((p: UIPair) => p.id) ?? [];
+      const recoveryResults = await Promise.all(
+        pairIds.map(async (pairId: string) => {
+          try {
+            const { recoveryState } = await relayBridge.getPairRecoveryState(pairId);
+            return { pairId, recoveryState };
+          } catch {
+            return { pairId, recoveryState: null as import('../relay/domain/recoveryAuthority').RecoveryState | null };
+          }
+        })
+      );
+      const recoveryStatesMap: Record<string, import('../relay/domain/recoveryAuthority').RecoveryState | null> = {};
+      for (const r of recoveryResults) recoveryStatesMap[r.pairId] = r.recoveryState ?? null;
 
       setMetrics(dash.metrics);
       setProjects(prjList);
@@ -666,6 +670,7 @@ export default function App() {
                 pairs={pairs}
                 projects={projects}
                 sessions={sessions}
+                recoveryStates={recoveryStates}
                 onOpenCreateProject={() => setIsAddProjectWizardOpen(true)}
                 onOpenEditProject={(project) =>
                   setProjectModal({ isOpen: true, mode: 'edit', project })
