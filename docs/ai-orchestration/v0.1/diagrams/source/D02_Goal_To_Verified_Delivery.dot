@@ -1,0 +1,21 @@
+digraph G {
+graph [fontname="DejaVu Sans", bgcolor="white", pad="0.26", nodesep="0.36", ranksep="0.55", splines="ortho", labeljust="l", labelloc="t", fontsize=16, fontcolor="#102A43"]; node [fontname="DejaVu Sans", fontsize=11, shape="box", style="rounded,filled", fillcolor="#F1F5F9", color="#BAC9D6", penwidth=1.3, margin="0.13,0.09"]; edge [fontname="DejaVu Sans",fontsize=9,color="#718096",arrowsize=0.7, penwidth=1.2];
+graph [rankdir=TB,label="D02 | Goal intake → task execution → verified outcome"];
+start [label="User provides project goal",fillcolor="#DBEEFF"];
+intake [label="Supervisor structures objectives\nand initial task candidates"];
+plan [label="Planner specifies tasks, acceptance,\ndependencies and risk",fillcolor="#D8F2E6"];
+gate [label="Planning + policy gates pass?",shape=diamond,fillcolor="#FFF2CE",color="#DAB256"];
+approve [label="Request clarification / approval\nKeep proposed tasks"];
+ready [label="Persist task DAG and READY queue"];
+route [label="Find exact qualified $0 model\nand available Worker"];
+modelgate [label="Free, qualified, available?",shape=diamond,fillcolor="#FFF2CE"];
+block [label="BLOCKED / QUEUED\nNo paid fallback",fillcolor="#FFE8E6",color="#DC8880"];
+send [label="Atomic claim and single send\nvia managed OpenCode"];
+result [label="Collect report + tests + artifacts"];
+review [label="Planner evaluates evidence",fillcolor="#D8F2E6"];
+pass [label="Acceptance verified?",shape=diamond,fillcolor="#FFF2CE"];
+done [label="VERIFIED → DONE\nSupervisor reports progress",fillcolor="#D7F5E3",color="#57A87A"];
+recover [label="Open incident: Planner-first recovery",fillcolor="#FFE8E6",color="#DC8880"];
+start->intake->plan->gate; gate->approve [label="no"]; gate->ready [label="yes"]; approve->plan [label="new input"]; ready->route->modelgate; modelgate->block [label="no"]; modelgate->send [label="yes"]; send->result->review->pass; pass->done [label="yes"]; pass->recover [label="no"]; recover->plan [label="Planner decides"];
+
+}

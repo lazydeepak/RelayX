@@ -1,0 +1,20 @@
+digraph G {
+graph [fontname="DejaVu Sans", bgcolor="white", pad="0.26", nodesep="0.36", ranksep="0.55", splines="ortho", labeljust="l", labelloc="t", fontsize=16, fontcolor="#102A43"]; node [fontname="DejaVu Sans", fontsize=11, shape="box", style="rounded,filled", fillcolor="#F1F5F9", color="#BAC9D6", penwidth=1.3, margin="0.13,0.09"]; edge [fontname="DejaVu Sans",fontsize=9,color="#718096",arrowsize=0.7, penwidth=1.2];
+graph [rankdir=LR,label="D10 | Conceptual data relationships (migration must be audited)",nodesep="0.28",ranksep="0.52"];
+project [label="Project\npolicy/version",fillcolor="#DBEEFF"];
+mile [label="Milestone"];
+task [label="Task / Job\npriority · DAG · state",fillcolor="#DBEEFF"];
+dep [label="TaskDependency\npredecessor → successor"];
+assignment [label="Assignment\nPlanner decision · dispatch key"];
+attempt [label="Attempt\nexact model route · run"];
+delivery [label="Delivery\nprovider receipt / direction"];
+evidence [label="Evidence\ndigest · test/artifact"];
+planner [label="PlannerThread\nmessages/decisions",fillcolor="#D8F2E6"];
+worker [label="WorkerSession\nexact external session ID",fillcolor="#D8F2E6"];
+route [label="ModelRoute\nprovider · endpoint · account"];
+elig [label="EligibilityLease\npricing/entitlement/expiry"];
+eval [label="EvaluationRun\nfixture · outcome"];
+incident [label="Incident/RecoveryDecision\nPlanner review",fillcolor="#FFF2CE"];
+project->mile->task->assignment->attempt; task->dep [label="DAG edges"]; assignment->planner [label="authorized by"]; attempt->worker [label="executed on"]; attempt->route [label="selected route"]; attempt->delivery; attempt->evidence; route->elig; route->eval; attempt->incident [label="when failed"]; incident->planner [label="decision owner"];
+
+}

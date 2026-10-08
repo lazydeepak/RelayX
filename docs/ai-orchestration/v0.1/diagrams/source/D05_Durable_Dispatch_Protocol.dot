@@ -1,0 +1,21 @@
+digraph G {
+graph [fontname="DejaVu Sans", bgcolor="white", pad="0.26", nodesep="0.36", ranksep="0.55", splines="ortho", labeljust="l", labelloc="t", fontsize=16, fontcolor="#102A43"]; node [fontname="DejaVu Sans", fontsize=11, shape="box", style="rounded,filled", fillcolor="#F1F5F9", color="#BAC9D6", penwidth=1.3, margin="0.13,0.09"]; edge [fontname="DejaVu Sans",fontsize=9,color="#718096",arrowsize=0.7, penwidth=1.2];
+graph [rankdir=TB,label="D05 | Exactly one send intent; completion requires independent evidence"];
+task [label="Planner-approved bounded Assignment",fillcolor="#D8F2E6"];
+policy [label="Engine validates policy, ready state,\nmodel lease, exact session + locks",fillcolor="#FFF2CE"];
+valid [label="All dispatch gates pass?",shape=diamond,fillcolor="#FFF2CE"];
+block [label="No send / report blocker",fillcolor="#FFE8E6"];
+claim [label="SQLite transaction: claim slot,\npersist attempt + send intent + dispatch key"];
+send [label="Send once through OpenCode server API",fillcolor="#DBEEFF"];
+reply [label="Unique authoritative receipt proven?",shape=diamond,fillcolor="#FFF2CE"];
+reconcile [label="Reconcile exact session transcript\nand provider event IDs; NO blind resend"];
+unique [label="Unique matching send evidence?",shape=diamond,fillcolor="#FFF2CE"];
+incident [label="AMBIGUOUS / BLOCKED\nPlanner incident packet",fillcolor="#FFE8E6",color="#D88080"];
+monitor [label="Observe correlated run/events/question/report"];
+review [label="Evidence bundle → Planner REVIEW",fillcolor="#D8F2E6"];
+end [label="Verified?",shape=diamond,fillcolor="#FFF2CE"];
+done [label="Close Task DONE",fillcolor="#D7F5E3"];
+replan [label="Planner correction / replan decision",fillcolor="#FFE8E6"];
+task->policy->valid; valid->block [label="no"]; valid->claim [label="yes"]; claim->send->reply; reply->monitor [label="yes"]; reply->reconcile [label="unknown"]; reconcile->unique; unique->monitor [label="yes"]; unique->incident [label="no"]; monitor->review->end; end->done [label="yes"]; end->replan [label="no"]; incident->replan [style=dashed,label="Planner owns"];
+
+}

@@ -1,0 +1,16 @@
+digraph G {
+graph [fontname="DejaVu Sans", bgcolor="white", pad="0.26", nodesep="0.36", ranksep="0.55", splines="ortho", labeljust="l", labelloc="t", fontsize=16, fontcolor="#102A43"]; node [fontname="DejaVu Sans", fontsize=11, shape="box", style="rounded,filled", fillcolor="#F1F5F9", color="#BAC9D6", penwidth=1.3, margin="0.13,0.09"]; edge [fontname="DejaVu Sans",fontsize=9,color="#718096",arrowsize=0.7, penwidth=1.2];
+graph [rankdir=TB,label="D08 | Task-specific evaluation, confidence and outcome feedback"];
+qualified [label="Only currently eligible $0 routes",fillcolor="#DAF0FF"];
+fixtures [label="Versioned isolated fixture tests\nPlanner · coding · debugging · tools · UI"];
+record [label="Record hidden tests, tool errors, duration,\nquota use, exact route and config"];
+score [label="Task-class score + confidence interval\nSample size · recency · similarity"];
+route [label="Compare quality, expected verified time,\nand quota opportunity cost"];
+choose [label="Route qualifies for task?",shape=diamond,fillcolor="#FFF2CE"];
+no [label="NO_ELIGIBLE_MODEL / limited test / human decision",fillcolor="#FFE8E6"];
+assign [label="Planner-approved assignment via Engine",fillcolor="#D8F2E6"];
+result [label="Tests + Planner acceptance",fillcolor="#D7F5E3"];
+feedback [label="Append outcome (including all failures)\nUpdate evidence and ranking",fillcolor="#EDF2FF"];
+qualified->fixtures->record->score->route->choose; choose->no [label="no"]; choose->assign [label="yes"]; assign->result->feedback; feedback->score [label="learn",constraint=false,style=dashed];
+
+}

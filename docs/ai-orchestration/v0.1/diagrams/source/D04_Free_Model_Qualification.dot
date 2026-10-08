@@ -1,0 +1,18 @@
+digraph G {
+graph [fontname="DejaVu Sans", bgcolor="white", pad="0.26", nodesep="0.36", ranksep="0.55", splines="ortho", labeljust="l", labelloc="t", fontsize=16, fontcolor="#102A43"]; node [fontname="DejaVu Sans", fontsize=11, shape="box", style="rounded,filled", fillcolor="#F1F5F9", color="#BAC9D6", penwidth=1.3, margin="0.13,0.09"]; edge [fontname="DejaVu Sans",fontsize=9,color="#718096",arrowsize=0.7, penwidth=1.2];
+graph [rankdir=TB,label="D04 | Free Model Hunter: catalog ≠ eligibility ≠ qualification"];
+fetch [label="Fetch structured catalog metadata\nOpenRouter · Models.dev · providers",fillcolor="#DBEEFF"];
+normalize [label="Normalize exact provider / endpoint / model / account"];
+compare [label="Source conflict or stale data?",shape=diamond,fillcolor="#FFF2CE"];
+unknown [label="UNKNOWN / DENY for $0 dispatch\nExpose provenance + reason",fillcolor="#FFE8E6"];
+verify [label="Check current exact account route\nInput/output + surcharges + grants"];
+free [label="Verified $0 lease valid?",shape=diamond,fillcolor="#FFF2CE"];
+cap [label="Check capability, privacy, context, quota, server"];
+okay [label="Hard gates satisfied?",shape=diamond,fillcolor="#FFF2CE"];
+probe [label="Run bounded isolated qualification\nonly within free quota"];
+qual [label="Meets role/task quality threshold?",shape=diamond,fillcolor="#FFF2CE"];
+rank [label="QUALIFIED route → ranker + scheduler",fillcolor="#D7F5E3",color="#57A87A"];
+wait [label="Candidate only / evaluate later\nnot dispatchable for this task",fillcolor="#FFF2CE"];
+fetch->normalize->compare; compare->unknown [label="yes"]; compare->verify [label="no"]; verify->free; free->unknown [label="no/unknown"]; free->cap [label="yes"]; cap->okay; okay->unknown [label="no"]; okay->probe [label="yes"]; probe->qual; qual->rank [label="yes"]; qual->wait [label="no"]; rank->fetch [label="periodic renewal",style=dashed,constraint=false];
+
+}

@@ -1,0 +1,17 @@
+digraph G {
+graph [fontname="DejaVu Sans", bgcolor="white", pad="0.26", nodesep="0.36", ranksep="0.55", splines="ortho", labeljust="l", labelloc="t", fontsize=16, fontcolor="#102A43"]; node [fontname="DejaVu Sans", fontsize=11, shape="box", style="rounded,filled", fillcolor="#F1F5F9", color="#BAC9D6", penwidth=1.3, margin="0.13,0.09"]; edge [fontname="DejaVu Sans",fontsize=9,color="#718096",arrowsize=0.7, penwidth=1.2];
+graph [rankdir=TB,label="D07 | Every execution / delivery failure returns to Planner"];
+error [label="Failure / ambiguous ACK / stall / bad report / test regression",fillcolor="#FFE8E6",color="#DB8181"];
+freeze [label="Engine blocks unsafe continuation\nNo new send and no blind retry"];
+recon [label="Read exact provider evidence, status,\nmodel quota, test result, attempt identity"];
+resolved [label="Can state be resolved safely by observation?",shape=diamond,fillcolor="#FFF2CE"];
+observe [label="Update observed receipt/state only\nNo extra Worker instruction"];
+packet [label="Open incident + evidence packet"];
+planner [label="Planner reassesses root cause, next goals,\nmethod/model/scope and correction",fillcolor="#D8F2E6",color="#58A484"];
+decide [label="Planner decision: WAIT / REPLAN /\nCORRECT / ESCALATE / CANCEL"];
+gate [label="Engine policy + approvals + $0 gate pass?",shape=diamond,fillcolor="#FFF2CE"];
+blocked [label="Remain BLOCKED / ask human",fillcolor="#FFE8E6"];
+new [label="Create a NEW authorized Assignment / Attempt\nthen dispatch through normal protocol",fillcolor="#D7F5E3"];
+error->freeze->recon->resolved; resolved->observe [label="yes"]; resolved->packet [label="no"]; observe->packet [label="review if needed",style=dashed]; packet->planner->decide->gate; gate->blocked [label="no"]; gate->new [label="yes + action required"];
+
+}

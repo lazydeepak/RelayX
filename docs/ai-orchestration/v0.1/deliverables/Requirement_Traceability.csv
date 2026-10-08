@@ -1,0 +1,36 @@
+requirement_id,specification,statement,related_diagrams,specification_test_suite (not one-to-one validation)
+REQ-01,RX-01,"User objectives become explicit milestones and traceable, testable Tasks before autonomous execution. The user can correct priorities, goals and operating mode.","D01, D02",ACC-01;ACC-02;ACC-03;ACC-04;ACC-05;ACC-06;ACC-07
+REQ-02,RX-01,A Planner chooses technical direction and reviews completion; a Supervisor coordinates and reports; the Engine authorizes state changes; Workers execute bounded assignments.,"D01, D02",ACC-01;ACC-02;ACC-03;ACC-04;ACC-05;ACC-06;ACC-07
+REQ-03,RX-01,A project in Zero-Cost Mode must never send any request through an unverified or potentially paid AI route.,"D01, D02",ACC-01;ACC-02;ACC-03;ACC-04;ACC-05;ACC-06;ACC-07
+REQ-04,RX-01,"In-house Planner conversations and exact OpenCode Worker sessions must be inspectable in RelayX with histories, attempts and evidence.","D01, D02",ACC-01;ACC-02;ACC-03;ACC-04;ACC-05;ACC-06;ACC-07
+REQ-05,RX-01,"Work remains recoverable across pause, stop, process restart and provider disruption.","D01, D02",ACC-01;ACC-02;ACC-03;ACC-04;ACC-05;ACC-06;ACC-07
+REQ-06,RX-01,"On any transport failure, Worker stall, or unusable Worker report, the next recovery decision belongs to the Planner.","D01, D02",ACC-01;ACC-02;ACC-03;ACC-04;ACC-05;ACC-06;ACC-07
+REQ-07,RX-02,User-defined boundaries and system invariants outrank any AI-generated instruction.,"D01, D05, D07",POL-01;POL-02;POL-03;POL-04;POL-05;POL-06
+REQ-08,RX-02,"The Engine alone may claim tasks, commit transitions, authorize dispatch and enforce costs.","D01, D05, D07",POL-01;POL-02;POL-03;POL-04;POL-05;POL-06
+REQ-09,RX-02,Failures cannot directly re-arm a Worker; a Planner decision is required before any corrective Worker assignment.,"D01, D05, D07",POL-01;POL-02;POL-03;POL-04;POL-05;POL-06
+REQ-10,RX-02,"Hard zero-paid-inference limits include Planner, Supervisor, Workers, evaluators and fallbacks.","D01, D05, D07",POL-01;POL-02;POL-03;POL-04;POL-05;POL-06
+REQ-11,RX-03,"Every executable Task has acceptance criteria, dependency edges and a tracked priority.","D02, D03, D05",SCH-01;SCH-02;SCH-03;SCH-04;SCH-05;SCH-06;SCH-07
+REQ-12,RX-03,One active execution slot per pair in V1; atomic claims prevent double-dispatch.,"D02, D03, D05",SCH-01;SCH-02;SCH-03;SCH-04;SCH-05;SCH-06;SCH-07
+REQ-13,RX-03,Tasks become DONE only after correlated verification plus Planner and any required human approval.,"D02, D03, D05",SCH-01;SCH-02;SCH-03;SCH-04;SCH-05;SCH-06;SCH-07
+REQ-14,RX-04,Planner/Worker messages move through the new server-native/API adapters; no Chrome/DOM/AppleScript clipboard messaging is required.,"D01, D05, D06, D09",INT-01;INT-02;INT-03;INT-04;INT-05;INT-06;INT-07;INT-08
+REQ-15,RX-04,"Keep legacy GUI transport independent and the disabled OpenCode CLI delivery method disabled, with neither acting as an implicit fallback.","D01, D05, D06, D09",INT-01;INT-02;INT-03;INT-04;INT-05;INT-06;INT-07;INT-08
+REQ-16,RX-04,Worker identity uses exact external session ID; title is display metadata and can change.,"D01, D05, D06, D09",INT-01;INT-02;INT-03;INT-04;INT-05;INT-06;INT-07;INT-08
+REQ-17,RX-04,A structured Worker question resumes the same waiting question/run rather than generating a new assignment.,"D01, D05, D06, D09",INT-01;INT-02;INT-03;INT-04;INT-05;INT-06;INT-07;INT-08
+REQ-18,RX-05,"In Zero-Cost Mode, any unknown, stale, mixed, paid or promotional-credit-only route is non-dispatchable unless a separate explicit user-approved rule covers it.",D04,MOD-01;MOD-02;MOD-03;MOD-04;MOD-05;MOD-06;MOD-07;MOD-08
+REQ-19,RX-05,"Model catalogs and benchmark popularity are discovery evidence, not authority for account-specific cost.",D04,MOD-01;MOD-02;MOD-03;MOD-04;MOD-05;MOD-06;MOD-07;MOD-08
+REQ-20,RX-05,Exhausted free quotas cause queue/pausing or a verified-free switch; no paid fallback.,D04,MOD-01;MOD-02;MOD-03;MOD-04;MOD-05;MOD-06;MOD-07;MOD-08
+REQ-21,RX-05,"Each qualification must be time-bound, explainable and rechecked on relevant errors.",D04,MOD-01;MOD-02;MOD-03;MOD-04;MOD-05;MOD-06;MOD-07;MOD-08
+REQ-22,RX-06,"Model ranking must distinguish Supervisor planning, Planner reasoning, coding, debugging, frontend implementation and tool/question reliability.","D04, D08",EVAL-01;EVAL-02;EVAL-03;EVAL-04;EVAL-05;EVAL-06;EVAL-07;EVAL-08
+REQ-23,RX-06,"A success means verified and accepted artifacts, not a model statement claiming completion.","D04, D08",EVAL-01;EVAL-02;EVAL-03;EVAL-04;EVAL-05;EVAL-06;EVAL-07;EVAL-08
+REQ-24,RX-06,"Show sample size, evidence recency and uncertainty; do not treat 2/2 as proven reliability.","D04, D08",EVAL-01;EVAL-02;EVAL-03;EVAL-04;EVAL-05;EVAL-06;EVAL-07;EVAL-08
+REQ-25,RX-07,"Every actionable incident has exact affected attempt/assignment/session IDs, evidence packet, classification and Planner decision correlation.","D06, D07, D09",REC-01;REC-02;REC-03;REC-04;REC-05;REC-06;REC-07;REC-08;REC-09
+REQ-26,RX-07,The reconciler may observe and resolve exact evidence but cannot manufacture a receipt or blindly replay an ambiguous send.,"D06, D07, D09",REC-01;REC-02;REC-03;REC-04;REC-05;REC-06;REC-07;REC-08;REC-09
+REQ-27,RX-07,Pause/Stop suppresses new dispatch; restart reconciliation precedes new work.,"D06, D07, D09",REC-01;REC-02;REC-03;REC-04;REC-05;REC-06;REC-07;REC-08;REC-09
+REQ-28,RX-08,"Mutations are idempotent, actor-attributed and auditable.","D05, D10",DATA-01;DATA-02;DATA-03;DATA-04;DATA-05;DATA-06;DATA-07;DATA-08
+REQ-29,RX-08,Every external event is correlated to exact session/provider identity and attempt.,"D05, D10",DATA-01;DATA-02;DATA-03;DATA-04;DATA-05;DATA-06;DATA-07;DATA-08
+REQ-30,RX-08,"Credentials never appear in model prompts, benchmark fixture snapshots, user-visible reports or stored tool transcripts.","D05, D10",DATA-01;DATA-02;DATA-03;DATA-04;DATA-05;DATA-06;DATA-07;DATA-08
+REQ-31,RX-08,"On startup, outstanding Delivery/Attempt intents reconcile before new scheduling.","D05, D10",DATA-01;DATA-02;DATA-03;DATA-04;DATA-05;DATA-06;DATA-07;DATA-08
+REQ-32,RX-09,"At all times display pair lifecycle state (`STOPPED`, `RUNNING`, `PAUSED` etc.), task state, attempted delivery state, current model route and blocking reason independently.","D02, D09",UI-01;UI-02;UI-03;UI-04;UI-05;UI-06;PILOT-01;PILOT-02
+REQ-33,RX-09,Show both Planner and Worker latest messages; allow composing a **new** custom intervention after pause/stop. Never mutate historical transcripts.,"D02, D09",UI-01;UI-02;UI-03;UI-04;UI-05;UI-06;PILOT-01;PILOT-02
+REQ-34,RX-09,User can trace each Task → Assignment → Attempt → Delivery → Evidence → Planner decision.,"D02, D09",UI-01;UI-02;UI-03;UI-04;UI-05;UI-06;PILOT-01;PILOT-02
+REQ-35,RX-09,"Distinguish `catalog listed`, `verified free`, `qualified`, `available`, and `recommended` model states.","D02, D09",UI-01;UI-02;UI-03;UI-04;UI-05;UI-06;PILOT-01;PILOT-02

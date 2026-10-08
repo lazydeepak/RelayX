@@ -1,0 +1,20 @@
+digraph G {
+graph [fontname="DejaVu Sans", bgcolor="white", pad="0.26", nodesep="0.36", ranksep="0.55", splines="ortho", labeljust="l", labelloc="t", fontsize=16, fontcolor="#102A43"]; node [fontname="DejaVu Sans", fontsize=11, shape="box", style="rounded,filled", fillcolor="#F1F5F9", color="#BAC9D6", penwidth=1.3, margin="0.13,0.09"]; edge [fontname="DejaVu Sans",fontsize=9,color="#718096",arrowsize=0.7, penwidth=1.2];
+graph [rankdir=TB, label="D01 | RelayX AI control plane & execution boundaries"];
+user [label="Human / project owner\nGoals · $0 limit · approvals · pause/stop", fillcolor="#E1F0FF",color="#498CD0"];
+ui [label="RelayX desktop UI\nTasks · Pair View · Sessions · Governance"];
+subgraph cluster_control { label="RELAYX TRUSTED CONTROL PLANE"; style="rounded,filled"; fillcolor="#F6FAFE"; color="#8BB2CE";
+policy [label="Policy Engine\nAuthority / zero-cost / privacy",fillcolor="#FFE8D6",color="#D69E65"];
+scheduler [label="Task Scheduler\nDAG · locks · atomic claim"];
+registry [label="Model Intelligence\nHunter · eligibility · ranker"];
+ledger [label="Durable Store\nState · evidence · audit"];
+}
+sup [label="Supervisor AI\nProposes / observes", fillcolor="#EDF2FF",color="#9FAEED"];
+planner [label="In-house Planner AI\nPlans / reviews / recovery", fillcolor="#D8F2E6",color="#58A484"];
+server [label="Managed OpenCode Server\nExact sessions · event stream",fillcolor="#F0F4F8"];
+worker [label="Worker session(s)\nScoped tools & worktrees",fillcolor="#DFF3E5",color="#7EBD8F"];
+user->ui; ui->policy; ui->scheduler; ui->ledger; sup->planner [label="consult"];
+sup->scheduler [label="proposal",style=dashed]; planner->policy [label="authorize intent"]; policy->scheduler [label="permit"]; registry->scheduler [label="qualified route"];
+scheduler->server [label="single policy-gated send"]; server->worker; worker->server [label="evidence/events",constraint=false]; server->ledger [label="observed result"]; ledger->planner [label="review packet"]; ledger->sup [label="events"]; planner->scheduler [label="next instruction",constraint=false];
+
+}

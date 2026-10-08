@@ -1,0 +1,9 @@
+digraph G {
+graph [fontname="DejaVu Sans", bgcolor="white", pad="0.26", nodesep="0.36", ranksep="0.55", splines="ortho", labeljust="l", labelloc="t", fontsize=16, fontcolor="#102A43"]; node [fontname="DejaVu Sans", fontsize=11, shape="box", style="rounded,filled", fillcolor="#F1F5F9", color="#BAC9D6", penwidth=1.3, margin="0.13,0.09"]; edge [fontname="DejaVu Sans",fontsize=9,color="#718096",arrowsize=0.7, penwidth=1.2];
+graph [rankdir=LR, label="D03 | Proposed Task lifecycle (not transport status)",nodesep="0.22",ranksep="0.48"];
+draft [label="DRAFT"]; planned [label="PLANNED"]; ready [label="READY",fillcolor="#DAF0FF"]; claimed [label="CLAIMED"]; running [label="RUNNING",fillcolor="#DFF1FF"]; review [label="REVIEW",fillcolor="#FFF2CE"]; verified [label="VERIFIED",fillcolor="#D8F2E6"]; done [label="DONE",fillcolor="#C7EBD7",color="#54A67B"];
+blocked [label="BLOCKED",fillcolor="#FFE8E6",color="#DC8880"]; paused [label="PAUSED",fillcolor="#FFF2CE"]; cancelled [label="CANCELLED",fillcolor="#E4E6EC"]; failed [label="FAILED",fillcolor="#F8D6D6"];
+draft->planned->ready->claimed->running->review->verified->done;
+planned->blocked [label="missing constraints"]; ready->blocked [label="gate denied"]; running->blocked [label="incident"]; review->blocked [label="unverified"]; ready->paused; claimed->paused; running->paused; blocked->planned [label="Planner replan"]; review->planned [label="Planner correction"]; paused->ready [label="reinspect",style=dashed]; draft->cancelled; planned->cancelled; running->failed [label="closed failure"];
+
+}

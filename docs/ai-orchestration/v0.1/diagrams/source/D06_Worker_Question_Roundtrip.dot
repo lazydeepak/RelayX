@@ -1,0 +1,16 @@
+digraph G {
+graph [fontname="DejaVu Sans", bgcolor="white", pad="0.26", nodesep="0.36", ranksep="0.55", splines="ortho", labeljust="l", labelloc="t", fontsize=16, fontcolor="#102A43"]; node [fontname="DejaVu Sans", fontsize=11, shape="box", style="rounded,filled", fillcolor="#F1F5F9", color="#BAC9D6", penwidth=1.3, margin="0.13,0.09"]; edge [fontname="DejaVu Sans",fontsize=9,color="#718096",arrowsize=0.7, penwidth=1.2];
+graph [rankdir=TB,label="D06 | Intermediate OpenCode question handled without closing work"];
+run [label="Worker Attempt RUNNING",fillcolor="#DBEEFF"];
+question [label="OpenCode emits structured question tool event"];
+record [label="Persist question ID + exact run/session/attempt\nmark WAITING_FOR_QUESTION"];
+packet [label="Send correlated question/context to Planner",fillcolor="#D8F2E6"];
+answer [label="Planner decides answer or escalation",fillcolor="#D8F2E6"];
+check [label="Same pending question & permissions valid?",shape=diamond,fillcolor="#FFF2CE"];
+block [label="Block + Planner/human intervention\nNever generic chat or fake completion",fillcolor="#FFE8E6"];
+respond [label="Answer same question-tool ID via server API"];
+continue_ [label="Resume same Worker run observation",fillcolor="#D7F5E3"];
+final [label="Only final Worker result opens REVIEW"];
+run->question->record->packet->answer->check; check->block [label="no"]; check->respond [label="yes"]; respond->continue_->final;
+
+}

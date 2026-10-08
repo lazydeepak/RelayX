@@ -1,0 +1,10 @@
+id,topic,question,decision_owner,required_by,status
+DEC-01,Source-code egress privacy,Per project: LOCAL_ONLY or APPROVED_REMOTE?,Human owner,Before provider onboarding,Open
+DEC-02,Human approval boundary,"Always require approval for installs, deletion, network, git push, deploy?",Human owner,Before Controlled Auto,Open
+DEC-03,Evaluation quota allocation,How much free quota for exploratory probes?,Human owner,Before Evaluation MVP,Open
+DEC-04,No capable free Planner available,Queue/block versus alternative agreed workflow?,Human owner,Before native Planner,Open
+DEC-05,Existing RelayX schema mapping,Map conceptual Task/Job states and migrations to actual code,Engineering,Phase 0,Open
+DEC-06,OpenCode version and question contract,Inspect live /doc and choose supported server API flow,Engineering,Phase 0,Open
+DEC-07,Evidence retention and redaction,"Set retention duration, artifact encryption/redaction",Human + Engineering,Before persistence rollout,Open
+DEC-08,Quality acceptance templates,Define test bars for websites/apps/libraries/mobile,Planner + Human,Before pilot,Open
+DEC-09,Production spending boundary,Should zero-cost prohibit paid hosting/build services too? Parent says API only,Human owner,Before marketing claim,Open

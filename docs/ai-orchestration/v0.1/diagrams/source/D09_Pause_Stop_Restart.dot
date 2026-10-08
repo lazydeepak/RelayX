@@ -1,0 +1,17 @@
+digraph G {
+graph [fontname="DejaVu Sans", bgcolor="white", pad="0.26", nodesep="0.36", ranksep="0.55", splines="ortho", labeljust="l", labelloc="t", fontsize=16, fontcolor="#102A43"]; node [fontname="DejaVu Sans", fontsize=11, shape="box", style="rounded,filled", fillcolor="#F1F5F9", color="#BAC9D6", penwidth=1.3, margin="0.13,0.09"]; edge [fontname="DejaVu Sans",fontsize=9,color="#718096",arrowsize=0.7, penwidth=1.2];
+graph [rankdir=TB,label="D09 | Control lifecycle & restart reconciliation"];
+active [label="RUNNING\nEligible work can dispatch",fillcolor="#D7F5E3"];
+pause [label="PAUSE requested",fillcolor="#FFF2CE"];
+paused [label="PAUSED: no new sends\nActive run may still execute unless explicitly aborted"];
+edit [label="Operator proposes new goal/method/feed\nas NEW Planner-side instruction"];
+recheck [label="RESUME: reconcile outstanding attempts,\nrevalidate session, policy, quota, locks"];
+valid [label="Safe to resume?",shape=diamond,fillcolor="#FFF2CE"];
+stop [label="STOP requested"];
+stopped [label="STOPPED: scheduling disabled\nPersist unresolved attempts/evidence",fillcolor="#FFE8E6"];
+boot [label="RelayX process boots / reconnects"];
+rec [label="Rebuild identity and observe exact Provider states\nResolve ambiguity before any dispatch"];
+blocked [label="BLOCKED: Planner first",fillcolor="#FFE8E6"];
+active->pause->paused->edit->recheck->valid; valid->active [label="yes"]; valid->blocked [label="no"]; active->stop->stopped; paused->stop; stopped->boot->rec->recheck;
+
+}
