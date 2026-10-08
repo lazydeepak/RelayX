@@ -187,7 +187,7 @@ function makeRetryEligible(f: Fixture, assignmentId: AssignmentId): void {
  * as another copy of the handed-over turn would hide a real duplicate behind an unrelated one.
  */
 function userTurnsWithText(provider: MockProvider, text: string): number {
-  return provider.messages.filter((m) => m.role === 'user' && m.text.includes(text)).length;
+  return provider.messages.filter((m) => m.role === 'user' && m.text?.includes(text)).length;
 }
 
 describe('A completed turn counts as transferred only on a confirmed delivered Delivery', () => {
@@ -361,6 +361,7 @@ describe('A completed turn counts as transferred only on a confirmed delivered D
       pair.projectId,
       'derived',
       CRASH_WINDOW_INSTRUCTION,
+      'normal',
       'planner',
       handoff.id,
     );

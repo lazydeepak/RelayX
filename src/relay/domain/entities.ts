@@ -103,6 +103,7 @@ import {
   isPairRelayState,
   AuthorityContext,
   AssignmentStatus,
+  AssignmentPriority,
   AttemptStatus,
   RuntimeSessionStatus,
   DeliveryStatus,
@@ -1272,6 +1273,7 @@ export interface AssignmentProps {
    * depend on in-memory state.
    */
   sourceRecoveryDeliveryId?: DeliveryId;
+  priority?: AssignmentPriority;
   status: AssignmentStatus;
   currentAttemptId?: AttemptId;
   activeDeliveryId?: DeliveryId;
@@ -1288,6 +1290,7 @@ export class Assignment {
   public title: string;
   public instruction: string;
   public readonly targetSideRole: PairSideRole;
+  public priority: AssignmentPriority;
   public readonly sourceHandoffId?: HandoffId;
   public readonly sourceRecoveryDeliveryId?: DeliveryId;
   public status: AssignmentStatus;
@@ -1305,6 +1308,7 @@ export class Assignment {
     this.title = props.title;
     this.instruction = props.instruction;
     this.targetSideRole = props.targetSideRole ?? 'worker';
+    this.priority = props.priority ?? 'normal';
     this.sourceHandoffId = props.sourceHandoffId;
     this.sourceRecoveryDeliveryId = props.sourceRecoveryDeliveryId;
     this.status = props.status;
@@ -1321,6 +1325,7 @@ export class Assignment {
     projectId: ProjectId,
     title: string,
     instruction: string,
+    priority: AssignmentPriority = 'normal',
     targetSideRole: PairSideRole = 'worker',
     sourceHandoffId?: HandoffId,
     sourceRecoveryDeliveryId?: DeliveryId,
@@ -1332,6 +1337,7 @@ export class Assignment {
       projectId,
       title,
       instruction,
+      priority,
       targetSideRole,
       sourceHandoffId,
       sourceRecoveryDeliveryId,

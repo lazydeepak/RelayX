@@ -647,6 +647,8 @@ export type AssignmentStatus =
   | 'failed'
   | 'cancelled';
 
+export type AssignmentPriority = 'low' | 'normal' | 'high' | 'urgent';
+
 /**
  * Execution attempt lifecycle representing a single physical execution of an assignment.
  *
@@ -857,6 +859,7 @@ export interface ObservableEvidence {
   responseActivityObserved?: boolean;
   screenshotRef?: string;
   accessibilityElementId?: string;
+  unverifiedAction?: string;
   details?: Record<string, unknown>;
 }
 

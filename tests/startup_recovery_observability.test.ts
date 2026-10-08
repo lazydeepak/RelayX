@@ -509,7 +509,7 @@ describe('Legacy-orphan repair is not wired into startup — and why', () => {
     const Attempt = (await import('../src/relay/domain/entities.ts')).Attempt;
 
     // Recreate the pre-fix durable shape: two dispatched `active` Assignments, one slot.
-    const stray = Assignment.create(a, (await w.db.pairs.findById(a))!.projectId, 'stray', 'stray', 'planner');
+    const stray = Assignment.create(a, (await w.db.pairs.findById(a))!.projectId, 'stray', 'stray', 'normal', 'planner');
     await w.db.assignments.save(stray);
     const attempt = Attempt.create(stray.id, 1);
     await w.db.attempts.save(attempt);

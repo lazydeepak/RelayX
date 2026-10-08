@@ -104,6 +104,7 @@ const activeAssignment: UIAssignment = {
   projectId: 'proj_1',
   title: 'Wire detail views',
   instruction: 'Implement',
+  priority: 'normal',
   status: 'active',
   createdAt: 1200,
 };
@@ -115,6 +116,7 @@ const completedAssignment: UIAssignment = {
   projectId: 'proj_1',
   title: 'Inspect surfaces',
   instruction: 'Inspect',
+  priority: 'normal',
   status: 'completed',
   createdAt: 1100,
   completedAt: 1800,
@@ -589,9 +591,10 @@ test('the session detail view model renders a Session URL row with the exact rou
     assignments: [],
     events: [],
   });
-  assert.equal(vm.identity.sessionUrl.label, 'Session URL');
-  assert.equal(vm.identity.sessionUrl.value, 'https://chatgpt.com/g/g-p-relayx/c/6ac3cbd7');
-  assert.equal(vm.identity.sessionUrl.copyable, true);
+  assert.ok(vm);
+  assert.equal(vm!.identity.sessionUrl.label, 'Session URL');
+  assert.equal(vm!.identity.sessionUrl.value, 'https://chatgpt.com/g/g-p-relayx/c/6ac3cbd7');
+  assert.equal(vm!.identity.sessionUrl.copyable, true);
 });
 
 test('a browser Planner with no directory is labelled Project URL, not Workspace / Directory', () => {
@@ -607,8 +610,9 @@ test('a browser Planner with no directory is labelled Project URL, not Workspace
     assignments: [],
     events: [],
   });
+  assert.ok(vm);
   assert.equal(
-    vm.identity.workspacePath.label,
+    vm!.identity.workspacePath.label,
     'Project URL',
     'a URL must not be presented as a filesystem directory',
   );
@@ -623,7 +627,8 @@ test('a local Worker keeps the Workspace / Directory label', () => {
     assignments: [],
     events: [],
   });
-  assert.equal(vm.identity.workspacePath.label, 'Workspace / Directory');
+  assert.ok(vm);
+  assert.equal(vm!.identity.workspacePath.label, 'Workspace / Directory');
 });
 
 test('a session with no session URL reports it honestly rather than borrowing another field', () => {
@@ -635,8 +640,9 @@ test('a session with no session URL reports it honestly rather than borrowing an
     assignments: [],
     events: [],
   });
-  assert.equal(vm.identity.sessionUrl.state, 'empty');
-  assert.equal(vm.identity.sessionUrl.copyable, false);
+  assert.ok(vm);
+  assert.equal(vm!.identity.sessionUrl.state, 'empty');
+  assert.equal(vm!.identity.sessionUrl.copyable, false);
 });
 
 /* --- Saved-vs-discovered binding verification --- */

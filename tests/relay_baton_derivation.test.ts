@@ -33,6 +33,7 @@ function makeAssignment(target: PairSideRole, chainIndex: number): Assignment {
     'proj_1' as any,
     `Assignment ${seq}`,
     `instruction ${seq}`,
+    'normal',
     target,
   );
   // `create` mints its own id; the chain index is supplied by the caller because it is a

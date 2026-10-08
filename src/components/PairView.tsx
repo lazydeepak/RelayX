@@ -801,9 +801,21 @@ export const PairView: React.FC<PairViewProps> = ({
                           </span>
                         </div>
                         {pair.activeAssignmentStatus && (
-                          <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono text-[11px]">
-                            Assignment: {pair.activeAssignmentStatus}
-                          </span>
+                          <div className="flex items-center gap-1.5">
+                            {pair.activeAssignmentPriority && (
+                              <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-tight ${
+                                pair.activeAssignmentPriority === 'urgent' ? 'bg-red-500 text-white' :
+                                pair.activeAssignmentPriority === 'high' ? 'bg-amber-500 text-white' :
+                                pair.activeAssignmentPriority === 'normal' ? 'bg-blue-500/20 text-blue-300 border border-blue-500/20' :
+                                'bg-slate-800 text-slate-400'
+                              }`}>
+                                {pair.activeAssignmentPriority}
+                              </span>
+                            )}
+                            <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono text-[11px]">
+                              Assignment: {pair.activeAssignmentStatus}
+                            </span>
+                          </div>
                         )}
                       </div>
 

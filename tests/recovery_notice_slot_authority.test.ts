@@ -573,6 +573,7 @@ describe('Execution slot vs. the relay resume notice', () => {
       (await w.db.pairs.findById(w.pairId))!.projectId,
       'stray',
       'stray',
+      'normal',
       'planner',
     );
     await w.db.assignments.save(stray);

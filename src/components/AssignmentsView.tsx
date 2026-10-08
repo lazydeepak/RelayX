@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
-import { ListTodo, CheckCircle2, Clock, AlertTriangle, ArrowRight, ChevronDown, ChevronUp } from 'lucide-react';
-import { UIAssignment } from '../types/ui.ts';
+import React, { useState, useMemo } from 'react';
+import { ListTodo, CheckCircle2, Clock, AlertTriangle, ArrowRight, ChevronDown, ChevronUp, ArrowUpDown, Filter } from 'lucide-react';
+import { UIAssignment, AssignmentPriority } from '../types/ui.ts';
 import { relayBridge } from '../services/relayBridge.ts';
 
 interface AssignmentsViewProps {
@@ -8,14 +8,50 @@ interface AssignmentsViewProps {
   filterStatuses?: string[];
 }
 
+type SortField = 'createdAt' | 'priority' | 'status';
+type SortOrder = 'asc' | 'desc';
+
+const PRIORITY_SCORE: Record<AssignmentPriority, number> = {
+  urgent: 4,
+  high: 3,
+  normal: 2,
+  low: 1,
+};
+
 export const AssignmentsView: React.FC<AssignmentsViewProps> = ({ assignments, filterStatuses }) => {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<any | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  const [sortField, setSortField] = useState<SortField>('createdAt');
+  const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
 
-  const filtered = filterStatuses
-    ? assignments.filter((a) => filterStatuses.includes(a.status))
-    : assignments;
+  const processed = useMemo(() => {
+    let result = filterStatuses
+      ? assignments.filter((a) => filterStatuses.includes(a.status))
+      : assignments;
+
+    return result.sort((a, b) => {
+      let comparison = 0;
+      if (sortField === 'priority') {
+        comparison = (PRIORITY_SCORE[a.priority] || 0) - (PRIORITY_SCORE[b.priority] || 0);
+      } else if (sortField === 'status') {
+        comparison = a.status.localeCompare(b.status);
+      } else {
+        comparison = (a.createdAt || 0) - (b.createdAt || 0);
+      }
+
+      return sortOrder === 'desc' ? -comparison : comparison;
+    });
+  }, [assignments, filterStatuses, sortField, sortOrder]);
+
+  const toggleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortOrder('desc');
+    }
+  };
 
   const handleSelect = async (id: string) => {
     if (selectedId === id) {
@@ -37,7 +73,7 @@ export const AssignmentsView: React.FC<AssignmentsViewProps> = ({ assignments, f
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl font-bold text-slate-100 flex items-center gap-2">
             <ListTodo className="w-5 h-5 text-blue-400" />
@@ -47,14 +83,31 @@ export const AssignmentsView: React.FC<AssignmentsViewProps> = ({ assignments, f
             Task execution units delegated from Planner to Worker runtimes
           </p>
         </div>
-        {filterStatuses && (
-          <span className="text-xs px-2.5 py-0.5 rounded-full bg-blue-500/10 text-blue-300 border border-blue-500/20 font-medium">
-            Filter: current / running
-          </span>
-        )}
+        
+        <div className="flex items-center gap-2">
+          {filterStatuses && (
+            <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-300 border border-blue-500/20 font-medium">
+              Filter Active
+            </span>
+          )}
+          <div className="flex items-center bg-slate-800/50 rounded-lg p-1 border border-slate-700/50">
+            <button
+              onClick={() => toggleSort('priority')}
+              className={`px-2 py-1 rounded text-[10px] font-semibold transition-colors flex items-center gap-1 ${sortField === 'priority' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              Priority {sortField === 'priority' && (sortOrder === 'desc' ? <ChevronDown className="w-2.5 h-2.5" /> : <ChevronUp className="w-2.5 h-2.5" />)}
+            </button>
+            <button
+              onClick={() => toggleSort('createdAt')}
+              className={`px-2 py-1 rounded text-[10px] font-semibold transition-colors flex items-center gap-1 ${sortField === 'createdAt' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              Date {sortField === 'createdAt' && (sortOrder === 'desc' ? <ChevronDown className="w-2.5 h-2.5" /> : <ChevronUp className="w-2.5 h-2.5" />)}
+            </button>
+          </div>
+        </div>
       </div>
 
-      {filtered.length === 0 ? (
+      {processed.length === 0 ? (
         <div className="p-8 rounded-xl bg-slate-900 border border-slate-800 text-center space-y-3">
           <ListTodo className="w-8 h-8 text-slate-600 mx-auto" />
           <h3 className="text-sm font-semibold text-slate-300">No Matching Assignments</h3>
@@ -64,8 +117,8 @@ export const AssignmentsView: React.FC<AssignmentsViewProps> = ({ assignments, f
         </div>
       ) : (
         <div className="space-y-3">
-          {filtered.map((asgn) => (
-            <div key={asgn.id} className="rx-card rounded-xl bg-slate-900 border border-slate-800 overflow-hidden">
+          {processed.map((asgn) => (
+            <div key={asgn.id} className={`rx-card rounded-xl bg-slate-900 border overflow-hidden transition-all ${asgn.priority === 'urgent' ? 'border-red-500/30 ring-1 ring-red-500/10' : 'border-slate-800'}`}>
               <button
                 onClick={() => handleSelect(asgn.id)}
                 className="w-full text-left p-5 hover:bg-slate-800/50 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500/20"
@@ -79,6 +132,14 @@ export const AssignmentsView: React.FC<AssignmentsViewProps> = ({ assignments, f
                         {asgn.pairName}
                       </span>
                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-500 font-mono">{asgn.id.slice(0, 8)}</span>
+                      <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-tight ${
+                        asgn.priority === 'urgent' ? 'bg-red-500 text-white' :
+                        asgn.priority === 'high' ? 'bg-amber-500 text-white' :
+                        asgn.priority === 'normal' ? 'bg-blue-500/20 text-blue-300 border border-blue-500/20' :
+                        'bg-slate-800 text-slate-400'
+                      }`}>
+                        {asgn.priority}
+                      </span>
                     </div>
                     <h3 className="text-sm font-bold text-slate-100 truncate">{asgn.title}</h3>
                     <div className="flex items-center gap-2 mt-1 text-[11px] text-slate-500">

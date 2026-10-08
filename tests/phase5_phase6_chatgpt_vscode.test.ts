@@ -81,11 +81,11 @@ describe('Phase 5 & Phase 6 — ChatGPT Planner & VS Code Provider', () => {
 
     // The conversation DOM: the pre-send boundary holds only the bootstrap turn, and the
     // post-send read observes the newly created instruction turn.
-    chatgpt.openDedicatedWindowAndCaptureId = () => ({ windowId: 85437176, tabId: 85437179 });
-    chatgpt.verifyHandleExists = () => true;
-    chatgpt.readHandleUrl = () => EXACT;
-    chatgpt.sleep = async () => {};
-    chatgpt.executeHandleJavaScript = (_h: any, _js: string) => {
+    (chatgpt as any).openDedicatedWindowAndCaptureId = () => ({ windowId: 85437176, tabId: 85437179 });
+    (chatgpt as any).verifyHandleExists = () => true;
+    (chatgpt as any).readHandleUrl = () => EXACT;
+    (chatgpt as any).sleep = async () => {};
+    (chatgpt as any).executeHandleJavaScript = (_h: any, _js: string) => {
       const turns = dom.submitted
         ? [
             { ordinal: 0, role: 'user', text: '[RelayX Provisioning] Planner session initialized' },

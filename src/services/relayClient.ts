@@ -153,6 +153,7 @@ class RelayService {
 
       let activeAssignmentTitle: string | undefined;
       let activeAssignmentStatus: any | undefined;
+      let activeAssignmentPriority: any | undefined;
       let deliveryStatus: any | undefined;
       let deliveryEvidence: ObservableEvidence | undefined;
       let handoffStatus: any | undefined;
@@ -163,6 +164,7 @@ class RelayService {
         if (asgn) {
           activeAssignmentTitle = asgn.title;
           activeAssignmentStatus = asgn.status;
+          activeAssignmentPriority = asgn.priority;
 
           if (asgn.activeDeliveryId) {
             const deliv = await this.db.deliveries.findById(asgn.activeDeliveryId);
@@ -198,6 +200,7 @@ class RelayService {
         activeAssignmentId: pair.activeAssignmentId,
         activeAssignmentTitle,
         activeAssignmentStatus,
+        activeAssignmentPriority,
         deliveryStatus,
         deliveryEvidence,
         handoffStatus,
@@ -252,6 +255,7 @@ class RelayService {
         projectId: a.projectId,
         title: a.title,
         instruction: a.instruction,
+        priority: a.priority,
         status: a.status,
         activeDeliveryStatus: deliveryStatus,
         activeHandoffStatus: handoffStatus,

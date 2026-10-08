@@ -5,6 +5,8 @@
  * normal baton is never confused with recovery authority, and the only permitted
  * continuation during recovery is Planner → Worker.
  */
+import { describe, it } from 'node:test';
+import expect from 'expect';
 import { RECOVERY_AUTHORITY, RECOVERY_AUTHORITY_LABEL, getRecoveryOwner, assertRecoveryAuthorityIndependentOfBaton, permittedTransitionDuringRecovery, isWorkerSideRecoveryTarget, initiatePlannerFirstRecovery, openPlannerIntervention, resolvePlannerRecovery, assertNoSelectableRecoveryDestination } from '../src/relay/domain/recoveryAuthority';
 
 describe('Recovery Authority — Invariant R1 (fixed PLANNER)', () => {

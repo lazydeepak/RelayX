@@ -772,6 +772,7 @@ export class SqliteAssignmentRepository implements IAssignmentRepository {
       title: row.title as string,
       instruction: row.instruction as string,
       targetSideRole: (row.target_side_role as any) || 'worker',
+      priority: (row.priority as any) || 'normal',
       sourceHandoffId: (row.source_handoff_id as HandoffId) || undefined,
       sourceRecoveryDeliveryId: (row.source_recovery_delivery_id as DeliveryId) || undefined,
       status: row.status as any,
@@ -816,15 +817,16 @@ export class SqliteAssignmentRepository implements IAssignmentRepository {
   async save(assignment: Assignment): Promise<void> {
     const stmt = this.db.prepare(`
       INSERT INTO assignments (
-        id, pair_id, project_id, title, instruction, target_side_role, source_handoff_id,
+        id, pair_id, project_id, title, instruction, target_side_role, priority, source_handoff_id,
         source_recovery_delivery_id, status,
         current_attempt_id, active_delivery_id, active_handoff_id,
         created_at, updated_at, completed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         instruction = excluded.instruction,
         target_side_role = excluded.target_side_role,
+        priority = excluded.priority,
         source_handoff_id = excluded.source_handoff_id,
         source_recovery_delivery_id = excluded.source_recovery_delivery_id,
         status = excluded.status,
@@ -841,6 +843,7 @@ export class SqliteAssignmentRepository implements IAssignmentRepository {
       assignment.title,
       assignment.instruction,
       assignment.targetSideRole,
+      assignment.priority,
       assignment.sourceHandoffId ?? null,
       assignment.sourceRecoveryDeliveryId ?? null,
       assignment.status,

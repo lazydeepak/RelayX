@@ -102,6 +102,7 @@ import {
   PairId,
   RuntimeSessionId,
   AssignmentId,
+  AssignmentPriority,
   HandoffId,
   DeliveryId,
   AttentionItemId,
@@ -394,6 +395,7 @@ export class RelayApiService implements IRelayApi {
 
       let activeAssignmentTitle: string | undefined;
       let activeAssignmentStatus: any;
+      let activeAssignmentPriority: any;
       let deliveryStatus: any;
       let deliveryEvidence: ObservableEvidence | undefined;
       let handoffStatus: any;
@@ -404,6 +406,7 @@ export class RelayApiService implements IRelayApi {
         if (assignment && ['pending', 'active', 'waiting_for_handoff'].includes(assignment.status)) {
           activeAssignmentTitle = assignment.title;
           activeAssignmentStatus = assignment.status;
+          activeAssignmentPriority = assignment.priority;
 
           if (assignment.activeDeliveryId) {
             const deliv = await this.db.deliveries.findById(assignment.activeDeliveryId);
@@ -455,6 +458,7 @@ export class RelayApiService implements IRelayApi {
         activeAssignmentId: pair.activeAssignmentId,
         activeAssignmentTitle,
         activeAssignmentStatus,
+        activeAssignmentPriority,
         deliveryStatus,
         deliveryEvidence,
         handoffStatus,
@@ -1506,6 +1510,7 @@ export class RelayApiService implements IRelayApi {
         projectId: a.projectId,
         title: a.title,
         instruction: a.instruction,
+        priority: a.priority,
         status: a.status,
         activeDeliveryStatus: deliveryStatus,
         activeHandoffStatus: handoffStatus,
@@ -1538,8 +1543,18 @@ export class RelayApiService implements IRelayApi {
     return result;
   }
 
-  public async createAssignment(pairId: string, title: string, instruction: string): Promise<UIAssignment> {
-    const assignment = await this.engine.createAssignment(pairId as PairId, title, instruction);
+  public async createAssignment(
+    pairId: string,
+    title: string,
+    instruction: string,
+    priority?: import('../domain/types.ts').AssignmentPriority,
+  ): Promise<UIAssignment> {
+    const assignment = await this.engine.createAssignment(
+      pairId as PairId,
+      title,
+      instruction,
+      priority,
+    );
     const pair = await this.db.pairs.findById(pairId as PairId);
 
     return {
@@ -1549,6 +1564,7 @@ export class RelayApiService implements IRelayApi {
       projectId: assignment.projectId,
       title: assignment.title,
       instruction: assignment.instruction,
+      priority: assignment.priority,
       status: assignment.status,
       createdAt: assignment.createdAt,
     };
@@ -1571,6 +1587,7 @@ export class RelayApiService implements IRelayApi {
     pairId: string,
     title: string,
     instruction: string,
+    priority: AssignmentPriority = 'normal',
   ): Promise<CreateAndDispatchResult> {
     let assignment: Assignment;
     try {
@@ -1578,6 +1595,7 @@ export class RelayApiService implements IRelayApi {
         pairId as PairId,
         title,
         instruction,
+        priority,
       );
     } catch (err: any) {
       // PRE-claim refusal: the claim transaction rolled back, so nothing durable
@@ -1593,6 +1611,7 @@ export class RelayApiService implements IRelayApi {
       projectId: assignment.projectId,
       title: assignment.title,
       instruction: assignment.instruction,
+      priority: assignment.priority,
       status: assignment.status,
       createdAt: assignment.createdAt,
     };
@@ -1647,6 +1666,7 @@ export class RelayApiService implements IRelayApi {
         projectId: assignment.projectId,
         title: assignment.title,
         instruction: assignment.instruction,
+        priority: assignment.priority,
         status: assignment.status,
         targetSideRole: assignment.targetSideRole ?? 'worker',
         source: assignment.sourceHandoffId ? 'handoff' : 'manual',

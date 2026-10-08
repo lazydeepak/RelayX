@@ -60,7 +60,7 @@ export default function App() {
   const [isAddProjectWizardOpen, setIsAddProjectWizardOpen] = useState(false);
   // Pair id the assignment modal should auto-select once the refreshed list contains it.
   const [pendingSelectedPairId, setPendingSelectedPairId] = useState<string | null>(null);
-  const [recoveryStates, setRecoveryStates] = useState<Record<string, import('../relay/domain/recoveryAuthority').RecoveryState | null>>({});
+  const [recoveryStates, setRecoveryStates] = useState<Record<string, import('./relay/domain/recoveryAuthority').RecoveryState | null>>({});
 
   useEffect(() => {
     localStorage.setItem('relay_theme', theme);
@@ -156,11 +156,11 @@ export default function App() {
             const { recoveryState } = await relayBridge.getPairRecoveryState(pairId);
             return { pairId, recoveryState };
           } catch {
-            return { pairId, recoveryState: null as import('../relay/domain/recoveryAuthority').RecoveryState | null };
+            return { pairId, recoveryState: null as import('./relay/domain/recoveryAuthority').RecoveryState | null };
           }
         })
       );
-      const recoveryStatesMap: Record<string, import('../relay/domain/recoveryAuthority').RecoveryState | null> = {};
+      const recoveryStatesMap: Record<string, import('./relay/domain/recoveryAuthority').RecoveryState | null> = {};
       for (const r of recoveryResults) recoveryStatesMap[r.pairId] = r.recoveryState ?? null;
 
       setMetrics(dash.metrics);
@@ -386,10 +386,11 @@ export default function App() {
     pairId: string,
     title: string,
     instruction: string,
+    priority?: import('./relay/domain/types').AssignmentPriority,
   ): Promise<{ created: boolean }> => {
     let result;
     try {
-      result = await relayBridge.createAndDispatchAssignment(pairId, title, instruction);
+      result = await relayBridge.createAndDispatchAssignment(pairId, title, instruction, priority);
     } catch (err: any) {
       // Unexpected IPC/transport failure before a structured result: creation is
       // unproven, so report it and keep the modal open (draft preserved).
@@ -654,6 +655,8 @@ export default function App() {
               <DashboardView
                 metrics={metrics}
                 recentEvents={events}
+                projects={projects}
+                assignments={assignments}
                 onTriggerSupervision={handleTriggerSupervision}
                 onOpenNewAssignment={() => setIsNewAssignmentOpen(true)}
                 onViewEvidence={(ev) => setSelectedEvidence(ev)}

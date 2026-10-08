@@ -11,12 +11,14 @@ import { renderToString } from 'react-dom/server';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { PlannerFirstRecoveryPanel } from '../src/components/PlannerFirstRecoveryPanel';
+import { PlannerFirstRecoveryPanel, PlannerFirstRecoveryPanelProps } from '../src/components/PlannerFirstRecoveryPanel';
 import type { RecoveryState } from '../src/relay/domain/recoveryAuthority';
 
-function renderHtml(props: React.ComponentProps<typeof PlannerFirstRecoveryPanel>): string {
+function renderHtml(props: Partial<PlannerFirstRecoveryPanelProps> & { phase: RecoveryState['phase'] }): string {
   return renderToString(
     <PlannerFirstRecoveryPanel
+      failureReason="test"
+      automationPaused={true}
       {...props}
       onPauseAndReturnToPlanner={() => {}}
       onSendToPlanner={() => {}}

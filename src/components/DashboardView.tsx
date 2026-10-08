@@ -11,8 +11,21 @@ import {
   Plus,
   Eye,
   ShieldCheck,
+  TrendingUp,
 } from 'lucide-react';
-import { UIEvent, ObservableEvidence } from '../types/ui.ts';
+import { UIEvent, ObservableEvidence, UIProject, UIAssignment } from '../types/ui.ts';
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+  AreaChart,
+  Area,
+} from 'recharts';
 
 interface DashboardViewProps {
   metrics: {
@@ -26,6 +39,8 @@ interface DashboardViewProps {
     ambiguousDeliveries: number;
   };
   recentEvents: UIEvent[];
+  projects: UIProject[];
+  assignments: UIAssignment[];
   onTriggerSupervision: () => void;
   onOpenNewAssignment: () => void;
   onViewEvidence: (ev: ObservableEvidence) => void;
@@ -36,6 +51,8 @@ interface DashboardViewProps {
 export const DashboardView: React.FC<DashboardViewProps> = ({
   metrics,
   recentEvents,
+  projects,
+  assignments,
   onTriggerSupervision,
   onOpenNewAssignment,
   onViewEvidence,
@@ -43,6 +60,42 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   isSupervising,
 }) => {
   const isEmptyDatabase = metrics.totalProjects === 0 && metrics.totalPairs === 0;
+
+  // Process data for the last 7 days trend
+  const last7Days = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date();
+    d.setDate(d.getDate() - (6 - i));
+    return d.toISOString().split('T')[0];
+  });
+
+  const chartData = last7Days.map((date) => {
+    const dayData: any = { 
+      date: new Date(date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+      rawDate: date 
+    };
+    projects.forEach((p) => {
+      const count = assignments.filter(
+        (a) =>
+          a.projectId === p.id &&
+          a.status === 'completed' &&
+          a.completedAt &&
+          new Date(a.completedAt).toISOString().split('T')[0] === date
+      ).length;
+      dayData[p.name] = count;
+    });
+    return dayData;
+  });
+
+  // Colors for projects
+  const COLORS = [
+    '#3b82f6', // blue-500
+    '#10b981', // emerald-500
+    '#8b5cf6', // violet-500
+    '#f59e0b', // amber-500
+    '#ec4899', // pink-500
+    '#06b6d4', // cyan-500
+    '#f97316', // orange-500
+  ];
 
   return (
     <div className="space-y-6">
@@ -170,6 +223,84 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <p className="text-[11px] text-slate-400 mt-1">Requires reconciliation action</p>
         </div>
       </div>
+
+      {/* Project Activity Trend Graph */}
+      {!isEmptyDatabase && (
+        <div className="rx-card bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-xl p-5 shadow-lg">
+          <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center gap-2">
+              <TrendingUp className="w-4 h-4 text-blue-400" />
+              <h2 className="text-sm font-semibold text-slate-200">Project Activity Trend</h2>
+            </div>
+            <div className="flex items-center gap-4">
+              <span className="text-[10px] text-slate-500 uppercase tracking-wider font-medium">Completed Assignments (7D)</span>
+            </div>
+          </div>
+
+          <div className="h-64 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                <defs>
+                  {projects.map((p, idx) => (
+                    <linearGradient key={`gradient-${p.id}`} id={`color-${idx}`} x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor={COLORS[idx % COLORS.length]} stopOpacity={0.3} />
+                      <stop offset="95%" stopColor={COLORS[idx % COLORS.length]} stopOpacity={0} />
+                    </linearGradient>
+                  ))}
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
+                <XAxis 
+                  dataKey="date" 
+                  axisLine={false}
+                  tickLine={false}
+                  tick={{ fill: '#64748b', fontSize: 10 }}
+                  dy={10}
+                />
+                <YAxis 
+                  axisLine={false}
+                  tickLine={false}
+                  tick={{ fill: '#64748b', fontSize: 10 }}
+                  allowDecimals={false}
+                />
+                <Tooltip 
+                  contentStyle={{ 
+                    backgroundColor: '#0f172a', 
+                    border: '1px solid #1e293b', 
+                    borderRadius: '8px',
+                    fontSize: '11px',
+                    color: '#f1f5f9'
+                  }}
+                  itemStyle={{ padding: '2px 0' }}
+                  cursor={{ stroke: '#334155', strokeWidth: 1 }}
+                />
+                <Legend 
+                  verticalAlign="top" 
+                  align="right" 
+                  iconType="circle"
+                  iconSize={8}
+                  wrapperStyle={{ 
+                    fontSize: '10px', 
+                    paddingBottom: '20px',
+                    color: '#94a3b8' 
+                  }}
+                />
+                {projects.map((p, idx) => (
+                  <Area
+                    key={p.id}
+                    type="monotone"
+                    dataKey={p.name}
+                    stroke={COLORS[idx % COLORS.length]}
+                    fillOpacity={1}
+                    fill={`url(#color-${idx})`}
+                    strokeWidth={2}
+                    stackId="1"
+                  />
+                ))}
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
 
       {/* Two Column Layout: System Lineage & Recent Traceable Events */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

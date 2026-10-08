@@ -24,6 +24,7 @@ describe('RelayIngress bootstrap — live pair verification', () => {
   });
 
   it('unique key enforced; no duplicate ingress for same arm', () => {
+    const { count } = db.prepare('SELECT COUNT(*) as count FROM relay_ingress WHERE stable_pair_id = ?').get('pair_muvg4an5_haeexmxj') as any;
     assert.strictEqual(count, 1, 'exactly one ingress for this pair');
   });
 

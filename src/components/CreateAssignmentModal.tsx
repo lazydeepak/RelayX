@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, Send, ListTodo, FolderPlus, GitMerge, AlertTriangle, ShieldAlert } from 'lucide-react';
-import { UIPair } from '../types/ui.ts';
+import { UIPair, AssignmentPriority } from '../types/ui.ts';
 import { resolveCreateAssignmentEligibility } from './pairDispatchEligibility.ts';
 import { shouldCloseCreateAssignmentModal } from './createAssignmentOutcome.ts';
 
@@ -12,7 +12,7 @@ interface CreateAssignmentModalProps {
    * Returns the durable creation outcome. The modal closes ONLY when
    * `created === true`; a pre-claim refusal keeps it open with the draft intact.
    */
-  onCreate: (pairId: string, title: string, instruction: string) => Promise<{ created: boolean }>;
+  onCreate: (pairId: string, title: string, instruction: string, priority: AssignmentPriority) => Promise<{ created: boolean }>;
   /** Open the existing project creation flow (AddProjectWizard). */
   onCreateProject: () => void;
   /** Open the existing pair creation flow (PairModal). Receives the project context of the current selection, when available. */
@@ -39,6 +39,7 @@ export const CreateAssignmentModal: React.FC<CreateAssignmentModalProps> = ({
   const [selectedPairId, setSelectedPairId] = useState<string>(pairs[0]?.id || '');
   const [title, setTitle] = useState<string>('');
   const [instruction, setInstruction] = useState<string>('');
+  const [priority, setPriority] = useState<AssignmentPriority>('normal');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Apply a pending pair selection (e.g. a pair just created via the Create Pair
@@ -68,13 +69,14 @@ export const CreateAssignmentModal: React.FC<CreateAssignmentModalProps> = ({
 
     setIsSubmitting(true);
     try {
-      const result = await onCreate(selectedPairId || pairs[0]?.id, title, instruction);
+      const result = await onCreate(selectedPairId || pairs[0]?.id, title, instruction, priority);
       if (shouldCloseCreateAssignmentModal(result)) {
         // A durable Assignment exists (even if its dispatch later failed or is
         // ambiguous). The draft is no longer a draft — close and let the user
         // work from the Assignment/Pair.
         setTitle('');
         setInstruction('');
+        setPriority('normal');
         onClose();
       }
       // created: false → keep the modal open with the draft preserved for retry.
@@ -179,6 +181,32 @@ export const CreateAssignmentModal: React.FC<CreateAssignmentModalProps> = ({
               onChange={(e) => setTitle(e.target.value)}
               className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500"
             />
+          </div>
+
+          <div>
+            <label className="block text-slate-300 font-medium mb-1">Priority</label>
+            <div className="grid grid-cols-4 gap-2">
+              {(['low', 'normal', 'high', 'urgent'] as AssignmentPriority[]).map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => setPriority(p)}
+                  className={`px-2 py-1.5 rounded-lg border text-[10px] font-bold uppercase tracking-wider transition-all ${
+                    priority === p
+                      ? p === 'urgent'
+                        ? 'bg-red-600 border-red-500 text-white shadow-lg shadow-red-900/20'
+                        : p === 'high'
+                        ? 'bg-amber-600 border-amber-500 text-white shadow-lg shadow-amber-900/20'
+                        : p === 'normal'
+                        ? 'bg-blue-600 border-blue-500 text-white shadow-lg shadow-blue-900/20'
+                        : 'bg-slate-600 border-slate-500 text-white shadow-lg shadow-slate-900/20'
+                      : 'bg-slate-950 border-slate-800 text-slate-500 hover:border-slate-600 hover:text-slate-400'
+                  }`}
+                >
+                  {p}
+                </button>
+              ))}
+            </div>
           </div>
 
           <div>

@@ -14,6 +14,7 @@ import {
   ObservableEvidence,
   createId,
   AssignmentStatus,
+  AssignmentPriority,
   PairSideRole,
   PairSideIdentity,
   PairActivationResult,
@@ -2003,6 +2004,7 @@ export class RelayEngine {
     pairId: PairId,
     title: string,
     instruction: string,
+    priority: AssignmentPriority = 'normal',
   ): Promise<Assignment> {
     const pair = await this.repos.pairs.findById(pairId);
     if (!pair) throw new RelayDomainError(`Pair ${pairId} not found`, 'PAIR_NOT_FOUND');
@@ -2027,13 +2029,13 @@ export class RelayEngine {
       });
     }
 
-    const assignment = Assignment.create(pairId, pair.projectId, title, instruction);
+    const assignment = Assignment.create(pairId, pair.projectId, title, instruction, priority);
     await this.repos.assignments.save(assignment);
 
     await this.emitEvent('assignment', assignment.id, 'assignment.created', {
       actor: 'user',
       newState: assignment.status,
-      details: { title, pairId },
+      details: { title, pairId, priority },
     });
 
     return assignment;
@@ -2080,6 +2082,7 @@ export class RelayEngine {
     pairId: PairId,
     title: string,
     instruction: string,
+    priority: AssignmentPriority = 'normal',
     context: AuthorityContext = 'OPERATOR_EXPLICIT',
   ): Promise<Assignment> {
     return this.repos.runInTransaction(async () => {
@@ -2089,7 +2092,7 @@ export class RelayEngine {
       // Same I-2 gate dispatch enforces — evaluated before anything is durable.
       pair.assertContactPermitted(context);
 
-      const created = Assignment.create(pairId, pair.projectId, title, instruction);
+      const created = Assignment.create(pairId, pair.projectId, title, instruction, priority);
 
       // Same execution-slot authority dispatch enforces — a non-terminal holder
       // is refused here, so no Assignment is created.
@@ -2102,7 +2105,7 @@ export class RelayEngine {
       await this.emitEvent('assignment', created.id, 'assignment.created', {
         actor: 'user',
         newState: created.status,
-        details: { title, pairId },
+        details: { title, pairId, priority },
       });
 
       return created;
@@ -2535,7 +2538,7 @@ export class RelayEngine {
    * Trigger delivery, Planner-ingress delivery, Planner decision assignment,
    * and Planner→Worker continuation delivery are separate durable identities.
    */
-  private async getCurrentRecoveryState(pairId: PairId): Promise<RecoveryState | null> {
+  public async getCurrentRecoveryState(pairId: PairId): Promise<RecoveryState | null> {
     const assignments = await this.repos.assignments.findByPairId(pairId);
     // A recovery episode is keyed to the recovery NOTICE delivery via
     // sourceRecoveryDeliveryId. Only a non-undefined value marks a genuine
@@ -2553,7 +2556,7 @@ export class RelayEngine {
     const activeRecovery = recoveryAssignments
       .slice()
       .sort((a, b) => b.createdAt - a.createdAt)
-      .find(a => a.status === 'pending' || a.status === 'delivering');
+      .find(a => a.status === 'pending' || a.status === 'active' || a.status === 'waiting_for_handoff');
 
     if (!activeRecovery) {
       // All recovery assignments are terminal → recovery is resolved
@@ -2564,7 +2567,14 @@ export class RelayEngine {
         episodeId: latestResolved.id,
         phase: 'resolved',
         initiatedAt: latestResolved.createdAt,
-        triggerDeliveryId: latestResolved.sourceRecoveryDeliveryId,
+        evidence: {
+          condition: 'unresolved_abnormal_state',
+          sourceDeliveryId: latestResolved.sourceRecoveryDeliveryId!,
+          sourceAssignmentId: latestResolved.id,
+          reason: 'Recovery resolved',
+          observedAt: latestResolved.completedAt || latestResolved.updatedAt,
+        },
+        triggerDeliveryId: latestResolved.sourceRecoveryDeliveryId!,
         recoveryAssignmentId: latestResolved.id,
         continuationDispatchedAt: latestResolved.completedAt,
       };
@@ -2584,6 +2594,13 @@ export class RelayEngine {
       episodeId: recoveryAssignmentId,
       phase: 'required',
       initiatedAt,
+      evidence: {
+        condition: 'unresolved_abnormal_state',
+        sourceDeliveryId: triggerDeliveryId,
+        sourceAssignmentId: recoveryAssignmentId,
+        reason: 'Active recovery assignment found',
+        observedAt: initiatedAt,
+      },
       triggerDeliveryId,
       recoveryAssignmentId,
     };
@@ -7188,6 +7205,7 @@ private isRuntimeSuspensionItemFor(
         freshPair.projectId,
         'Relay resume notice',
         notice,
+        'normal',
         'planner',
         undefined,
         baton.delivery!.id,
@@ -7558,6 +7576,7 @@ private isRuntimeSuspensionItemFor(
               freshCurrent.projectId,
               `Handoff from ${freshCurrent.targetSideRole}: ${freshCurrent.title}`,
               freshHandoff.resultSummary ?? 'Continue the relay from the completed opposite-side handoff.',
+              'normal',
               nextSide,
               freshHandoff.id,
             );

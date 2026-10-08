@@ -1,5 +1,6 @@
 import {
   AssignmentStatus,
+  AssignmentPriority,
   AttemptStatus,
   RuntimeSessionStatus,
   DeliveryStatus,
@@ -13,6 +14,7 @@ import {
 
 export type {
   AssignmentStatus,
+  AssignmentPriority,
   AttemptStatus,
   RuntimeSessionStatus,
   DeliveryStatus,
@@ -67,6 +69,7 @@ export interface UIPair {
   activeAssignmentId?: string;
   activeAssignmentTitle?: string;
   activeAssignmentStatus?: AssignmentStatus;
+  activeAssignmentPriority?: AssignmentPriority;
   deliveryStatus?: DeliveryStatus;
   deliveryEvidence?: ObservableEvidence;
   handoffStatus?: HandoffStatus;
@@ -106,6 +109,7 @@ export interface UIAssignment {
   projectId: string;
   title: string;
   instruction: string;
+  priority: AssignmentPriority;
   status: AssignmentStatus;
   currentAttemptNumber?: number;
   activeDeliveryStatus?: DeliveryStatus;

@@ -280,6 +280,13 @@ export const relayBridge: IRelayApi = {
     return getLocalFallbackService().openRuntimeSession(sessionId);
   },
 
+  getPairRecoveryState: async (pairId: string) => {
+    if (typeof window !== 'undefined' && window.relayApi) {
+      return window.relayApi.getPairRecoveryState(pairId);
+    }
+    return getLocalFallbackService().getPairRecoveryState(pairId);
+  },
+
   recoverRuntime: async (sessionId: string) => {
     if (typeof window !== 'undefined' && window.relayApi) {
       return window.relayApi.recoverRuntime(sessionId);
@@ -329,18 +336,18 @@ export const relayBridge: IRelayApi = {
     return getLocalFallbackService().listAssignments();
   },
 
-  createAssignment: async (pairId: string, title: string, instruction: string) => {
+  createAssignment: async (pairId: string, title: string, instruction: string, priority?: import('../relay/domain/types.ts').AssignmentPriority) => {
     if (typeof window !== 'undefined' && window.relayApi) {
-      return window.relayApi.createAssignment(pairId, title, instruction);
+      return window.relayApi.createAssignment(pairId, title, instruction, priority);
     }
-    return getLocalFallbackService().createAssignment(pairId, title, instruction);
+    return getLocalFallbackService().createAssignment(pairId, title, instruction, priority);
   },
 
-  createAndDispatchAssignment: async (pairId: string, title: string, instruction: string) => {
+  createAndDispatchAssignment: async (pairId: string, title: string, instruction: string, priority?: import('../relay/domain/types.ts').AssignmentPriority) => {
     if (typeof window !== 'undefined' && window.relayApi) {
-      return window.relayApi.createAndDispatchAssignment(pairId, title, instruction);
+      return window.relayApi.createAndDispatchAssignment(pairId, title, instruction, priority);
     }
-    return getLocalFallbackService().createAndDispatchAssignment(pairId, title, instruction);
+    return getLocalFallbackService().createAndDispatchAssignment(pairId, title, instruction, priority);
   },
 
   dispatchAssignment: async (assignmentId: string) => {

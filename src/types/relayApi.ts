@@ -3,6 +3,7 @@ import {
   UIProject,
   UIRuntimeSession,
   UIAssignment,
+  AssignmentPriority,
   UIEvent,
   UIFilteredEventsResult,
   UIActivityRecord,
@@ -378,7 +379,7 @@ export interface IRelayApi {
   archiveRuntimeSession(sessionId: string, reason?: string): Promise<UIRuntimeSession>;
   unarchiveRuntimeSession(sessionId: string): Promise<UIRuntimeSession>;
   listAssignments(): Promise<UIAssignment[]>;
-  createAssignment(pairId: string, title: string, instruction: string): Promise<UIAssignment>;
+  createAssignment(pairId: string, title: string, instruction: string, priority?: AssignmentPriority): Promise<UIAssignment>;
   /**
    * Create AND dispatch. Never throws for an expected outcome: the result
    * distinguishes a PRE-claim refusal (nothing was created) from a POST-claim
@@ -389,6 +390,7 @@ export interface IRelayApi {
     pairId: string,
     title: string,
     instruction: string,
+    priority?: AssignmentPriority,
   ): Promise<CreateAndDispatchResult>;
   dispatchAssignment(assignmentId: string): Promise<{ success: boolean; deliveryOutcome: string }>;
   completeAssignment(assignmentId: string): Promise<{ success: boolean }>;

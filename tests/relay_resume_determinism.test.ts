@@ -166,7 +166,7 @@ function userTurns(provider: MockProvider): number {
  * as another copy of the Worker's turn would hide a real duplicate behind an unrelated one.
  */
 function userTurnsWithText(provider: MockProvider, text: string): number {
-  return provider.messages.filter((m) => m.role === 'user' && m.text.includes(text)).length;
+  return provider.messages.filter((m) => m.role === 'user' && m.text?.includes(text)).length;
 }
 
 /** Every Attempt minted for one Assignment. */
@@ -472,6 +472,7 @@ describe('Relay transport determinism across a process stop/start', () => {
       pair.projectId,
       'derived',
       'Handoff from worker: P1',
+      'normal',
       'planner',
       handoff.id,
     );

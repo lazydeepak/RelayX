@@ -207,6 +207,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
         title TEXT NOT NULL,
         instruction TEXT NOT NULL,
         target_side_role TEXT NOT NULL DEFAULT 'worker',
+        priority TEXT NOT NULL DEFAULT 'normal',
         source_handoff_id TEXT,
         source_recovery_delivery_id TEXT,
         status TEXT NOT NULL,
@@ -408,6 +409,7 @@ CREATE TABLE IF NOT EXISTS handoffs (
     addColumnIfNeeded(this.db, 'assignments', 'active_delivery_id', 'TEXT');
     addColumnIfNeeded(this.db, 'assignments', 'active_handoff_id', 'TEXT');
     addColumnIfNeeded(this.db, 'assignments', 'target_side_role', "TEXT NOT NULL DEFAULT 'worker'");
+    addColumnIfNeeded(this.db, 'assignments', 'priority', "TEXT NOT NULL DEFAULT 'normal'");
     addColumnIfNeeded(this.db, 'assignments', 'source_handoff_id', 'TEXT');
     addColumnIfNeeded(this.db, 'assignments', 'completed_at', 'INTEGER');
     this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_assignments_source_handoff ON assignments(source_handoff_id) WHERE source_handoff_id IS NOT NULL;`);

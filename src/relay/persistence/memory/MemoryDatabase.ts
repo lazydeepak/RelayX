@@ -35,6 +35,7 @@ import {
   PairCheckpoint,
 } from '../../domain/entities.ts';
 import { HealthObservation, HealthIncident } from '../../domain/healthDomain.ts';
+import { RelayIngress } from '../../../domain/relayIngress.ts';
 import type { VerificationResult } from '../../domain/repoBoundary.ts';
 import {
   IRelayRepositories,
@@ -60,6 +61,7 @@ import {
   IProviderSettingsRepository,
   IHealthObservationRepository,
   IHealthIncidentRepository,
+  IRelayIngressRepository,
   ProviderSetting,
   AssociationEvidenceCriteria,
   EventFilterOptions,
@@ -1108,6 +1110,52 @@ export class MemoryHealthIncidentRepository implements IHealthIncidentRepository
   }
 }
 
+export class MemoryRelayIngressRepository implements IRelayIngressRepository, ISnapshotableMemoryRepo {
+  private readonly items = new Map<string, RelayIngress>();
+
+  snapshotState(): MemoryRepoSnapshot<RelayIngress> {
+    return snapshotMapItems(this.items);
+  }
+
+  restoreState(snapshot: MemoryRepoSnapshot<RelayIngress>): void {
+    restoreMapItems(this.items, snapshot);
+  }
+
+  async findById(id: string): Promise<RelayIngress | null> {
+    return this.items.get(id) ?? null;
+  }
+
+  async findByUniqueKey(stablePairId: string, sourceSide: string, externalSessionId: string, providerTurnIdentity: string): Promise<RelayIngress | null> {
+    return Array.from(this.items.values()).find(
+      (i) =>
+        i.stablePairId === stablePairId &&
+        i.sourceSide === sourceSide &&
+        i.externalSessionId === externalSessionId &&
+        i.providerTurnIdentity === providerTurnIdentity,
+    ) ?? null;
+  }
+
+  async findActiveForPair(pairId: string): Promise<RelayIngress | null> {
+    const active = Array.from(this.items.values())
+      .filter((i) => i.stablePairId === pairId && (i.state === 'armed' || i.state === 'observed'))
+      .sort((a, b) => b.createdAt - a.createdAt);
+    return active[0] ?? null;
+  }
+
+  async save(ingress: RelayIngress): Promise<void> {
+    this.items.set(ingress.ingressId, { ...ingress });
+  }
+
+  async updateState(id: string, state: RelayIngress['state'], materializedAssignmentId?: string | null): Promise<void> {
+    const item = this.items.get(id);
+    if (item) {
+      item.state = state;
+      item.materializedAssignmentId = materializedAssignmentId ?? undefined;
+      item.updatedAt = Date.now();
+    }
+  }
+}
+
 export class MemoryRelayDatabase implements IRelayRepositories {
   public readonly projects: MemoryProjectRepository;
   public readonly pairs: MemoryPairRepository;
@@ -1130,6 +1178,7 @@ export class MemoryRelayDatabase implements IRelayRepositories {
   public readonly providerSettings: MemoryProviderSettingsRepository;
   public readonly healthObservations: MemoryHealthObservationRepository;
   public readonly healthIncidents: MemoryHealthIncidentRepository;
+  public readonly relayIngresses: MemoryRelayIngressRepository;
 
   constructor() {
     this.projects = new MemoryProjectRepository();
@@ -1153,6 +1202,7 @@ export class MemoryRelayDatabase implements IRelayRepositories {
     this.providerSettings = new MemoryProviderSettingsRepository();
     this.healthObservations = new MemoryHealthObservationRepository();
     this.healthIncidents = new MemoryHealthIncidentRepository();
+    this.relayIngresses = new MemoryRelayIngressRepository();
   }
 
   async runInTransaction<T>(work: () => Promise<T>): Promise<T> {
@@ -1176,6 +1226,7 @@ export class MemoryRelayDatabase implements IRelayRepositories {
       this.contractRevisions,
       this.verificationResults,
       this.providerSettings,
+      this.relayIngresses,
     ];
     const snapshots = repos.map((repo) => repo.snapshotState());
     try {
@@ -1206,6 +1257,7 @@ export class MemoryRelayDatabase implements IRelayRepositories {
       this.contractRevisions,
       this.verificationResults,
       this.providerSettings,
+      this.relayIngresses,
     ];
     repos.forEach((repo) => repo.restoreState([]));
   }

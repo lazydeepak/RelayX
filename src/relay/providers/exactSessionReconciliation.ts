@@ -137,6 +137,8 @@ export interface ReconciliationMessage {
   error?: { type?: string | null; message?: string | null; status?: number | null } | null;
   /** Provider-reported model actually used for the turn. */
   model?: { providerID?: string | null; modelId?: string | null; variant?: string | null } | null;
+  /** S1 / I-7 provider-reported ordering, scoped to one session. */
+  ordinal?: number | null;
   /** Provider-reported run outcome marker (e.g. `idle` rows carry `failed`/`success`). */
   outcome?: string | null;
 }
@@ -202,7 +204,7 @@ export function recoverBoundaryFromExactSession(input: {
 }): ExactSessionWatermark | null {
   const expected = normalizeInstructionText(input.expectedText);
   if (!input.sessionId || !expected) return null;
-  const { ordered } = toChronological(input.messages);
+  const { ordered } = toChronological([...input.messages]);
   const matches = ordered.filter(
     (message) => message.role === 'user' && normalizeInstructionText(message.text) === expected,
   );
@@ -217,7 +219,7 @@ export function recoverBoundaryFromExactSession(input: {
     sessionId: input.sessionId,
     messageIds: prior.map((message) => message.messageId),
     messageCount: prior.length,
-    latestCreatedAt: prior.length ? prior[prior.length - 1].createdAt : null,
+    latestCreatedAt: prior.length ? (prior[prior.length - 1].createdAt ?? null) : null,
     latestUserTurnId: latestUser?.messageId ?? null,
     latestUserTurnOrdinal: latestUser?.ordinal ?? null,
     capturedAt: Date.now(),
