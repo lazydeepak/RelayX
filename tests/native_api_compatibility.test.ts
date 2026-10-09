@@ -27,11 +27,11 @@ function document() {
 }
 describe('native API structural compatibility', () => {
   it('accepts implemented response and ordered question-answer contracts', () => {
-    assert.deepEqual(checkNativeApiCompatibility(document()), { sessionRead: true, messageRead: true, messageSend: true, questionRead: true, questionReply: true, eventStream: true, blockers: [] });
+    assert.deepEqual(checkNativeApiCompatibility(document()), { sessionRead: true, messageRead: true, messageSend: true, executionTerminalRead: false, questionRead: true, questionReply: true, eventStream: true, blockers: ['UNSUPPORTED_CONTRACT:executionTerminalRead'] });
   });
   it('rejects declarations with no schemas and never assumes methods from paths', () => {
     const result = checkNativeApiCompatibility({ openapi: '3.1.0', paths: { '/session/{sessionID}': { post: response(string) }, '/question': { get: {} } } });
-    assert.equal(result.blockers.length, 6);
+    assert.equal(result.blockers.length, 7);
   });
   it('requires exact session identity and project directory', () => {
     const doc = document(); doc.components.schemas.Session.required = ['id'];
@@ -78,6 +78,17 @@ describe('native API structural compatibility', () => {
     assert.equal(checkNativeApiCompatibility(doc).messageRead, false);
     schema.Message = { oneOf: ['user', 'assistant'].map(role => object({ id: string, sessionID: string, role: { type: 'string', const: role } })) };
     assert.equal(checkNativeApiCompatibility(doc).messageRead, true);
+  });
+  it('recognizes terminal execution only from a typed assistant completion/error contract', () => {
+    const doc = document(); const schema = doc.components.schemas as Record<string, unknown>;
+    const error = object({ name: string });
+    const assistant = object({ id: string, sessionID: string, role: { type: 'string', const: 'assistant' },
+      time: { type: 'object', properties: { created: { type: 'integer' }, completed: { type: 'integer' } }, required: ['created'] },
+      parentID: string, providerID: string, modelID: string, finish: string, error: { anyOf: [error] } });
+    schema.Message = { oneOf: [object({ id: string, sessionID: string, role: { type: 'string', const: 'user' } }), assistant] };
+    assert.equal(checkNativeApiCompatibility(doc).executionTerminalRead, true);
+    delete (assistant.properties as Record<string,unknown>).finish;
+    assert.equal(checkNativeApiCompatibility(doc).executionTerminalRead, false);
   });
   it('requires question identity and session identity independently', () => {
     const doc = document();

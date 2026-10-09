@@ -8,13 +8,13 @@ function record(): NativeServerRecord {
   return { serverId: 'server', endpoint: 'http://127.0.0.1:4096', ownership: 'ADOPTED', revision: 2, lifecycle: 'INSPECTED',
     authKeyRef: 'opaque-key-ref', projectRoots: ['/project with space'], registeredBy: 'operator', ownershipEvidenceRef: 'adopted', createdAt: 100, updatedAt: 200,
     inspection: { observedAt: 200, apiSpecHash: 'digest', apiVersion: '1', serverVersion: '1', declaredOperations: [],
-      compatibility: { sessionRead: true, messageRead: true, messageSend: false, questionRead: false, questionReply: false, eventStream: false, blockers: [] } } };
+      compatibility: { sessionRead: true, messageRead: true, messageSend: false, executionTerminalRead: true, questionRead: false, questionReply: false, eventStream: false, blockers: [] } } };
 }
 const session = () => ({ id: 'ses_exact', directory: '/project with space', title: 'Renamed session', unknown: 'private-extra' });
 function transcript() {
   return [{ info: { id: 'msg_user', sessionID: 'ses_exact', role: 'user', time: { created: 100 }, model: { providerID: 'provider', modelID: 'model' } },
     parts: [{ id: 'part_user', sessionID: 'ses_exact', messageID: 'msg_user', type: 'text', text: 'Instruction' }] },
-  { info: { id: 'msg_assistant', sessionID: 'ses_exact', role: 'assistant', time: { created: 150, completed: 180 }, parentID: 'msg_user', providerID: 'provider', modelID: 'model' },
+  { info: { id: 'msg_assistant', sessionID: 'ses_exact', role: 'assistant', time: { created: 150, completed: 180 }, finish: 'stop', parentID: 'msg_user', providerID: 'provider', modelID: 'model' },
     parts: [{ id: 'part_answer', sessionID: 'ses_exact', messageID: 'msg_assistant', type: 'text', text: 'Answer' }] }];
 }
 function setup() {
@@ -35,8 +35,17 @@ describe('exact native session transcript reader', () => {
     assert.equal(result.status, 'READ'); assert.deepEqual(calls, ['/session/ses_exact', '/session/ses_exact/message']);
     if (result.status !== 'READ') return;
     assert.equal(result.session.title, 'Renamed session'); assert.equal(result.messages[1].parentId, 'msg_user');
+    assert.equal(result.messages[1].completedAt, 180); assert.equal(result.messages[1].finish, 'stop');
     assert.equal(result.messages[1].parts[0].text, 'Answer'); assert.equal(result.completeHistory, false);
     assert.equal(JSON.stringify(result).includes('private-extra'), false); assert.equal(JSON.stringify(result).includes('Basic secret'), false);
+  });
+  it('retains only the typed error discriminator, never provider error content', async () => {
+    const value = setup(); const info = value.messages[1].info as Record<string,unknown>; delete info.finish;
+    info.error = { name: 'ProviderAuthError', data: { message: 'secret provider body' } };
+    const result = await readNativeSession(value.store,value.options); assert.equal(result.status,'READ');
+    if (result.status === 'READ') { assert.equal(result.messages[1].errorType,'ProviderAuthError'); assert.equal(JSON.stringify(result).includes('secret provider body'),false); }
+    (info.error as { name: string }).name = 'secret provider body!';
+    assert.deepEqual(await readNativeSession(value.store,value.options),{status:'BLOCKED',reason:'RESPONSE_INVALID'});
   });
   it('blocks records without schema compatibility before credentials or network', async () => {
     const value = setup(); value.server.inspection!.compatibility = undefined;

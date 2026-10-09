@@ -7,6 +7,8 @@ export interface NativeTranscriptMessage {
   role: 'user' | 'assistant';
   createdAt: number;
   completedAt?: number;
+  finish?: string;
+  errorType?: string;
   parentId?: string;
   providerId: string;
   modelId: string;
@@ -24,6 +26,7 @@ function object(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 function text(value: unknown): value is string { return typeof value === 'string' && value.trim().length > 0; }
+function code(value: unknown): value is string { return typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/.test(value); }
 function time(value: unknown): value is number { return typeof value === 'number' && Number.isFinite(value) && value >= 0; }
 class ReadError extends Error {}
 
@@ -86,6 +89,8 @@ export async function readNativeSession(store: { get(serverId: string): NativeSe
       if ((info.role !== 'user' && info.role !== 'assistant') || !object(info.time) || !time(info.time.created)) throw new ReadError('RESPONSE_INVALID');
       const role = info.role as 'user' | 'assistant';
       if (info.time.completed !== undefined && (role !== 'assistant' || !time(info.time.completed) || info.time.completed < info.time.created)) throw new ReadError('RESPONSE_INVALID');
+      if (info.finish !== undefined && (role !== 'assistant' || !code(info.finish))) throw new ReadError('RESPONSE_INVALID');
+      if (info.error !== undefined && (role !== 'assistant' || !object(info.error) || !code(info.error.name))) throw new ReadError('RESPONSE_INVALID');
       const model = role === 'user' ? info.model : { providerID: info.providerID, modelID: info.modelID };
       if (!object(model) || !text(model.providerID) || !text(model.modelID) || (role === 'assistant' && (!text(info.parentID) || info.parentID === info.id))) throw new ReadError('RESPONSE_INVALID');
       const parts: NativeTranscriptMessage['parts'] = [];
@@ -98,6 +103,8 @@ export async function readNativeSession(store: { get(serverId: string): NativeSe
       }
       messages.push({ id: info.id, sessionId: options.sessionId, role, createdAt: info.time.created,
         ...(info.time.completed !== undefined ? { completedAt: info.time.completed as number } : {}),
+        ...(info.finish !== undefined ? { finish: info.finish as string } : {}),
+        ...(info.error !== undefined ? { errorType: info.error.name as string } : {}),
         ...(role === 'assistant' ? { parentId: info.parentID as string } : {}), providerId: model.providerID, modelId: model.modelID, parts });
     }
     if (!current()) return blocked('SUPERSEDED');

@@ -32,10 +32,14 @@ export class SqliteNativeTranscriptRepository implements NativeTranscriptStore {
           || !['user','assistant'].includes(message.role) || !validTime(message.createdAt)
           || !validText(message.providerId) || !validText(message.modelId) || !Array.isArray(message.parts)
           || (message.role === 'assistant' && (!validText(message.parentId) || message.parentId === message.id))
-          || (message.completedAt !== undefined && (message.role !== 'assistant' || !validTime(message.completedAt) || message.completedAt < message.createdAt))) throw new Error('Invalid transcript message');
+          || (message.completedAt !== undefined && (message.role !== 'assistant' || !validTime(message.completedAt) || message.completedAt < message.createdAt))
+          || (message.finish !== undefined && (message.role !== 'assistant' || !/^[A-Za-z][A-Za-z0-9_.-]{0,127}$/.test(message.finish)))
+          || (message.errorType !== undefined && (message.role !== 'assistant' || !/^[A-Za-z][A-Za-z0-9_.-]{0,127}$/.test(message.errorType)))) throw new Error('Invalid transcript message');
         messages.add(message.id);
         return { id: message.id, sessionId: message.sessionId, role: message.role, createdAt: message.createdAt,
           ...(message.completedAt !== undefined ? { completedAt: message.completedAt } : {}),
+          ...(message.finish !== undefined ? { finish: message.finish } : {}),
+          ...(message.errorType !== undefined ? { errorType: message.errorType } : {}),
           ...(message.role === 'assistant' ? { parentId: message.parentId } : {}),
           providerId: message.providerId, modelId: message.modelId, parts: message.parts.map(part => {
             if (!validText(part.id) || parts.has(part.id) || !validText(part.type)

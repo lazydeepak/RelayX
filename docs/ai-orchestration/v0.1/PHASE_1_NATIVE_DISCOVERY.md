@@ -462,6 +462,32 @@ establish conclusively not delivered.
 observation-recovery and migration tests pass. TypeScript checks and production
 builds pass.
 
+## Independent Worker terminal evidence
+
+Native transcript compatibility now has a separate `executionTerminalRead` capability
+grounded in OpenCode's pinned assistant schema: optional `time.completed`, `finish`
+and typed `error` fields. The pinned upstream OpenAPI satisfies this capability.
+The reader retains only a nonempty finish code or error type and discards provider
+error data, messages and other response-specific content.
+
+`SqliteRelayDatabase.nativeExecutionTerminals` requires the existing Worker-start
+observation, the same assistant message and exact parent/session/model authority.
+`completedAt + finish` moves a running Attempt to `completed_physical`;
+`completedAt + errorType` moves it to `interrupted`. Provider completion time becomes
+`finished_at`. Timestamp alone, finish alone, a missing assistant in a partial page,
+or unsupported historical compatibility leaves the Attempt running.
+
+The terminal observation and Attempt mutation commit atomically and are immutable
+afterward. Evidence stores correlation IDs, terminal code and transcript digest but
+not assistant text or provider error bodies. This establishes physical termination
+only; it does not verify correctness, create a Handoff or mark the Assignment done.
+
+193 focused compatibility, eligibility, transport, delivery/execution evidence,
+session reading, persistence, recovery and migration tests pass. Terminal cases cover
+success, typed provider error, incomplete signals, partial-page absence, authority
+drift, unsupported contracts, idempotency, rollback, tampering and error-data
+sanitization. TypeScript checks and production builds pass.
+
 ## Durable post-send transcript reconciliation
 
 `SqliteRelayDatabase.nativeDispatchReconciliations` now classifies a claimed send

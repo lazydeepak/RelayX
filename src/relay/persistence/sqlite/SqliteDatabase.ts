@@ -52,6 +52,7 @@ import { SqliteNativeDispatchAuthorizationRepository } from './SqliteNativeDispa
 import { SqliteNativeDispatchClaimRepository } from './SqliteNativeDispatchClaimRepository.ts';
 import { SqliteNativeDispatchReconciliationRepository } from './SqliteNativeDispatchReconciliationRepository.ts';
 import { SqliteNativeExecutionObservationRepository } from './SqliteNativeExecutionObservationRepository.ts';
+import { SqliteNativeExecutionTerminalRepository } from './SqliteNativeExecutionTerminalRepository.ts';
 
 function tableExists(db: DatabaseSync, tableName: string): boolean {
   const rows = db
@@ -111,6 +112,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
   public readonly nativeDispatchClaims: SqliteNativeDispatchClaimRepository;
   public readonly nativeDispatchReconciliations: SqliteNativeDispatchReconciliationRepository;
   public readonly nativeExecutionObservations: SqliteNativeExecutionObservationRepository;
+  public readonly nativeExecutionTerminals: SqliteNativeExecutionTerminalRepository;
 
   constructor(filePath = ':memory:') {
     this.db = new DatabaseSync(filePath);
@@ -148,6 +150,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     this.nativeDispatchClaims = new SqliteNativeDispatchClaimRepository(this.db);
     this.nativeDispatchReconciliations = new SqliteNativeDispatchReconciliationRepository(this.db);
     this.nativeExecutionObservations = new SqliteNativeExecutionObservationRepository(this.db);
+    this.nativeExecutionTerminals = new SqliteNativeExecutionTerminalRepository(this.db);
   }
 
   private initSchema(): void {
@@ -162,6 +165,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     SqliteNativeDispatchClaimRepository.initSchema(this.db);
     SqliteNativeDispatchReconciliationRepository.initSchema(this.db);
     SqliteNativeExecutionObservationRepository.initSchema(this.db);
+    SqliteNativeExecutionTerminalRepository.initSchema(this.db);
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS projects (

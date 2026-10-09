@@ -13,7 +13,7 @@ function setup() {
   db.nativeServers.register({ serverId: 'server', endpoint: 'http://127.0.0.1:4096', ownership: 'ADOPTED', authKeyRef: 'key', projectRoots: ['/project'], registeredBy: 'operator', ownershipEvidenceRef: 'evidence', now: 100 });
   db.nativeServers.applyDiscovery('server', 1, 200, { status: 'INSPECTED', server: { serverId: 'server', endpoint: 'http://127.0.0.1:4096', ownership: 'ADOPTED' }, observedAt: 200,
     serverVersion: '1', apiVersion: '1', apiSpecHash: 'digest', rawApiSpec: '{}', providers: [], declaredOperations: [], dispatchAuthorized: false,
-    compatibility: { sessionRead: true, messageRead: true, messageSend: true, questionRead: true, questionReply: true, eventStream: true, blockers: [] } });
+    compatibility: { sessionRead: true, messageRead: true, messageSend: true, executionTerminalRead: true, questionRead: true, questionReply: true, eventStream: true, blockers: [] } });
   const transcript: NativeTranscriptPage = { status: 'READ', serverId: 'server', serverRevision: 2, apiSpecHash: 'digest', observedAt: 250,
     session: { id: 'ses_exact', directory: '/project' }, messages: [], completeHistory: false };
   const questions: NativeQuestionObservation = { status: 'READ', serverId: 'server', serverRevision: 2, apiSpecHash: 'digest', observedAt: 250,
@@ -472,6 +472,65 @@ describe('native Worker-start observation', () => {
       await assert.rejects(value.db.runInTransaction(async () => { value.db.nativeExecutionObservations.observe('dispatch:key'); throw new Error('abort'); }));
       assert.equal(value.db.nativeExecutionObservations.get('dispatch:key'),undefined);
       assert.equal(value.db.db.prepare("SELECT status FROM attempts WHERE id='attempt'").get()?.status,'prepared');
+    } finally { value.db.close(); }
+  });
+});
+
+describe('native Worker terminal observation', () => {
+  const claimEvidence = { now:320,accountPolicyHash:'account-policy',taskQuotaEvidenceHash:operationalEvidence.taskQuotaEvidenceHash,
+    privacyEvidenceHash:operationalEvidence.privacyEvidenceHash,runtimeEvidenceHash:operationalEvidence.runtimeEvidenceHash };
+  const user = (): NativeTranscriptPage['messages'][number] => ({ id:providerMessageIdFor('dispatch:key'),sessionId:'ses_exact',role:'user',createdAt:325,
+    providerId:'provider',modelId:'model',parts:[{id:'user-part',type:'text',text:'Do work'}] });
+  const assistant = (overrides: Record<string,unknown> = {}): NativeTranscriptPage['messages'][number] => ({ id:'msg_assistant',sessionId:'ses_exact',role:'assistant',createdAt:330,
+    parentId:providerMessageIdFor('dispatch:key'),providerId:'provider',modelId:'model',parts:[{id:'assistant-part',type:'text',text:'Result'}],...overrides });
+  function running() { const value=setup(); value.db.nativeDispatchIntents.prepare(value.input);
+    value.db.nativeDispatchAuthorizations.authorize({dispatchKey:'dispatch:key',authorizedAt:310,eligibility:eligibility(),operationalEvidence});
+    value.db.nativeDispatchClaims.claim('dispatch:key',claimEvidence);
+    value.db.nativeTranscripts.save({status:'READ',serverId:'server',serverRevision:2,apiSpecHash:'digest',observedAt:350,session:{id:'ses_exact',directory:'/project'},messages:[user()],completeHistory:false});
+    value.db.nativeDispatchReconciliations.reconcile('dispatch:key');
+    value.db.nativeTranscripts.save({status:'READ',serverId:'server',serverRevision:2,apiSpecHash:'digest',observedAt:360,session:{id:'ses_exact',directory:'/project'},messages:[assistant()],completeHistory:false});
+    value.db.nativeExecutionObservations.observe('dispatch:key'); return value; }
+  function terminal(value: ReturnType<typeof setup>, overrides: Record<string,unknown>) { value.db.nativeTranscripts.save({status:'READ',serverId:'server',serverRevision:2,apiSpecHash:'digest',observedAt:370,
+    session:{id:'ses_exact',directory:'/project'},messages:[assistant(overrides)],completeHistory:false}); }
+  it('completes physical execution only from completed time plus successful finish', () => {
+    const value=running(); try { terminal(value,{completedAt:365,finish:'stop'}); const result=value.db.nativeExecutionTerminals.observe('dispatch:key');
+      assert.equal(result.terminal,true); assert.equal(result.observation?.outcome,'COMPLETED_PHYSICAL');
+      const attempt=value.db.db.prepare("SELECT status,finished_at,failure_reason,evidence_json FROM attempts WHERE id='attempt'").get();
+      assert.equal(attempt?.status,'completed_physical'); assert.equal(attempt?.finished_at,365); assert.equal(attempt?.failure_reason,null);
+      const evidence=JSON.parse(String(attempt?.evidence_json)); assert.equal(evidence.details.terminalCode,'stop'); assert.equal(JSON.stringify(evidence).includes('Result'),false);
+    } finally { value.db.close(); }
+  });
+  it('interrupts execution from a typed provider error without retaining its body', () => {
+    const value=running(); try { terminal(value,{completedAt:365,errorType:'ProviderAuthError'}); const result=value.db.nativeExecutionTerminals.observe('dispatch:key');
+      assert.equal(result.observation?.outcome,'INTERRUPTED'); const attempt=value.db.db.prepare("SELECT status,finished_at,failure_reason FROM attempts WHERE id='attempt'").get();
+      assert.equal(attempt?.status,'interrupted'); assert.equal(attempt?.finished_at,365); assert.equal(attempt?.failure_reason,'Provider execution error: ProviderAuthError');
+    } finally { value.db.close(); }
+  });
+  it('does not terminate on completed time alone, finish alone, or a missing assistant page', () => {
+    for (const messages of [[assistant({completedAt:365})],[assistant({finish:'stop'})],[]]) { const value=running(); try {
+      value.db.nativeTranscripts.save({status:'READ',serverId:'server',serverRevision:2,apiSpecHash:'digest',observedAt:370,session:{id:'ses_exact',directory:'/project'},messages,completeHistory:false});
+      assert.deepEqual(value.db.nativeExecutionTerminals.observe('dispatch:key'),{terminal:false});
+      assert.equal(value.db.db.prepare("SELECT status FROM attempts WHERE id='attempt'").get()?.status,'running');
+    } finally { value.db.close(); } }
+  });
+  it('fails closed on assistant authority drift or an unsupported historical contract', () => {
+    let value=running(); try { terminal(value,{completedAt:365,finish:'stop',modelId:'other'});
+      assert.throws(() => value.db.nativeExecutionTerminals.observe('dispatch:key'),/authority mismatch/);
+    } finally { value.db.close(); }
+    value=running(); try { terminal(value,{completedAt:365,finish:'stop'}); const row=value.db.db.prepare("SELECT record_json FROM native_server_history WHERE server_id='server' AND revision=2").get();
+      const server=JSON.parse(String(row?.record_json)); server.inspection.compatibility.executionTerminalRead=false;
+      value.db.db.prepare("UPDATE native_server_history SET record_json=? WHERE server_id='server' AND revision=2").run(JSON.stringify(server));
+      assert.throws(() => value.db.nativeExecutionTerminals.observe('dispatch:key'),/contract unsupported/);
+    } finally { value.db.close(); }
+  });
+  it('is idempotent, rolls back with outer work, and detects terminal tampering', async () => {
+    let value=running(); try { terminal(value,{completedAt:365,finish:'stop'}); const first=value.db.nativeExecutionTerminals.observe('dispatch:key');
+      assert.deepEqual(value.db.nativeExecutionTerminals.observe('dispatch:key'),first); value.db.db.exec("UPDATE native_execution_terminals SET completed_at=364");
+      assert.throws(() => value.db.nativeExecutionTerminals.get('dispatch:key'),/index mismatch/);
+    } finally { value.db.close(); }
+    value=running(); try { terminal(value,{completedAt:365,finish:'stop'});
+      await assert.rejects(value.db.runInTransaction(async()=>{value.db.nativeExecutionTerminals.observe('dispatch:key');throw new Error('abort');}));
+      assert.equal(value.db.nativeExecutionTerminals.get('dispatch:key'),undefined); assert.equal(value.db.db.prepare("SELECT status FROM attempts WHERE id='attempt'").get()?.status,'running');
     } finally { value.db.close(); }
   });
 });
