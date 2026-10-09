@@ -34,8 +34,9 @@ export async function probeRegisteredNativeServer(store: NativeServerStore, serv
   observedAt: number;
   resolveAuthorization: (keyRef: string) => Promise<string | undefined>;
 }): Promise<{ status: 'RECORDED' | 'SUPERSEDED' | 'NOT_AUTHORIZED' | 'AUTH_UNAVAILABLE' }> {
-  const record = store.get(serverId);
-  if (!record || record.lifecycle === 'REVOKED') return { status: 'NOT_AUTHORIZED' };
+  const stored = store.get(serverId);
+  if (!stored || stored.lifecycle === 'REVOKED') return { status: 'NOT_AUTHORIZED' };
+  const record = structuredClone(stored);
   if (!Number.isFinite(options.observedAt) || options.observedAt < record.updatedAt) throw new Error('Invalid native probe time');
   const unavailableAuth = () => ({ status: store.applyDiscovery(serverId, record.revision, options.observedAt,
     { status: 'BLOCKED', reason: 'AUTH_UNAVAILABLE' }) ? 'AUTH_UNAVAILABLE' as const : 'SUPERSEDED' as const });

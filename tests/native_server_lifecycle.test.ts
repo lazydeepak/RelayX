@@ -156,4 +156,15 @@ describe('durable native server ownership and lifecycle', () => {
       assert.equal(db.nativeServers.get('server')?.blocker, 'AUTH_UNAVAILABLE');
     } finally { db.close(); }
   });
+  it('captures probe revision when a store returns mutable records', async () => {
+    const db = new SqliteRelayDatabase();
+    try {
+      const record = db.nativeServers.register(registration()); let calls = 0;
+      const result = await probeRegisteredNativeServer({ get: () => record, applyDiscovery: () => { throw new Error('must not apply'); } }, 'server', {
+        ...probeOptions(), resolveAuthorization: async () => { record.revision++; return 'secret'; },
+        fetch: (async () => { calls++; throw new Error('must not fetch'); }) as typeof fetch,
+      });
+      assert.equal(result.status, 'SUPERSEDED'); assert.equal(calls, 0);
+    } finally { db.close(); }
+  });
 });

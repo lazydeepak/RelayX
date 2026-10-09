@@ -130,3 +130,41 @@ ordered answers, option labels, missing schemas, unknown roles, message unions,
 wrong event media type, references/cycles, persisted reports and immutable input
 documents. TypeScript checks and production builds pass. No full-suite rerun or
 installed OpenCode server acceptance was performed for this isolated parser slice.
+
+## Exact-session read-only transcript retrieval
+
+`nativeSessionReader.ts` reads the exact `/session/{sessionID}` and its message
+page. It requires INSPECTED ownership, explicit true session/message compatibility,
+a caller-supplied inspection freshness window, a valid `ses_*` identity, an exact
+registered directory and a positive caller-supplied message limit. Directory and
+limit are encoded as query parameters; response session/directory identity must
+match before the transcript request is made. No title matching or inferred project
+binding is used. Registered directory metadata remains trusted caller configuration,
+not an independently established canonical filesystem authority.
+
+Each message must have a unique ID, exact session ID, known user/assistant role,
+valid created/completed observation times and model/provider claims. Assistant parent
+IDs are retained; unknown parents outside a partial page are not fabricated. Each
+part must have unique ID and exact session/message correlation. Text/reasoning parts
+must contain string text; other part types retain identity/type only, with tool/file
+payload semantics intentionally pending. Returned data is a whitelist projection,
+not a raw provider response or diagnostic dump.
+
+Reader and lifecycle probe capture immutable record snapshots across asynchronous
+boundaries, recheck revision/ownership after secure-store resolution and reject
+superseded results. GET requests reject redirects, retain caller cancellation signals
+and never send prompts. Credential, HTTP, identity and malformed-response failures
+produce explicit blockers without remote error-body or auth-value exposure.
+
+Every read is a bounded page with `completeHistory: false`. Provider order is
+preserved without assuming a cross-page/event ordering guarantee. Completed timestamps
+are observations only: reading a transcript does not complete any Assignment,
+Attempt or Delivery, authorize inference or select a model. Transcript persistence,
+historical pagination and Engine reconciliation remain separate future integration.
+
+90 focused reader, compatibility, discovery and lifecycle tests pass, including a
+real loopback HTTP reader, renamed sessions, wrong directory/session/message/part
+identities, duplicate IDs, malformed roles/timestamps, paging limits, auth failures,
+revocation and mutable-store revision races. TypeScript checks and production builds
+pass. No full-suite rerun or live installed-server acceptance was performed for this
+isolated reader slice. The previous full-suite checkpoint and macOS limitation remain.
