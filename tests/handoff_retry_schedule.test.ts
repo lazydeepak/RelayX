@@ -181,6 +181,19 @@ describe('Hand-over retry backoff: a failed Delivery is retried on a schedule, n
     f = await fixture();
   });
 
+  it('a changed Planner session cannot inherit an older failed handoff retry', async () => {
+    const derivedId = await stageFirstFailedHandover(f);
+    const before = await deliveryCount(f, derivedId);
+    const pair = (await f.db.pairs.findById(f.pairId))!;
+    const planner = (await f.db.runtimes.findById(pair.plannerSessionId!))!;
+    planner.updateExternalIdentity('ses_replacement_planner', '/dev/replacement');
+    await f.db.runtimes.save(planner);
+    ageNewestDelivery(f, derivedId, SUSTAINED_MS);
+    await tick(f);
+    assert.equal(await deliveryCount(f, derivedId), before);
+    assert.equal(await attemptsFor(f, derivedId), before);
+  });
+
   it('1: a definite failure produces NO retry before 10 seconds, across many ticks', async () => {
     const derivedId = await stageFirstFailedHandover(f);
     const start = await deliveryCount(f, derivedId);

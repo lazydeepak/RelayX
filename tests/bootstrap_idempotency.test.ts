@@ -47,6 +47,17 @@ const POST_ARM_KEY = 'b6c16ae0-0089-4528-814a-16691b77b62e';
  * id of the arm that produced it — including after the bridge retires that arm.
  */
 class StubPlannerObserver {
+  public bootstrapOverride: Record<string, unknown> | null = null;
+  async ensureBootstrapArmed(conversationId: string, ingressId: string) {
+    return this.ensureArmed(conversationId);
+  }
+
+  async bootstrapStatus(conversationId: string, armId: string) {
+    const result: any = await this.status(conversationId);
+    if (this.bootstrapOverride) result.completion = { ...result.completion, ...this.bootstrapOverride };
+    return result;
+  }
+
   public armedArmId: string | null = null;
   public armIssueCount = 0;
   /** Set to simulate the completion being attributable only to a RETIRED arm. */
@@ -187,6 +198,29 @@ describe('RelayIngress bootstrap — exactly one Assignment across ticks and res
 
   after(() => {
     try { rmSync(dir, { recursive: true, force: true }); } catch {}
+  });
+
+  it('mismatched arms/sessions and empty or unidentified turns cannot create work', async () => {
+    const { db, engine } = openEngine();
+    try {
+      for (const override of [
+        { armId: 'unrelated-arm' },
+        { conversationId: 'other-conversation' },
+        { completedTurnKey: null },
+        { responseText: '   ' },
+      ]) {
+        observer.bootstrapOverride = override;
+        const report = await tick(engine);
+        assert.notStrictEqual(report.decision, 'materialized');
+        assert.strictEqual(assignmentCount(db), 0);
+        assert.strictEqual(count(db, 'SELECT COUNT(*) AS c FROM deliveries'), 0);
+      }
+      assert.strictEqual(ingressRows(db).length, 1, 'one durable boundary across rejected turns');
+      assert.strictEqual(observer.armIssueCount, 1, 'rejected observations do not rebaseline');
+    } finally {
+      observer.bootstrapOverride = null;
+      db.close();
+    }
   });
 
   it('tick 1: exactly one ingress and one Assignment, carrying the exact post-arm text', async () => {

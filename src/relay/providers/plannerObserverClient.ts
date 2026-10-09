@@ -75,6 +75,36 @@ interface RawObservation {
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8791';
 
 export class PlannerObserverClient {
+  /** Bootstrap arms belong to ingress roots, never to fabricated Deliveries. */
+  async ensureBootstrapArmed(conversationId: string, ingressId: string): Promise<PlannerObserverArm> {
+    const health = await this.request<{ allArms?: Array<{ armId: string; conversationId: string; ingressId?: string }> }>('GET', '/health');
+    // A retired arm remains the boundary for this root. Never rebaseline it.
+    const existing = health.allArms?.filter(a => a.conversationId === conversationId && a.ingressId === ingressId).pop();
+    if (existing) return { armId: existing.armId, conversationId, reused: true };
+    const res = await this.request<{ ok: boolean; armId?: string }>('POST', '/arm', { conversationId, ingressId, note: 'bootstrap ingress' });
+    if (!res.ok || !res.armId) throw new Error('observer bridge refused bootstrap arm');
+    return { armId: res.armId, conversationId, reused: false };
+  }
+
+  /** Match the persisted arm exactly, even if the bridge ledger was restarted. */
+  async bootstrapStatus(conversationId: string, armId: string): Promise<PlannerObserverStatus> {
+    const { observations } = await this.request<{ observations: RawObservation[] }>('GET', `/all?conversationId=${encodeURIComponent(conversationId)}`);
+    const matching = (observations ?? []).filter(o => o.conversationId === conversationId && o.armId === armId);
+    const latest = matching[matching.length - 1];
+    const finished = matching.filter(o => o.state === 'finished').pop();
+    return {
+      available: true, unavailableReason: null, conversationId, armId,
+      armActive: !finished, working: latest?.state === 'working',
+      completion: finished ? {
+        armId, conversationId, responseText: String(finished.latestCompletedResponse ?? ''),
+        responseHash: String(finished.responseHash ?? ''), responseLength: Number(finished.responseLength ?? 0),
+        completedTurnKey: finished.completedTurnKey ?? null, observedAt: String(finished.observedAt ?? ''),
+        adoptedFromUnresolvableArm: false,
+      } : null,
+      lastState: latest?.state ?? null, lastObservedAt: latest?.observedAt ?? null,
+    };
+  }
+
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
 

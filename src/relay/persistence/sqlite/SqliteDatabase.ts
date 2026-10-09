@@ -405,6 +405,12 @@ CREATE TABLE IF NOT EXISTS handoffs (
     addColumnIfNeeded(this.db, 'pairs', 'relay_state', "TEXT NOT NULL DEFAULT 'STOPPED'");
     addColumnIfNeeded(this.db, 'pairs', 'stable_pair_id', 'TEXT');
 
+    // Repair files already stamped v6 by the former Plan-First migration,
+    // which skipped the v4 backfill. Fill only missing anchors; preserve
+    // existing identities and operational permissions on every reopen.
+    this.db.exec(`UPDATE pairs SET stable_pair_id = id
+      WHERE stable_pair_id IS NULL OR stable_pair_id = '';`);
+
     addColumnIfNeeded(this.db, 'assignments', 'current_attempt_id', 'TEXT');
     addColumnIfNeeded(this.db, 'assignments', 'active_delivery_id', 'TEXT');
     addColumnIfNeeded(this.db, 'assignments', 'active_handoff_id', 'TEXT');
@@ -993,7 +999,8 @@ CREATE TABLE IF NOT EXISTS handoffs (
     );`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_relay_ingress_pair_state ON relay_ingress(stable_pair_id, state)`);
 
-    this.db.exec('PRAGMA user_version = 5;');
+    // Stamping v5 here skips the v4 Pair backfill and v5 identity migration.
+    this.db.exec('PRAGMA user_version = 3;');
   }
 
   public async runInTransaction<T>(work: () => Promise<T>): Promise<T> {

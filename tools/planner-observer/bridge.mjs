@@ -132,6 +132,7 @@ const server = http.createServer(async (req, res) => {
           // finished response being attributed to the NEXT baton: after the baton moves on, an
           // old arm's completion must never be picked up as the new owner's reply.
           deliveryId: String(body.deliveryId ?? '').trim() || null,
+          ingressId: String(body.ingressId ?? '').trim() || null,
           issuedAt: new Date().toISOString(),
           note: body.note ?? null,
           deliveredAt: null,
@@ -230,6 +231,7 @@ const server = http.createServer(async (req, res) => {
             armId: a.armId,
             conversationId: a.conversationId,
             deliveryId: a.deliveryId ?? null,
+            ingressId: a.ingressId ?? null,
             consumed: a.consumed,
             completed: a.completed === true,
           })),
@@ -237,6 +239,7 @@ const server = http.createServer(async (req, res) => {
             armId: a.armId,
             conversationId: a.conversationId,
             deliveryId: a.deliveryId ?? null,
+            ingressId: a.ingressId ?? null,
             completed: a.completed === true,
             issuedAt: a.issuedAt,
           })),
