@@ -369,3 +369,32 @@ seconds with 1,760 passing test cases, zero failed test cases and one skipped ca
 The command exits 1 solely because `bootstrap_regression.test.ts` fails during suite
 construction when its hard-coded macOS live database cannot open on Linux. This is
 the previously documented live-acceptance limitation, not a failed test case.
+
+## Durable zero-cost dispatch authorization
+
+`SqliteRelayDatabase.nativeDispatchAuthorizations` now stores a separate immutable,
+time-bounded permit for an exact prepared intent. Authorization runs the pure
+eligibility gate again and requires an exact five-field route, TASK purpose, current
+verified-free lease for every cost dimension, accepted task qualification, available
+task quota, approved privacy and healthy runtime. Pricing, account, qualification,
+quota, privacy and runtime evidence hashes are bound into the record. Its expiry is
+the earliest lease, qualification or operational-evidence expiry.
+
+The permit also requires the prepared server revision, Assignment pointers, pending
+Delivery, prepared Attempt and combined transcript/question/event boundary to remain
+current, with no pending question. A future sender must call the use-time check. That
+check fails closed after expiry or when the account policy, operational evidence,
+server authority, relay pointers or observation boundary changes. Authorization does
+not mutate task state and exposes no transport send method; records remain
+`AUTHORIZED_UNCONSUMED` in this slice.
+
+The operational evidence hashes are an adapter trust boundary. This repository binds
+and rechecks them but does not create quota, privacy or runtime attestations. A public
+catalog response alone cannot satisfy account-specific cost or quota evidence. No
+live provider account, inference request or billing behavior was verified here.
+
+103 focused eligibility, authorization, intent, observation-recovery and migration
+tests pass. The authorization cases cover every denied eligibility dimension, route
+and clock mismatch, bounded expiry, changed policy/evidence, stale observations,
+pending questions, Assignment/Delivery/Attempt changes, idempotency, rollback and
+serialized tampering. TypeScript checks and production builds pass.
