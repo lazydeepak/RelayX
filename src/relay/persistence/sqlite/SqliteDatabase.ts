@@ -47,6 +47,7 @@ import { SqliteNativeServerRepository } from './SqliteNativeServerRepository.ts'
 import { SqliteNativeTranscriptRepository } from './SqliteNativeTranscriptRepository.ts';
 import { SqliteNativeQuestionRepository } from './SqliteNativeQuestionRepository.ts';
 import { SqliteNativeEventRepository } from './SqliteNativeEventRepository.ts';
+import { SqliteNativeDispatchIntentRepository } from './SqliteNativeDispatchIntentRepository.ts';
 
 function tableExists(db: DatabaseSync, tableName: string): boolean {
   const rows = db
@@ -101,6 +102,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
   public readonly nativeTranscripts: SqliteNativeTranscriptRepository;
   public readonly nativeQuestions: SqliteNativeQuestionRepository;
   public readonly nativeEvents: SqliteNativeEventRepository;
+  public readonly nativeDispatchIntents: SqliteNativeDispatchIntentRepository;
 
   constructor(filePath = ':memory:') {
     this.db = new DatabaseSync(filePath);
@@ -133,6 +135,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     this.nativeTranscripts = new SqliteNativeTranscriptRepository(this.db);
     this.nativeQuestions = new SqliteNativeQuestionRepository(this.db);
     this.nativeEvents = new SqliteNativeEventRepository(this.db);
+    this.nativeDispatchIntents = new SqliteNativeDispatchIntentRepository(this.db);
   }
 
   private initSchema(): void {
@@ -142,6 +145,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     SqliteNativeTranscriptRepository.initSchema(this.db);
     SqliteNativeQuestionRepository.initSchema(this.db);
     SqliteNativeEventRepository.initSchema(this.db);
+    SqliteNativeDispatchIntentRepository.initSchema(this.db);
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS projects (

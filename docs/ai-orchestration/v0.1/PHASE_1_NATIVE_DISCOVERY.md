@@ -322,3 +322,44 @@ all-evidence commit, each blocked phase, final-write rollback, ownership loss af
 network reads, durable cursor reuse, replay deduplication, unchanged evidence and
 unchanged task tables. TypeScript checks and production builds pass. No full-suite
 rerun or installed-server acceptance was performed for this isolated coordinator.
+
+## Durable native dispatch preparation
+
+`SqliteRelayDatabase.nativeDispatchIntents` adds a transport-specific adjunct to the
+existing Assignment/Attempt/Delivery ledger. It does not create a competing task
+state machine. Preparation requires the existing Delivery to be pending, its Attempt
+to be prepared, the Assignment's current Attempt/active Delivery to match, frozen
+Pair/runtime/session authority to match, and the Delivery idempotency key to equal
+the dispatch key. One intent is permitted per Delivery and Attempt.
+
+The intent freezes assignment, attempt, delivery, dispatch key, exact native server
+revision, exact `ses_*` session and directory, policy version, canonical text payload
+and SHA-256 digest, plus all five model-route fields: provider, endpoint, published
+model, opaque account reference and runtime-configuration fingerprint. Unknown input
+fields are removed before persistence, preventing accidental auth/config data capture.
+The serialized intent also has an independent digest and indexed-field checks.
+
+The pre-send provider boundary must come from the latest transcript, question and
+event observations for the exact scope. All three must share one observation time
+and current server audit revision; the API digest and optional event cursor are
+recorded with transcript/question payload digests. Mixed or stale observations fail
+preparation. This relies on the combined checkpoint coordinator for coherent evidence;
+it remains a sequential observation window rather than a provider-atomic snapshot.
+
+Every record is `PREPARED_UNAUTHORIZED`. Preparation performs no HTTP request, does
+not change Attempt or Delivery status, and cannot be interpreted as eligibility or
+permission to send. The payload is retained because future restart-safe exactly-once
+submission must reproduce the committed bytes; retention/privacy policy and UI must
+account for that content. This slice supports text parts only. Model-route presence
+is checked, while verified-free eligibility and task qualification are deliberately
+deferred to the future authorization transition.
+
+25 focused dispatch-intent, combined-recovery and SQLite migration tests pass. They
+cover authority/session/idempotency mismatches, combined-boundary enforcement, exact
+model route, payload and intent digests, idempotency/conflicts, unknown-field removal,
+serialized/index tampering, revocation, transaction rollback and unchanged Attempt/
+Delivery states. TypeScript checks and production builds pass.
+
+The next slice needs a separate durable authorization decision bound to this exact
+intent and eligibility lease before any send method can exist. HTTP acceptance,
+provider-persisted message evidence and Worker completion must remain separate states.
