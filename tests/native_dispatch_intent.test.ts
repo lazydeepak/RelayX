@@ -208,3 +208,67 @@ describe('native dispatch zero-cost authorization', () => {
     } finally { value.db.close(); }
   });
 });
+
+describe('native dispatch one-shot claim', () => {
+  function authorize(value: ReturnType<typeof setup>) {
+    value.db.nativeDispatchIntents.prepare(value.input);
+    value.db.nativeDispatchAuthorizations.authorize({ dispatchKey: 'dispatch:key', authorizedAt: 310, eligibility: eligibility(), operationalEvidence });
+  }
+  const claimEvidence = { now: 320, accountPolicyHash: 'account-policy', taskQuotaEvidenceHash: operationalEvidence.taskQuotaEvidenceHash,
+    privacyEvidenceHash: operationalEvidence.privacyEvidenceHash, runtimeEvidenceHash: operationalEvidence.runtimeEvidenceHash };
+
+  it('atomically claims the authorized key and moves only its Delivery to delivering', () => {
+    const value = setup(); try { authorize(value);
+      const result = value.db.nativeDispatchClaims.claim('dispatch:key', claimEvidence);
+      assert.equal(result.acquired, true); assert.equal(result.claim.state, 'SEND_CLAIMED_RECONCILIATION_REQUIRED');
+      assert.deepEqual(value.db.nativeDispatchClaims.get('dispatch:key'), result.claim);
+      assert.equal(value.db.db.prepare("SELECT status FROM deliveries WHERE id='delivery'").get()?.status, 'delivering');
+      assert.equal(value.db.db.prepare("SELECT status FROM attempts WHERE id='attempt'").get()?.status, 'prepared');
+      assert.equal(value.db.nativeDispatchAuthorizations.get('dispatch:key')?.state, 'AUTHORIZED_UNCONSUMED');
+    } finally { value.db.close(); }
+  });
+
+  it('never reacquires an existing key, including after evidence expiry or change', () => {
+    const value = setup(); try { authorize(value);
+      const first = value.db.nativeDispatchClaims.claim('dispatch:key', claimEvidence);
+      const second = value.db.nativeDispatchClaims.claim('dispatch:key', { ...claimEvidence, now: 999, accountPolicyHash: 'changed' });
+      assert.equal(first.acquired, true); assert.equal(second.acquired, false); assert.deepEqual(second.claim, first.claim);
+      assert.equal(value.db.db.prepare('SELECT COUNT(*) AS n FROM native_dispatch_claims').get()?.n, 1);
+    } finally { value.db.close(); }
+  });
+
+  it('fails before mutation when authorization is absent, expired or authority changed', () => {
+    let value = setup(); try { value.db.nativeDispatchIntents.prepare(value.input);
+      assert.throws(() => value.db.nativeDispatchClaims.claim('dispatch:key', claimEvidence), /authorization not found/);
+      assert.equal(value.db.db.prepare("SELECT status FROM deliveries WHERE id='delivery'").get()?.status, 'pending');
+    } finally { value.db.close(); }
+    value = setup(); try { authorize(value);
+      assert.throws(() => value.db.nativeDispatchClaims.claim('dispatch:key', { ...claimEvidence, now: 450 }), /AUTHORIZATION_NOT_CURRENT/);
+      assert.equal(value.db.nativeDispatchClaims.get('dispatch:key'), undefined);
+    } finally { value.db.close(); }
+    value = setup(); try { authorize(value); value.db.db.exec("UPDATE assignments SET active_delivery_id='other'");
+      assert.throws(() => value.db.nativeDispatchClaims.claim('dispatch:key', claimEvidence), /RELAY_AUTHORITY_CHANGED/);
+      assert.equal(value.db.db.prepare("SELECT status FROM deliveries WHERE id='delivery'").get()?.status, 'pending');
+    } finally { value.db.close(); }
+  });
+
+  it('rolls the claim and Delivery transition back with outer RelayX work', async () => {
+    const value = setup(); try { authorize(value);
+      await assert.rejects(value.db.runInTransaction(async () => { value.db.nativeDispatchClaims.claim('dispatch:key', claimEvidence); throw new Error('abort'); }));
+      assert.equal(value.db.nativeDispatchClaims.get('dispatch:key'), undefined);
+      assert.equal(value.db.db.prepare("SELECT status FROM deliveries WHERE id='delivery'").get()?.status, 'pending');
+    } finally { value.db.close(); }
+  });
+
+  it('detects indexed and serialized claim tampering', () => {
+    let value = setup(); try { authorize(value); value.db.nativeDispatchClaims.claim('dispatch:key', claimEvidence);
+      value.db.db.exec('UPDATE native_dispatch_claims SET claimed_at=321');
+      assert.throws(() => value.db.nativeDispatchClaims.get('dispatch:key'), /index mismatch/);
+    } finally { value.db.close(); }
+    value = setup(); try { authorize(value); value.db.nativeDispatchClaims.claim('dispatch:key', claimEvidence);
+      const row = value.db.db.prepare('SELECT claim_json FROM native_dispatch_claims').get(); const parsed = JSON.parse(String(row?.claim_json)); parsed.state = 'SEND_COMPLETE';
+      value.db.db.prepare('UPDATE native_dispatch_claims SET claim_json=?').run(JSON.stringify(parsed));
+      assert.throws(() => value.db.nativeDispatchClaims.get('dispatch:key'), /Invalid native dispatch claim/);
+    } finally { value.db.close(); }
+  });
+});

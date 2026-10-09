@@ -385,8 +385,9 @@ Delivery, prepared Attempt and combined transcript/question/event boundary to re
 current, with no pending question. A future sender must call the use-time check. That
 check fails closed after expiry or when the account policy, operational evidence,
 server authority, relay pointers or observation boundary changes. Authorization does
-not mutate task state and exposes no transport send method; records remain
-`AUTHORIZED_UNCONSUMED` in this slice.
+not mutate task state and exposes no transport send method. Its immutable issuance
+record remains `AUTHORIZED_UNCONSUMED`; the separate one-shot claim below is the
+durable evidence that the permit has been consumed for submission.
 
 The operational evidence hashes are an adapter trust boundary. This repository binds
 and rechecks them but does not create quota, privacy or runtime attestations. A public
@@ -398,3 +399,31 @@ tests pass. The authorization cases cover every denied eligibility dimension, ro
 and clock mismatch, bounded expiry, changed policy/evidence, stale observations,
 pending questions, Assignment/Delivery/Attempt changes, idempotency, rollback and
 serialized tampering. TypeScript checks and production builds pass.
+
+## One-shot native send claim
+
+`SqliteRelayDatabase.nativeDispatchClaims` adds the durable point of no automatic
+return immediately before a future transport call. Acquiring a claim rechecks the
+exact authorization and all of its use-time authority inside one SQLite savepoint,
+inserts a digest-bound `SEND_CLAIMED_RECONCILIATION_REQUIRED` record, and moves the
+existing Delivery from `pending` to `delivering` in the same transaction. The
+Attempt remains `prepared`; a claim is no evidence that Worker execution began.
+
+Only the first caller receives `acquired: true`. Every later caller receives the
+same durable claim with `acquired: false`, even when its evidence has since expired
+or changed. Such a caller must reconcile the exact provider session and must never
+send again. This deliberately treats a crash anywhere after claim commit as an
+uncertain transport boundary. It may strand a provably unsent request, but it cannot
+turn a restart into a duplicate prompt.
+
+The claim table stores no credentials or provider response bodies. Its authorization
+digest and independent serialized digest detect mutation. Missing, expired or changed
+authorization and relay authority fail before mutation, and an outer RelayX rollback
+restores both the claim and Delivery status. This slice still has no POST client: a
+future transport coordinator may invoke the provider only after a newly acquired
+claim and must follow every response or failure with exact-session reconciliation.
+
+108 focused eligibility, authorization, claim, intent, observation-recovery and
+migration tests pass. Claim cases cover the atomic Delivery transition, permanent
+reacquisition refusal, expired/missing/changed authority, outer rollback and stored
+record tampering. TypeScript checks and production builds pass.
