@@ -542,3 +542,33 @@ migration tests pass. Worker-start cases cover exact parent correlation, partial
 recovery, absence, duplicate children, route/time mismatch, prerequisite Delivery,
 idempotency, rollback and stored-record tampering. TypeScript checks and production
 builds pass.
+
+## Deterministic restart evidence advancement
+
+`advanceNativeDispatchEvidence` now gives a restarted process one bounded entry point
+for advancing an already-claimed native dispatch. It never submits a prompt. Instead,
+it replays the durable delivery reconciliation, Worker-start observation and terminal
+observation in order, returning the first stable state that current evidence supports:
+waiting for delivery evidence, ambiguous delivery, confirmed delivery waiting for
+execution, running, physically completed or interrupted.
+
+Each underlying repository retains ownership of its atomic evidence-and-state
+transition. A crash between stages therefore needs no cross-repository transaction:
+the next invocation observes committed state and resumes idempotently. Missing claims
+and invalid stored evidence produce bounded blocker codes; internal evidence or
+transport details are not exposed. A terminal observation short-circuits replay, and
+no state permits reacquiring or resending the one-shot claim.
+
+195 focused compatibility, eligibility, transport, delivery/execution evidence,
+restart advancement, session reading, persistence, recovery and migration tests pass.
+Restart cases cover the complete staged progression, repeated terminal observation,
+single-claim preservation, missing claims and tampered transcript evidence. TypeScript
+checks and production builds pass.
+
+Latest full-suite checkpoint: 1,802 of 1,804 test cases pass and one is skipped. The
+single failed case is a wall-clock delay assertion in `health_phase1_audit.test.ts`;
+it passes when rerun in isolation and is load-sensitive under the concurrent suite.
+The command also retains the known suite-construction error in
+`bootstrap_regression.test.ts`, whose hard-coded macOS live-database path cannot open
+on Linux. Consequently the full `npm test` command exits 1; neither issue exercises
+the native dispatch evidence path.

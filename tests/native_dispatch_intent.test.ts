@@ -7,6 +7,7 @@ import type { NativeQuestionObservation } from '../src/relay/providers/nativeQue
 import type { NativeEventRead } from '../src/relay/providers/nativeEventObserver';
 import { COST_DIMENSIONS, type EligibilityRequest } from '../src/relay/model-intelligence/eligibility';
 import { claimAndSubmitNativePrompt, providerMessageIdFor } from '../src/relay/providers/nativePromptSubmission';
+import { advanceNativeDispatchEvidence } from '../src/relay/providers/nativeDispatchEvidenceAdvance';
 
 function setup() {
   const db = new SqliteRelayDatabase();
@@ -531,6 +532,41 @@ describe('native Worker terminal observation', () => {
     value=running(); try { terminal(value,{completedAt:365,finish:'stop'});
       await assert.rejects(value.db.runInTransaction(async()=>{value.db.nativeExecutionTerminals.observe('dispatch:key');throw new Error('abort');}));
       assert.equal(value.db.nativeExecutionTerminals.get('dispatch:key'),undefined); assert.equal(value.db.db.prepare("SELECT status FROM attempts WHERE id='attempt'").get()?.status,'running');
+    } finally { value.db.close(); }
+  });
+});
+
+describe('native restart evidence advancement', () => {
+  const claimEvidence={now:320,accountPolicyHash:'account-policy',taskQuotaEvidenceHash:operationalEvidence.taskQuotaEvidenceHash,
+    privacyEvidenceHash:operationalEvidence.privacyEvidenceHash,runtimeEvidenceHash:operationalEvidence.runtimeEvidenceHash};
+  const stores=(value:ReturnType<typeof setup>)=>({claims:value.db.nativeDispatchClaims,reconciliations:value.db.nativeDispatchReconciliations,
+    executions:value.db.nativeExecutionObservations,terminals:value.db.nativeExecutionTerminals});
+  function page(value:ReturnType<typeof setup>,observedAt:number,messages:NativeTranscriptPage['messages']) { value.db.nativeTranscripts.save({status:'READ',serverId:'server',serverRevision:2,
+    apiSpecHash:'digest',observedAt,session:{id:'ses_exact',directory:'/project'},messages,completeHistory:false}); }
+  const user=():NativeTranscriptPage['messages'][number]=>({id:providerMessageIdFor('dispatch:key'),sessionId:'ses_exact',role:'user',createdAt:325,
+    providerId:'provider',modelId:'model',parts:[{id:'user-part',type:'text',text:'Do work'}]});
+  const assistant=(terminal=false):NativeTranscriptPage['messages'][number]=>({id:'msg_assistant',sessionId:'ses_exact',role:'assistant',createdAt:330,
+    ...(terminal?{completedAt:375,finish:'stop'}:{}),parentId:providerMessageIdFor('dispatch:key'),providerId:'provider',modelId:'model',parts:[{id:'assistant-part',type:'text',text:'Result'}]});
+  it('resumes every durable evidence stage without transport or duplicate transitions', () => {
+    const value=setup(); try { value.db.nativeDispatchIntents.prepare(value.input);
+      value.db.nativeDispatchAuthorizations.authorize({dispatchKey:'dispatch:key',authorizedAt:310,eligibility:eligibility(),operationalEvidence});
+      value.db.nativeDispatchClaims.claim('dispatch:key',claimEvidence);
+      assert.deepEqual(advanceNativeDispatchEvidence(stores(value),'dispatch:key'),{status:'ADVANCED',state:'WAITING_DELIVERY_EVIDENCE'});
+      page(value,350,[]); assert.deepEqual(advanceNativeDispatchEvidence(stores(value),'dispatch:key'),{status:'ADVANCED',state:'DELIVERY_AMBIGUOUS'});
+      page(value,360,[user()]); assert.deepEqual(advanceNativeDispatchEvidence(stores(value),'dispatch:key'),{status:'ADVANCED',state:'DELIVERY_CONFIRMED_WAITING_EXECUTION'});
+      page(value,370,[assistant()]); assert.deepEqual(advanceNativeDispatchEvidence(stores(value),'dispatch:key'),{status:'ADVANCED',state:'EXECUTION_RUNNING'});
+      page(value,380,[assistant(true)]); assert.deepEqual(advanceNativeDispatchEvidence(stores(value),'dispatch:key'),{status:'ADVANCED',state:'EXECUTION_COMPLETED_PHYSICAL'});
+      assert.deepEqual(advanceNativeDispatchEvidence(stores(value),'dispatch:key'),{status:'ADVANCED',state:'EXECUTION_COMPLETED_PHYSICAL'});
+      assert.equal(value.db.db.prepare("SELECT status FROM deliveries WHERE id='delivery'").get()?.status,'delivered');
+      assert.equal(value.db.db.prepare("SELECT status FROM attempts WHERE id='attempt'").get()?.status,'completed_physical');
+      assert.equal(value.db.db.prepare('SELECT COUNT(*) AS n FROM native_dispatch_claims').get()?.n,1);
+    } finally { value.db.close(); }
+  });
+  it('returns bounded blockers and never exposes internal evidence errors', () => {
+    const value=setup(); try { assert.deepEqual(advanceNativeDispatchEvidence(stores(value),'missing'),{status:'BLOCKED',reason:'CLAIM_NOT_FOUND'});
+      value.db.nativeDispatchIntents.prepare(value.input); value.db.nativeDispatchAuthorizations.authorize({dispatchKey:'dispatch:key',authorizedAt:310,eligibility:eligibility(),operationalEvidence});
+      value.db.nativeDispatchClaims.claim('dispatch:key',claimEvidence); page(value,350,[user()]); value.db.db.exec("UPDATE native_transcript_observations SET payload_hash='forged'");
+      assert.deepEqual(advanceNativeDispatchEvidence(stores(value),'dispatch:key'),{status:'BLOCKED',reason:'DELIVERY_EVIDENCE_INVALID'});
     } finally { value.db.close(); }
   });
 });
