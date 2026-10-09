@@ -63,7 +63,7 @@ are local scratch evidence, not pinned test fixtures or account billing proof.
 
 ## Next integration work
 
-Catalog persistence, authoritative account evidence acquisition, capability checks, qualification measurement/ranking,
+Authoritative account evidence acquisition, capability checks, qualification measurement/ranking,
 quota observations, charge/402/429 invalidation and dispatch integration remain
 unimplemented. No inference, billing probe, source upload, live account verification
 or legacy dispatch behavior changed in this slice. No model is newly authorized.
@@ -71,3 +71,40 @@ or legacy dispatch behavior changed in this slice. No model is newly authorized.
 This branch is stacked on the Phase 0 repair branch for independent review. Human
 policy choices in the decision register remain open; this foundation does not decide
 code egress, evaluation budget or approval boundaries.
+
+## Durable discovery cache
+
+`SqliteRelayDatabase.modelCatalogs` now stores append-only catalog observations in
+the existing RelayX database. The additive `model_catalog_snapshots` table does not
+change the v6 migration marker, existing relay rows or execution permissions.
+Repeated identical observations are idempotent; earlier timestamps and conflicting
+observations at the same timestamp are rejected. No history is pruned while the
+evidence-retention decision remains open.
+
+On save and load, the repository reparses raw evidence and checks the normalized
+snapshot, digest, source, parser version and timestamp/index consistency. Corrupt
+evidence is surfaced as an error rather than silently trusted. This checks internal
+consistency, not authenticity against malicious database replacement. Savepoints
+preserve atomicity and participate in existing outer database transactions.
+`refreshStoredCatalog` reads persisted ETags and saves successful refreshes only;
+outages retain the prior durable snapshot and storage errors remain visible.
+
+Verification: 99 focused catalog, eligibility, persistence and migration tests pass.
+These include file-backed reopen, upgrading an existing v6 file, preservation of
+existing projects, exact public prices, duplicate writes, history preservation,
+evidence tampering, index corruption, outer transaction rollback, conditional
+refresh, HTTP outage and storage failure. TypeScript checks pass. Production builds
+passed before the final index consistency guard; the guard was checked by focused
+tests and TypeScript. The broader `npm test` run completed in 114 seconds:
+1,614 passing test cases, zero failed test cases, one skipped case (333 suites).
+The command still exits 1 because `bootstrap_regression.test.ts` fails during
+suite construction when opening the hard-coded macOS live database path on Linux.
+This is the same previously documented limitation; live acceptance remains unverified.
+
+Account-evidence review: the current environment reports no configured provider
+credentials or account identities. Public discovery offers no account-specific
+proof for the eleven billing dimensions required by RX-05. No account adapter is
+allowed to manufacture a VERIFIED_FREE lease from this cache, and no default quota,
+lease duration or automatic model choice has been introduced. Provider-specific
+account semantics and authorized account access must be established before live
+eligibility integration. This does not block native transport or capability work.
