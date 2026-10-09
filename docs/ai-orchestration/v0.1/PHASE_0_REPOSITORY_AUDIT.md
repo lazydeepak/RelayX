@@ -155,4 +155,14 @@ fresh root/arm for the current session. The old boundary remains auditable but c
 permanently block bootstrap after an authorized Pair rebind. This transition is
 covered before materialization in the file-backed restart suite.
 
+Terminal observer evidence is retained for every persisted arm even after more than
+5,000 later diagnostic observations; the rolling bound evicts only observations that
+are not needed to complete a retained arm. Hydration also derives an arm's completed
+state from its durable `finished` observation, closing the crash window between that
+append and the following derived `arm_state` append. The restart suite now has four
+process-level cases, including both failure modes. TypeScript, build and diff checks
+pass. The final full run reports 1,528 tests, 1,527 passed, zero failed test cases and
+one skipped (116.91 seconds); its nonzero exit remains solely the unchanged hard-coded
+macOS live-database suite-construction error described above.
+
 The earlier inventories included this construction error alongside failed test cases (25 entries at the 24-failure checkpoint). All previously listed test-case failures are now resolved or their stale fixtures/contracts corrected with evidence above. Next architecture work can proceed with this explicit environment limitation; actual macOS/OpenCode acceptance remains outstanding.

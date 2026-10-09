@@ -53,4 +53,31 @@ describe('Planner observer bridge restart durability', () => {
     assert.deepEqual(health.allArms.map(arm=>arm.armId),[armed.armId],
       'the first post-crash arm remains a separate durable ledger record');
   });
+  it('recovers completion when the process dies before its arm-state append', async () => {
+    const directory=mkdtempSync(join(tmpdir(),'relayx-observer-')); directories.push(directory);
+    const log=join(directory,'observations.jsonl'); const port=18000+(process.pid%10000);
+    const arm={armId:'arm_crash_window',conversationId:'conversation',deliveryId:null,ingressId:'ingress',
+      issuedAt:new Date().toISOString(),note:null,deliveredAt:new Date().toISOString(),consumed:true,completed:false};
+    appendFileSync(log,`${JSON.stringify({ledgerType:'arm',arm})}\n${JSON.stringify({
+      state:'finished',conversationId:'conversation',armId:arm.armId,latestCompletedResponse:'done',
+      completedTurnKey:'turn',seq:1,receivedAt:new Date().toISOString()})}\n`);
+    await start(port,log);
+    const health=await fetch(`http://127.0.0.1:${port}/health`).then(response=>response.json()) as {allArms:Array<{completed:boolean}>};
+    assert.equal(health.allArms[0]!.completed,true);
+    const next=await fetch(`http://127.0.0.1:${port}/next?conversationId=conversation`).then(response=>response.json()) as {armed:boolean;reason:string};
+    assert.equal(next.armed,false); assert.match(next.reason,/already produced its completion/);
+  });
+  it('retains an arm completion beyond the rolling observation window', async () => {
+    const directory=mkdtempSync(join(tmpdir(),'relayx-observer-')); directories.push(directory);
+    const log=join(directory,'observations.jsonl'); const port=18000+(process.pid%10000);
+    const arm={armId:'arm_old_completion',conversationId:'conversation',deliveryId:null,ingressId:'ingress',
+      issuedAt:new Date().toISOString(),note:null,deliveredAt:new Date().toISOString(),consumed:true,completed:false};
+    appendFileSync(log,`${JSON.stringify({ledgerType:'arm',arm})}\n${JSON.stringify({
+      state:'finished',conversationId:'conversation',armId:arm.armId,latestCompletedResponse:'done',
+      completedTurnKey:'turn',seq:1,receivedAt:new Date().toISOString()})}\n`);
+    for(let seq=2;seq<=5002;seq++) appendFileSync(log,`${JSON.stringify({state:'working',conversationId:'other',seq})}\n`);
+    await start(port,log);
+    const all=await fetch(`http://127.0.0.1:${port}/all?conversationId=conversation`).then(response=>response.json()) as {observations:Array<{armId:string}>};
+    assert.deepEqual(all.observations.map(observation=>observation.armId),[arm.armId]);
+  });
 });
