@@ -43,6 +43,18 @@ import { SqliteProviderSettingsRepository } from './SqliteProviderSettingsReposi
 import { SqliteHealthObservationRepository, SqliteHealthIncidentRepository } from './SqliteHealthRepository.ts';
 import { SqliteRelayIngressRepository } from './SqliteRelayIngressRepository.ts';
 import { SqliteModelCatalogRepository } from './SqliteModelCatalogRepository.ts';
+import { SqliteNativeServerRepository } from './SqliteNativeServerRepository.ts';
+import { SqliteNativeTranscriptRepository } from './SqliteNativeTranscriptRepository.ts';
+import { SqliteNativeQuestionRepository } from './SqliteNativeQuestionRepository.ts';
+import { SqliteNativeEventRepository } from './SqliteNativeEventRepository.ts';
+import { SqliteNativeDispatchIntentRepository } from './SqliteNativeDispatchIntentRepository.ts';
+import { SqliteNativeDispatchAuthorizationRepository } from './SqliteNativeDispatchAuthorizationRepository.ts';
+import { SqliteNativeDispatchClaimRepository } from './SqliteNativeDispatchClaimRepository.ts';
+import { SqliteNativeDispatchReconciliationRepository } from './SqliteNativeDispatchReconciliationRepository.ts';
+import { SqliteNativeExecutionObservationRepository } from './SqliteNativeExecutionObservationRepository.ts';
+import { SqliteNativeExecutionTerminalRepository } from './SqliteNativeExecutionTerminalRepository.ts';
+import { SqliteNativeQuestionReplyIntentRepository } from './SqliteNativeQuestionReplyIntentRepository.ts';
+import { SqliteNativeQuestionReplyAuthorizationRepository } from './SqliteNativeQuestionReplyAuthorizationRepository.ts';
 
 function tableExists(db: DatabaseSync, tableName: string): boolean {
   const rows = db
@@ -93,6 +105,18 @@ export class SqliteRelayDatabase implements IRelayRepositories {
   public readonly healthIncidents: SqliteHealthIncidentRepository;
   public readonly relayIngresses: SqliteRelayIngressRepository;
   public readonly modelCatalogs: SqliteModelCatalogRepository;
+  public readonly nativeServers: SqliteNativeServerRepository;
+  public readonly nativeTranscripts: SqliteNativeTranscriptRepository;
+  public readonly nativeQuestions: SqliteNativeQuestionRepository;
+  public readonly nativeEvents: SqliteNativeEventRepository;
+  public readonly nativeDispatchIntents: SqliteNativeDispatchIntentRepository;
+  public readonly nativeDispatchAuthorizations: SqliteNativeDispatchAuthorizationRepository;
+  public readonly nativeDispatchClaims: SqliteNativeDispatchClaimRepository;
+  public readonly nativeDispatchReconciliations: SqliteNativeDispatchReconciliationRepository;
+  public readonly nativeExecutionObservations: SqliteNativeExecutionObservationRepository;
+  public readonly nativeExecutionTerminals: SqliteNativeExecutionTerminalRepository;
+  public readonly nativeQuestionReplyIntents: SqliteNativeQuestionReplyIntentRepository;
+  public readonly nativeQuestionReplyAuthorizations: SqliteNativeQuestionReplyAuthorizationRepository;
 
   constructor(filePath = ':memory:') {
     this.db = new DatabaseSync(filePath);
@@ -121,11 +145,35 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     this.healthIncidents = new SqliteHealthIncidentRepository(this.db);
     this.relayIngresses = new SqliteRelayIngressRepository(this.db);
     this.modelCatalogs = new SqliteModelCatalogRepository(this.db);
+    this.nativeServers = new SqliteNativeServerRepository(this.db);
+    this.nativeTranscripts = new SqliteNativeTranscriptRepository(this.db);
+    this.nativeQuestions = new SqliteNativeQuestionRepository(this.db);
+    this.nativeEvents = new SqliteNativeEventRepository(this.db);
+    this.nativeDispatchIntents = new SqliteNativeDispatchIntentRepository(this.db);
+    this.nativeDispatchAuthorizations = new SqliteNativeDispatchAuthorizationRepository(this.db);
+    this.nativeDispatchClaims = new SqliteNativeDispatchClaimRepository(this.db);
+    this.nativeDispatchReconciliations = new SqliteNativeDispatchReconciliationRepository(this.db);
+    this.nativeExecutionObservations = new SqliteNativeExecutionObservationRepository(this.db);
+    this.nativeExecutionTerminals = new SqliteNativeExecutionTerminalRepository(this.db);
+    this.nativeQuestionReplyIntents = new SqliteNativeQuestionReplyIntentRepository(this.db);
+    this.nativeQuestionReplyAuthorizations = new SqliteNativeQuestionReplyAuthorizationRepository(this.db);
   }
 
   private initSchema(): void {
     this.db.exec('PRAGMA foreign_keys = ON;');
     SqliteModelCatalogRepository.initSchema(this.db);
+    SqliteNativeServerRepository.initSchema(this.db);
+    SqliteNativeTranscriptRepository.initSchema(this.db);
+    SqliteNativeQuestionRepository.initSchema(this.db);
+    SqliteNativeEventRepository.initSchema(this.db);
+    SqliteNativeDispatchIntentRepository.initSchema(this.db);
+    SqliteNativeDispatchAuthorizationRepository.initSchema(this.db);
+    SqliteNativeDispatchClaimRepository.initSchema(this.db);
+    SqliteNativeDispatchReconciliationRepository.initSchema(this.db);
+    SqliteNativeExecutionObservationRepository.initSchema(this.db);
+    SqliteNativeExecutionTerminalRepository.initSchema(this.db);
+    SqliteNativeQuestionReplyIntentRepository.initSchema(this.db);
+    SqliteNativeQuestionReplyAuthorizationRepository.initSchema(this.db);
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS projects (

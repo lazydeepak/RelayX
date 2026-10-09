@@ -1,0 +1,632 @@
+# Native OpenCode discovery foundation
+
+`src/relay/providers/nativeOpenCodeDiscovery.ts` adds an isolated read-only native
+discovery adapter for RX-04. It requires an explicit managed/adopted server reference;
+it does not discover arbitrary processes or treat system services as RelayX-owned.
+This reference is a caller contract, not independently verified ownership. Future
+process supervision/operator adoption must establish that authority. The durable
+registration and lifecycle foundation below now persists those references.
+
+The adapter fetches `/doc`, requires OpenAPI 3 and advertised GET operations with
+200 responses for `/global/health` and `/provider`, then validates actual health
+and provider responses against the implemented contract. It records raw API spec,
+SHA-256 digest, declared operations, API version, runtime version, observation time
+and provider/model identities. A connected provider means runtime configuration,
+not verified account entitlement, pricing, available quota or task qualification.
+
+The implemented contract was inspected in published `@opencode-ai/sdk` 1.18.35:
+`dist/v2/gen/types.gen.d.ts` defines health `{ healthy: true, version: string }`
+and provider list `{ all: Provider[], default: Record<string,string>, connected:
+string[] }`. Provider model IDs and provider IDs must match their owning records.
+Inspection source: https://registry.npmjs.org/@opencode-ai/sdk/-/sdk-1.18.35.tgz
+with SHA-256 `1d90a963bcc505282dd1242488c8bdee2df8caa8b23ae9d9981de9bc62b121e4`.
+Downloaded source is local scratch inspection evidence, not an installed dependency.
+Upstream GitHub source URLs attempted first returned 404, so the published SDK was
+used instead. Other server contracts (including legacy 2.0.21 API shapes) are not
+implicitly translated or assumed supported.
+
+All requests are GETs to the explicitly supplied origin. Redirects are rejected;
+URL credentials, query parameters and non-root paths are rejected. Cleartext
+endpoints are limited to literal IPv4/IPv6 loopback; remote endpoints require TLS.
+Cancellation/deadlines are caller-supplied. Secure-store authorization is accepted
+as an input and never returned. Provider keys/options, error bodies and transport
+error strings are omitted from results. A failed probe returns an explicit blocker.
+
+`INSPECTED` means only that this discovery contract succeeded. Declared session,
+question and event operations feed the structural compatibility report below;
+they are not verified runtime message semantics. `dispatchAuthorized` is always false. No prompts,
+session creation, model switches, process launch or GUI/CLI fallback are performed.
+Existing shared-session and fixed-server legacy clients are unchanged.
+
+## Verification and remaining work
+
+50 combined native discovery and existing shared-session tests pass. Coverage
+includes a real loopback HTTP boundary, GET-only requests, declared API checks,
+auth/status/network failures, malformed responses, unhealthy 2xx, unknown ownership,
+endpoint validation, ambiguous providers, cross-provider model identities and secret
+omission. TypeScript checks pass. Production builds passed before the final
+provider-ID consistency check, which was verified by focused tests and TypeScript.
+The full suite was not rerun for this isolated adapter; the previous checkpoint is
+1,614 passing test cases with the known macOS live-database suite-construction error.
+
+There is no installed OpenCode executable in this environment, so no actual installed
+server `/doc`, health, inventory or inference was verified. Startup supervision,
+exact-session message transport, event recovery,
+question response, version-specific capability validation and dispatch integration
+remain future work. This draft branch is stacked on the model discovery PR.
+
+## Durable ownership and lifecycle foundation
+
+`SqliteRelayDatabase.nativeServers` now stores native server registrations and
+append-only revision history in the existing database. Additive tables and a unique
+active-endpoint index preserve existing relay data and the v6 schema marker.
+Registrations require an actor, ownership evidence reference, opaque secure-store
+auth reference and explicit managed/adopted mode. Endpoints use the same validation
+as discovery. Managed registrations require literal loopback. Project roots are
+stored metadata, not permission grants or independently verified filesystem roots.
+The repository does not prove that caller-supplied ownership evidence is valid;
+trusted operator adoption/process supervision must establish it.
+
+Lifecycle states are REGISTERED, INSPECTED, BLOCKED and REVOKED. Registration does
+not claim a running process. Inspection stores API digest/version, declared operations
+and historical healthy time. Failed inspection removes current inspection evidence
+while preserving historical healthy time. Revocation is terminal, clears inspection
+and frees the endpoint for a new explicit identity. IDs and endpoint bindings cannot
+be silently overwritten. No PID is treated as process identity, and no process is
+spawned or killed by this foundation.
+
+`probeRegisteredNativeServer` resolves authorization by secure-store reference,
+rechecks ownership after asynchronous resolution, performs GET discovery outside
+database transactions and applies results only at the captured revision. Revocation
+or a newer observation supersedes a delayed probe. Missing secure-store access is
+recorded as AUTH_UNAVAILABLE without persisting the credential or exception text.
+Registration and each transition commit with their audit revision in one savepoint;
+outer RelayX transactions retain rollback authority. Backwards observation clocks
+and mismatched server evidence are rejected.
+
+55 focused lifecycle, discovery, catalog persistence and SQLite migration tests pass,
+including file-backed reopen, stable identity/endpoint conflicts, terminal revocation,
+delayed observation races, secure-store resolution races, exact probe evidence,
+missing credential handling, transaction rollback and audit-write failure. TypeScript
+checks and production builds pass. The full suite was not rerun for this additive
+slice; the prior checkpoint and macOS suite-construction limitation remain as above.
+
+Actual process startup/supervision, credential-store implementation and operator UI
+adoption are still pending RX-04 OPEN-04 (macOS deployment and installed version audit).
+No new live server, inference call or automatic dispatch authorization was introduced.
+
+## Structural session/question/event compatibility
+
+`nativeApiCompatibility.ts` now checks the running OpenAPI document's declared
+response/request subset for five independent capabilities. The report is returned
+by discovery and persisted with inspection evidence. Existing inspection records
+may omit it; omission must never be treated as compatibility approval.
+
+- Session GET: required string sessionID path parameter and required string id/directory.
+- Message GET: exact sessionID path parameter, array envelope, required info/parts,
+  and required message id/sessionID with only user/assistant roles. Every declared
+  message-info union variant must satisfy correlation fields.
+- Pending-question GET: array envelope, question id/sessionID, question/header text
+  and option label/description declarations.
+- Question reply: exact requestID path parameter, answers as an ordered array of
+  string arrays, and boolean acknowledgement schema.
+- Event GET: explicit text/event-stream string declaration.
+
+Local JSON references (including escaped names) are resolved with bounded cycle
+checks. External/unresolved references, reference siblings with unsupported
+constraints and unsupported schema composition fail closed. Each failed capability
+has a human-readable reason code; a healthy server with incomplete schemas can be
+INSPECTED while reporting all native task capabilities unsupported.
+
+These checks are a structural subset, not full JSON Schema validation or behavioral
+proof. In particular, message part types, event payload/order/reconnect semantics,
+query-directory isolation and question tool/run correlation still need implemented
+runtime validation. Native prompt-send compatibility is not checked or enabled.
+Future clients must check these reports and validate every actual payload; the
+report does not authorize billing, process ownership or dispatch.
+
+60 focused compatibility/discovery/lifecycle tests pass. They cover exact identities,
+ordered answers, option labels, missing schemas, unknown roles, message unions,
+wrong event media type, references/cycles, persisted reports and immutable input
+documents. TypeScript checks and production builds pass. No full-suite rerun or
+installed OpenCode server acceptance was performed for this isolated parser slice.
+
+## Exact-session read-only transcript retrieval
+
+`nativeSessionReader.ts` reads the exact `/session/{sessionID}` and its message
+page. It requires INSPECTED ownership, explicit true session/message compatibility,
+a caller-supplied inspection freshness window, a valid `ses_*` identity, an exact
+registered directory and a positive caller-supplied message limit. Directory and
+limit are encoded as query parameters; response session/directory identity must
+match before the transcript request is made. No title matching or inferred project
+binding is used. Registered directory metadata remains trusted caller configuration,
+not an independently established canonical filesystem authority.
+
+Each message must have a unique ID, exact session ID, known user/assistant role,
+valid created/completed observation times and model/provider claims. Assistant parent
+IDs are retained; unknown parents outside a partial page are not fabricated. Each
+part must have unique ID and exact session/message correlation. Text/reasoning parts
+must contain string text; other part types retain identity/type only, with tool/file
+payload semantics intentionally pending. Returned data is a whitelist projection,
+not a raw provider response or diagnostic dump.
+
+Reader and lifecycle probe capture immutable record snapshots across asynchronous
+boundaries, recheck revision/ownership after secure-store resolution and reject
+superseded results. GET requests reject redirects, retain caller cancellation signals
+and never send prompts. Credential, HTTP, identity and malformed-response failures
+produce explicit blockers without remote error-body or auth-value exposure.
+
+Every read is a bounded page with `completeHistory: false`. Provider order is
+preserved without assuming a cross-page/event ordering guarantee. Completed timestamps
+are observations only: reading a transcript does not complete any Assignment,
+Attempt or Delivery, authorize inference or select a model. Transcript persistence,
+historical pagination and Engine reconciliation remain separate future integration.
+
+90 focused reader, compatibility, discovery and lifecycle tests pass, including a
+real loopback HTTP reader, renamed sessions, wrong directory/session/message/part
+identities, duplicate IDs, malformed roles/timestamps, paging limits, auth failures,
+revocation and mutable-store revision races. TypeScript checks and production builds
+pass. No full-suite rerun or live installed-server acceptance was performed for this
+isolated reader slice. The previous full-suite checkpoint and macOS limitation remain.
+
+## Durable transcript observations and restart reconciliation
+
+`SqliteRelayDatabase.nativeTranscripts` stores append-only page observations in
+the existing database. Each page references the exact native server audit revision,
+session ID, directory, API digest and observation time. A SHA-256 payload digest
+checks stored canonical evidence on retrieval. Writes reject superseded/revoked
+server evidence, unsupported read compatibility, backwards observations and
+same-time conflicting content. Identical observations are idempotent. Savepoints
+retain outer transaction rollback; prior pages and streaming text are never edited.
+Unknown response fields are removed by whitelist projection. Digest checks establish
+internal consistency, not authenticity against malicious database replacement.
+
+`reconcileNativeTranscript` performs a fresh GET-only read, loads the last durable
+page for the exact scope, compares message identities/content and atomically stores
+the new page. On restart it therefore reuses prior evidence rather than redispatching.
+Changes are relative to the last observed page: added, changed, unchanged and
+notInCurrentPage. A message absent from a partial page is not declared deleted, and
+a message returning from an earlier page may be added relative to the immediate
+baseline. Provider order and older observations remain intact. Model/provider claims
+and completion timestamps remain observations, not free-tier or task-completion proof.
+
+Provider outages preserve the last durable page. Storage failures and ownership
+changes before persistence surface as errors rather than successful reconciliation.
+No retention pruning or automatic recovery dispatch policy is introduced.
+
+47 focused transcript persistence, reader and SQLite migration tests pass. These
+cover file-backed reopen, immutable streaming revisions, scope isolation, idempotency,
+clock/conflict rejection, stale server ownership, digest/index corruption, rollback,
+provider outage, ownership change before persistence and unchanged task tables.
+TypeScript checks pass; production builds passed before the final two test additions,
+which changed no production code. No full-suite rerun or installed-server acceptance
+was performed for this slice.
+
+This is observation reconciliation, not yet Engine recovery of outstanding Attempts
+or Deliveries. Question observation/correlation, SSE event recovery, historical
+pagination and integration with authoritative execution boundaries remain pending.
+
+## Pending-question observation and correlation
+
+`nativeQuestionReader.ts` adds a GET-only observation of `/question`, scoped by the
+registered project directory and filtered to one exact `ses_*` session. It requires
+a current INSPECTED server and explicit question-read compatibility. Each retained
+request must include a unique provider request ID plus a tool correlation containing
+both message ID and call ID. Missing or duplicate correlations fail the whole read.
+Question text/header, nonempty uniquely labelled options, and explicit multiple/custom
+flags are normalized into a whitelist projection. Other sessions are omitted.
+
+The successful result is the complete pending set for that exact session at the
+observation time, assuming the server honors its documented directory query. This
+claim is narrower than transcript page completeness. A later absence can therefore
+be recorded as resolved pending state, but it does not prove how it was answered or
+that the Worker continued successfully.
+
+`SqliteRelayDatabase.nativeQuestions` stores append-only, internally hashed pending
+sets tied to the exact server revision, API digest, session and directory. It rejects
+stale ownership, unsupported compatibility, clock rollback, same-time conflicts,
+scope/index tampering and malformed correlation. Writes participate in outer RelayX
+transactions. `reconcileNativeQuestions` classifies request IDs as appeared, changed,
+unchanged or resolved and stores the new observation. Provider outages and storage
+failures do not overwrite prior evidence or report success.
+
+This slice does not yet bind a question to an authoritative RelayX Assignment and
+Attempt because native dispatch records do not exist. The persisted provider tuple
+`sessionId + messageId + callId + requestId` supplies the exact boundary needed for
+that later binding. It does not enter WAITING_FOR_QUESTION, generate a Planner prompt,
+send an answer or infer completion. Question reply remains disabled.
+
+36 focused question observation, structural compatibility and SQLite migration tests
+pass. Coverage includes cross-session filtering, missing/duplicate correlation,
+malformed options, freshness/scope checks, appeared/changed/resolved comparison,
+idempotency, time conflicts, stored-evidence tampering, rollback, task-table isolation
+and ownership loss before persistence. TypeScript checks and production builds pass.
+The final scope-integrity addition changed repository validation and was rechecked by
+focused tests and TypeScript. No full-suite rerun or installed-server acceptance was
+performed for this slice.
+
+## SSE observation and reconnect recovery
+
+`nativeEventObserver.ts` reads a bounded prefix of the inspected server's `/event`
+SSE stream for one registered directory and exact session. It requires explicit
+event-stream compatibility, current ownership evidence, caller byte/event limits and
+caller cancellation. SSE comments are ignored; CRLF, chunk boundaries and multiline
+data are supported. Each JSON envelope must match the directory and contain a provider
+event ID/type/properties. Exact-session identity is derived only from declared
+sessionID fields in event properties, message info or part data. Other sessions are
+omitted. SSE `id` and payload ID must agree when both are present.
+
+The result retains provider event ID/type, message/part correlation when available,
+an SHA-256 digest of the raw JSON data and observed order within that connection.
+Raw event properties are not persisted, avoiding incidental provider configuration
+or tool payload retention. Duplicate IDs with identical data are deduplicated;
+conflicting reuse of an ID fails the connection. Event order is an observation within
+one connection only and is never promoted to a global provider ordering guarantee.
+
+`SqliteRelayDatabase.nativeEvents` stores each connection boundary and each unique
+provider event in additive tables tied to the exact server audit revision and API
+digest. Replayed event IDs are recorded as batch duplicates without duplicating the
+event. Conflicting replay, clock rollback, stale/revoked ownership and unsupported
+compatibility roll back atomically. Writes participate in outer RelayX transactions.
+No Assignment, Attempt or Delivery state is changed by event persistence.
+
+`recoverNativeEventConnection` loads the durable cursor and sends it as
+`Last-Event-ID`. This header is a replay request, not proof that OpenCode honored it.
+Every reconnect is therefore marked `UNVERIFIED_RECONNECT`. Every bounded connection
+also ends at either EOF or RelayX's event limit; both boundaries require authoritative
+transcript and pending-question reconciliation. The recovery result explicitly sets
+both requirements. Events alone cannot prove message persistence, question resolution,
+Worker completion or safe redispatch.
+
+37 focused SSE observation, structural compatibility and SQLite migration tests pass.
+Coverage includes exact-session filtering, comments, CRLF/chunk/multiline parsing,
+identity conflicts, provider-ID replay, cursor recovery, content/auth failures, byte
+and event limits, stale ownership, rollback and unchanged task tables. TypeScript
+checks and production builds pass. No full-suite rerun or installed OpenCode server
+acceptance was performed for this slice.
+
+Long-lived connection supervision, retry/backoff policy and combined execution of the
+required transcript/question reconciliations remain pending Engine integration. The
+published SDK documents an event stream but no replay guarantee was assumed here.
+
+## Combined observation recovery checkpoint
+
+`nativeObservationRecovery.ts` now coordinates the three authoritative observation
+paths after restart or an SSE boundary. It loads the durable event cursor, consumes
+one bounded SSE connection, reads the exact-session transcript page, then reads the
+complete pending-question set. Network operations occur sequentially outside SQLite
+transactions. Each response independently rechecks the same server revision and API
+digest. This is a coordinated observation window, not a claim that the provider
+offers an atomic cross-endpoint snapshot.
+
+If any phase is blocked, the result names EVENTS, TRANSCRIPT or QUESTIONS and none
+of the new checkpoint is stored. Once all reads succeed, relative transcript/question
+changes are computed and the event batch, transcript page and question set commit in
+one existing RelayX transaction. Repository checks run again inside that transaction,
+so concurrent revocation or a newer observation causes full rollback. A failure in
+the final repository write also rolls back the event and transcript writes.
+
+Successful results explicitly state `taskStateChanged: false` and
+`dispatchAttempted: false`. The coordinator does not interpret an event, completed
+assistant timestamp or resolved question as Worker completion. It does not reconcile
+an Assignment/Attempt because native dispatch records and pre-send boundaries do not
+exist yet. Those authority decisions remain an Engine responsibility.
+
+Review found that the durable question canonicalizer emitted fields in a different
+order than the reader. Since comparisons intentionally use canonical JSON, unchanged
+questions were falsely reported as changed. Canonical ordering now matches the reader,
+and the repeated-checkpoint test proves unchanged classification.
+
+43 combined recovery, SSE, transcript and question persistence tests pass. They cover
+all-evidence commit, each blocked phase, final-write rollback, ownership loss after
+network reads, durable cursor reuse, replay deduplication, unchanged evidence and
+unchanged task tables. TypeScript checks and production builds pass. No full-suite
+rerun or installed-server acceptance was performed for this isolated coordinator.
+
+## Durable native dispatch preparation
+
+`SqliteRelayDatabase.nativeDispatchIntents` adds a transport-specific adjunct to the
+existing Assignment/Attempt/Delivery ledger. It does not create a competing task
+state machine. Preparation requires the existing Delivery to be pending, its Attempt
+to be prepared, the Assignment's current Attempt/active Delivery to match, frozen
+Pair/runtime/session authority to match, and the Delivery idempotency key to equal
+the dispatch key. One intent is permitted per Delivery and Attempt.
+
+The intent freezes assignment, attempt, delivery, dispatch key, exact native server
+revision, exact `ses_*` session and directory, policy version, canonical text payload
+and SHA-256 digest, plus all five model-route fields: provider, endpoint, published
+model, opaque account reference and runtime-configuration fingerprint. Unknown input
+fields are removed before persistence, preventing accidental auth/config data capture.
+The serialized intent also has an independent digest and indexed-field checks.
+
+The pre-send provider boundary must come from the latest transcript, question and
+event observations for the exact scope. All three must share one observation time
+and current server audit revision; the API digest and optional event cursor are
+recorded with transcript/question payload digests. Mixed or stale observations fail
+preparation. This relies on the combined checkpoint coordinator for coherent evidence;
+it remains a sequential observation window rather than a provider-atomic snapshot.
+
+Every record is `PREPARED_UNAUTHORIZED`. Preparation performs no HTTP request, does
+not change Attempt or Delivery status, and cannot be interpreted as eligibility or
+permission to send. The payload is retained because future restart-safe exactly-once
+submission must reproduce the committed bytes; retention/privacy policy and UI must
+account for that content. This slice supports text parts only. Model-route presence
+is checked, while verified-free eligibility and task qualification are deliberately
+deferred to the future authorization transition.
+
+25 focused dispatch-intent, combined-recovery and SQLite migration tests pass. They
+cover authority/session/idempotency mismatches, combined-boundary enforcement, exact
+model route, payload and intent digests, idempotency/conflicts, unknown-field removal,
+serialized/index tampering, revocation, transaction rollback and unchanged Attempt/
+Delivery states. TypeScript checks and production builds pass.
+
+The next slice needs a separate durable authorization decision bound to this exact
+intent and eligibility lease before any send method can exist. HTTP acceptance,
+provider-persisted message evidence and Worker completion must remain separate states.
+
+Full review checkpoint after this slice: `npm test` completed 342 suites in 117.5
+seconds with 1,760 passing test cases, zero failed test cases and one skipped case.
+The command exits 1 solely because `bootstrap_regression.test.ts` fails during suite
+construction when its hard-coded macOS live database cannot open on Linux. This is
+the previously documented live-acceptance limitation, not a failed test case.
+
+## Durable zero-cost dispatch authorization
+
+`SqliteRelayDatabase.nativeDispatchAuthorizations` now stores a separate immutable,
+time-bounded permit for an exact prepared intent. Authorization runs the pure
+eligibility gate again and requires an exact five-field route, TASK purpose, current
+verified-free lease for every cost dimension, accepted task qualification, available
+task quota, approved privacy and healthy runtime. Pricing, account, qualification,
+quota, privacy and runtime evidence hashes are bound into the record. Its expiry is
+the earliest lease, qualification or operational-evidence expiry.
+
+The permit also requires the prepared server revision, Assignment pointers, pending
+Delivery, prepared Attempt and combined transcript/question/event boundary to remain
+current, with no pending question. A future sender must call the use-time check. That
+check fails closed after expiry or when the account policy, operational evidence,
+server authority, relay pointers or observation boundary changes. Authorization does
+not mutate task state and exposes no transport send method. Its immutable issuance
+record remains `AUTHORIZED_UNCONSUMED`; the separate one-shot claim below is the
+durable evidence that the permit has been consumed for submission.
+
+The operational evidence hashes are an adapter trust boundary. This repository binds
+and rechecks them but does not create quota, privacy or runtime attestations. A public
+catalog response alone cannot satisfy account-specific cost or quota evidence. No
+live provider account, inference request or billing behavior was verified here.
+
+103 focused eligibility, authorization, intent, observation-recovery and migration
+tests pass. The authorization cases cover every denied eligibility dimension, route
+and clock mismatch, bounded expiry, changed policy/evidence, stale observations,
+pending questions, Assignment/Delivery/Attempt changes, idempotency, rollback and
+serialized tampering. TypeScript checks and production builds pass.
+
+## One-shot native send claim
+
+`SqliteRelayDatabase.nativeDispatchClaims` adds the durable point of no automatic
+return immediately before a future transport call. Acquiring a claim rechecks the
+exact authorization and all of its use-time authority inside one SQLite savepoint,
+inserts a digest-bound `SEND_CLAIMED_RECONCILIATION_REQUIRED` record, and moves the
+existing Delivery from `pending` to `delivering` in the same transaction. The
+Attempt remains `prepared`; a claim is no evidence that Worker execution began.
+
+Only the first caller receives `acquired: true`. Every later caller receives the
+same durable claim with `acquired: false`, even when its evidence has since expired
+or changed. Such a caller must reconcile the exact provider session and must never
+send again. This deliberately treats a crash anywhere after claim commit as an
+uncertain transport boundary. It may strand a provably unsent request, but it cannot
+turn a restart into a duplicate prompt.
+
+The claim table stores no credentials or provider response bodies. Its authorization
+digest and independent serialized digest detect mutation. Missing, expired or changed
+authorization and relay authority fail before mutation, and an outer RelayX rollback
+restores both the claim and Delivery status. At this checkpoint there was no POST
+client; the transport coordinator in the following section invokes the provider only
+after a newly acquired claim and routes every response or failure to reconciliation.
+
+108 focused eligibility, authorization, claim, intent, observation-recovery and
+migration tests pass. Claim cases cover the atomic Delivery transition, permanent
+reacquisition refusal, expired/missing/changed authority, outer rollback and stored
+record tampering. TypeScript checks and production builds pass.
+
+## Native asynchronous prompt submission
+
+The send contract is grounded in OpenCode's generated v2 SDK and OpenAPI document
+at upstream commit `388406238bd5ca15564a762840a2362c3a45bd9c`. RelayX now marks
+`messageSend` compatible only when `/session/{sessionID}/prompt_async` declares the
+exact path identity, optional directory query, JSON body with deterministic message
+ID support, text parts, explicit provider/model fields, and a bodyless 204 response.
+The pinned upstream OpenAPI passes this send check. This is structural compatibility,
+not a runtime or billing attestation.
+
+`claimAndSubmitNativePrompt` resolves credentials and checks the contract before
+consuming the one-shot claim. A newly acquired claim sends exactly one POST using
+the frozen directory, session, text payload and model route. Its deterministic
+`msg_relayx_*` message ID is derived from the dispatch key for later exact-session
+correlation. Credentials are used only in the Authorization header and neither
+response bodies nor thrown transport text enter the result.
+
+Every post-claim result is `RECONCILIATION_REQUIRED`. A 204 means only that the
+server accepted the asynchronous request; it does not prove the user message was
+persisted or that Worker execution began. HTTP errors, network errors, revocation
+after claim, and an existing claim also require reconciliation and never trigger a
+resend. Delivery stays `delivering` and Attempt stays `prepared` until independent
+provider evidence supports their respective transitions.
+
+The implementation was exercised against an injectable fetch boundary; no installed
+OpenCode server or provider account was available for a live POST. The following
+section reconciles the deterministic message ID against an authoritative post-send
+transcript and durably classifies delivered or ambiguous. A partial page cannot
+establish conclusively not delivered.
+
+133 focused compatibility, eligibility, submission, authorization, claim, intent,
+observation-recovery and migration tests pass. TypeScript checks and production
+builds pass.
+
+## Independent Worker terminal evidence
+
+Native transcript compatibility now has a separate `executionTerminalRead` capability
+grounded in OpenCode's pinned assistant schema: optional `time.completed`, `finish`
+and typed `error` fields. The pinned upstream OpenAPI satisfies this capability.
+The reader retains only a nonempty finish code or error type and discards provider
+error data, messages and other response-specific content.
+
+`SqliteRelayDatabase.nativeExecutionTerminals` requires the existing Worker-start
+observation, the same assistant message and exact parent/session/model authority.
+`completedAt + finish` moves a running Attempt to `completed_physical`;
+`completedAt + errorType` moves it to `interrupted`. Provider completion time becomes
+`finished_at`. Timestamp alone, finish alone, a missing assistant in a partial page,
+or unsupported historical compatibility leaves the Attempt running.
+
+The terminal observation and Attempt mutation commit atomically and are immutable
+afterward. Evidence stores correlation IDs, terminal code and transcript digest but
+not assistant text or provider error bodies. This establishes physical termination
+only; it does not verify correctness, create a Handoff or mark the Assignment done.
+
+193 focused compatibility, eligibility, transport, delivery/execution evidence,
+session reading, persistence, recovery and migration tests pass. Terminal cases cover
+success, typed provider error, incomplete signals, partial-page absence, authority
+drift, unsupported contracts, idempotency, rollback, tampering and error-data
+sanitization. TypeScript checks and production builds pass.
+
+## Durable post-send transcript reconciliation
+
+`SqliteRelayDatabase.nativeDispatchReconciliations` now classifies a claimed send
+only from a newer exact-session transcript. A delivered verdict requires the
+deterministic `msg_relayx_*` user message, provider and model, text-part sequence,
+and a provider creation time at or after the claim. It also verifies the original
+pre-dispatch transcript row and digest, so the evidence chain remains anchored to
+the intent's boundary.
+
+A missing ID in the current page is `AMBIGUOUS`, never conclusively not delivered,
+because native transcript pages are explicitly partial. A matching ID with changed
+role, route, payload or an older timestamp is also ambiguous. Reconciliations are
+append-only by observation time: newer exact evidence may recover an ambiguous
+Delivery to `delivered`, while a delivered verdict is terminal and cannot be
+downgraded by a later partial page.
+
+The reconciliation row and Delivery transition commit atomically. Evidence contains
+only correlation IDs and digests, not prompt text. Exact persistence moves Delivery
+to `delivered`; ambiguity moves it to `ambiguous`; Attempt remains `prepared` in
+both cases because message persistence does not prove Worker execution. No branch
+resends the prompt.
+
+140 focused compatibility, eligibility, submission, reconciliation, authorization,
+claim, intent, observation-recovery and migration tests pass. Reconciliation cases
+cover exact persistence, partial-page absence, route/payload/time mismatch, recovery
+from ambiguity, terminal delivery, boundary integrity, idempotency, rollback and
+stored-record tampering. TypeScript checks and production builds pass.
+
+## Independent Worker-start evidence
+
+`SqliteRelayDatabase.nativeExecutionObservations` now promotes the exact Attempt
+from `prepared` to `running` only after Delivery has independently reconciled to
+`delivered` and a transcript shows one assistant message directly parented by the
+deterministic dispatched user message. The assistant provider/model must match the
+frozen route and its provider creation time cannot predate the user message.
+
+The confirmed Delivery transcript remains the authoritative source for the user
+turn, while the newest partial page supplies the assistant child. This allows
+restart recovery after the user turn has fallen outside the newest page without
+weakening parent correlation. No child leaves Attempt prepared; multiple children,
+a changed route or backwards time fail closed rather than choosing one.
+
+The execution observation and Attempt transition commit atomically. Stored evidence
+contains message IDs and a transcript digest but no response text. Delivery remains
+`delivered`, Attempt receives `running`, and `finished_at` remains empty. Even an
+assistant message with a completion timestamp does not complete the Attempt in this
+slice; physical completion requires a separate terminal-state contract and evidence.
+
+145 focused compatibility, eligibility, submission, delivery reconciliation,
+Worker-start observation, authorization, claim, intent, observation-recovery and
+migration tests pass. Worker-start cases cover exact parent correlation, partial-page
+recovery, absence, duplicate children, route/time mismatch, prerequisite Delivery,
+idempotency, rollback and stored-record tampering. TypeScript checks and production
+builds pass.
+
+## Deterministic restart evidence advancement
+
+`advanceNativeDispatchEvidence` now gives a restarted process one bounded entry point
+for advancing an already-claimed native dispatch. It never submits a prompt. Instead,
+it replays the durable delivery reconciliation, Worker-start observation and terminal
+observation in order, returning the first stable state that current evidence supports:
+waiting for delivery evidence, ambiguous delivery, confirmed delivery waiting for
+execution, running, physically completed or interrupted.
+
+Each underlying repository retains ownership of its atomic evidence-and-state
+transition. A crash between stages therefore needs no cross-repository transaction:
+the next invocation observes committed state and resumes idempotently. Missing claims
+and invalid stored evidence produce bounded blocker codes; internal evidence or
+transport details are not exposed. A terminal observation short-circuits replay, and
+no state permits reacquiring or resending the one-shot claim.
+
+195 focused compatibility, eligibility, transport, delivery/execution evidence,
+restart advancement, session reading, persistence, recovery and migration tests pass.
+Restart cases cover the complete staged progression, repeated terminal observation,
+single-claim preservation, missing claims and tampered transcript evidence. TypeScript
+checks and production builds pass.
+
+Latest full-suite checkpoint: 1,802 of 1,804 test cases pass and one is skipped. The
+single failed case is a wall-clock delay assertion in `health_phase1_audit.test.ts`;
+it passes when rerun in isolation and is load-sensitive under the concurrent suite.
+The command also retains the known suite-construction error in
+`bootstrap_regression.test.ts`, whose hard-coded macOS live-database path cannot open
+on Linux. Consequently the full `npm test` command exits 1; neither issue exercises
+the native dispatch evidence path.
+
+## Immutable native question reply intent
+
+RelayX can now freeze a proposed Planner answer for one exact pending OpenCode
+question without granting permission to reply. The intent binds the answer to the
+claimed dispatch, active Assignment and running Attempt, confirmed Delivery, exact
+server revision/session/directory, provider request/message/call correlation, newest
+question-observation digest, Planner decision identity and policy version. Preparing
+the intent performs no HTTP request and leaves the Attempt running.
+
+Answer validation follows the structurally inspected native reply contract. There
+must be one answer array per question; single-choice questions accept exactly one
+value, multi-choice answers reject duplicates, non-custom questions accept only
+declared option labels, and custom-enabled questions may carry a nonempty Planner
+answer. The latest complete pending set must still contain the same request, and the
+running Attempt must retain its authoritative Assignment and Delivery pointers.
+
+Reply intents are immutable and idempotent by reply key, with provider request
+identity scoped to its exact server and session. Stored answer and intent digests,
+indexed fields and upstream dispatch/question evidence are checked before reuse.
+This slice deliberately adds no reply authorization, one-shot claim or transport;
+those must remain separate durability boundaries so restart cannot duplicate an
+answer or turn an expired question into generic chat.
+
+199 focused compatibility, eligibility, transport, delivery/execution evidence,
+restart advancement, question reply intent, persistence, recovery and migration
+tests pass. Reply-intent cases cover exact correlation, option/custom/multiplicity
+rules, idempotency, pending-request expiry, missing run evidence, revoked API
+authority, rollback and stored-record tampering. TypeScript checks and production
+builds pass.
+
+## Bounded native question reply authorization
+
+A prepared answer now requires a separate immutable authorization before any future
+reply claim can exist. The authorization binds the exact reply-intent digest to a
+Planner-approval evidence digest, privacy evidence, runtime-health evidence and a
+finite validity window. Authorization performs no HTTP request, does not consume the
+permit and leaves the question and Attempt unchanged.
+
+Authorization and use-time checks both require the exact server revision and native
+question-reply capability, the active Assignment/Attempt/Delivery authority, durable
+Worker-start evidence, and the same latest pending-question observation digest. A
+resolved or changed question, stopped run, superseded server, expired lease, changed
+Planner approval, or changed privacy/runtime evidence fails closed. Pricing/model
+eligibility is not duplicated here: replying supplies an already approved answer to
+an existing tool call and does not itself select or invoke an inference route.
+
+The authorization remains `AUTHORIZED_UNCONSUMED`. A future one-shot claim must
+recheck it immediately before transport and permanently prevent reacquisition after
+any attempted reply, including ambiguous network outcomes. No reply sender exists in
+this slice.
+
+203 focused compatibility, eligibility, transport, delivery/execution evidence,
+restart advancement, question reply intent/authorization, persistence, recovery and
+migration tests pass. Authorization cases cover finite lifetime, exact intent binding,
+approval/privacy/runtime drift, question resolution, relay authority loss,
+idempotency, conflict, rollback and stored-record tampering. TypeScript checks and
+production builds pass.
