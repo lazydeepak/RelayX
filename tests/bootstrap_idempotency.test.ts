@@ -134,7 +134,7 @@ describe('RelayIngress bootstrap — exactly one Assignment across ticks and res
   const tick = (engine: RelayEngine) =>
     engine.resumeRelayContinuity(pairId as any, { context: 'AUTOMATED', actor: 'supervisor' });
 
-  const ingressRows = (db: Db) => all(db, 'SELECT * FROM relay_ingress WHERE stable_pair_id = ?', pairId);
+  const ingressRows = (db: Db) => all(db, "SELECT * FROM relay_ingress WHERE stable_pair_id = ? AND state != 'superseded'", pairId);
   const assignmentCount = (db: Db) =>
     count(db, 'SELECT COUNT(*) AS c FROM assignments WHERE pair_id = ?', pairId);
 
@@ -221,6 +221,13 @@ describe('RelayIngress bootstrap — exactly one Assignment across ticks and res
       }
       assert.strictEqual(ingressRows(db).length, 1, 'one durable boundary across rejected turns');
       assert.strictEqual(observer.armIssueCount, 1, 'rejected observations do not rebaseline');
+      db.db.prepare("UPDATE relay_ingress SET external_session_id='previous-planner-session' WHERE state='armed'").run();
+      observer.armedArmId=null; observer.bootstrapOverride={responseText:'   '};
+      await tick(engine);
+      assert.strictEqual(count(db,"SELECT COUNT(*) AS c FROM relay_ingress WHERE state='superseded'"),1,
+        'a boundary for the previous Planner session is retired');
+      assert.strictEqual(ingressRows(db).length,1,'one fresh boundary is established for the current Planner session');
+      assert.strictEqual(observer.armIssueCount,2,'the new Planner session receives its own arm');
     } finally {
       observer.bootstrapOverride = null;
       db.close();
@@ -284,7 +291,7 @@ describe('RelayIngress bootstrap — exactly one Assignment across ticks and res
     const attempts = Number(
       one(
         db,
-        'SELECT COUNT(*) AS c FROM attempts WHERE assignment_id = (SELECT materialized_assignment_id FROM relay_ingress WHERE stable_pair_id = ?)',
+        "SELECT COUNT(*) AS c FROM attempts WHERE assignment_id = (SELECT materialized_assignment_id FROM relay_ingress WHERE stable_pair_id = ? AND state='materialized')",
         pairId,
       ).c,
     );

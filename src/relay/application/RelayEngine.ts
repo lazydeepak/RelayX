@@ -7378,8 +7378,16 @@ private isRuntimeSuspensionItemFor(
     // current pairs.id row. The Pair's immutable stableId may legitimately differ.
     let ingress = await this.repos.relayIngresses.findActiveForPair(pair.id);
     if (ingress && ingress.externalSessionId !== side.externalSessionId) {
-      trail.push('bootstrap root belongs to a different Planner session; refused');
-      return null;
+      const staleId = ingress.ingressId;
+      await this.repos.runInTransaction(async () => {
+        const current = await this.repos.relayIngresses.findById(staleId);
+        if (current && (current.state === 'armed' || current.state === 'observed')
+          && current.externalSessionId !== side.externalSessionId) {
+          await this.repos.relayIngresses.updateState(staleId,'superseded');
+        }
+      });
+      trail.push('bootstrap root belonged to a previous Planner session; superseded');
+      ingress = null;
     }
     if (!ingress) {
       ingress = await this.repos.runInTransaction(async () => {

@@ -149,4 +149,10 @@ stores and queries that row ID rather than the Pair's separately preserved immut
 stable IDs, and a v6 migration regression removes the table before reopen. Expanded
 focused/protected verification is 80/80.
 
+If the verified Planner session changes while a bootstrap root is still armed or
+observed, supervision now atomically marks that stale root `superseded` and creates a
+fresh root/arm for the current session. The old boundary remains auditable but cannot
+permanently block bootstrap after an authorized Pair rebind. This transition is
+covered before materialization in the file-backed restart suite.
+
 The earlier inventories included this construction error alongside failed test cases (25 entries at the 24-failure checkpoint). All previously listed test-case failures are now resolved or their stale fixtures/contracts corrected with evidence above. Next architecture work can proceed with this explicit environment limitation; actual macOS/OpenCode acceptance remains outstanding.
