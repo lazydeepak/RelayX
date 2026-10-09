@@ -54,6 +54,7 @@ import { SqliteNativeDispatchReconciliationRepository } from './SqliteNativeDisp
 import { SqliteNativeExecutionObservationRepository } from './SqliteNativeExecutionObservationRepository.ts';
 import { SqliteNativeExecutionTerminalRepository } from './SqliteNativeExecutionTerminalRepository.ts';
 import { SqliteNativeQuestionReplyIntentRepository } from './SqliteNativeQuestionReplyIntentRepository.ts';
+import { SqliteNativeQuestionReplyAuthorizationRepository } from './SqliteNativeQuestionReplyAuthorizationRepository.ts';
 
 function tableExists(db: DatabaseSync, tableName: string): boolean {
   const rows = db
@@ -115,6 +116,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
   public readonly nativeExecutionObservations: SqliteNativeExecutionObservationRepository;
   public readonly nativeExecutionTerminals: SqliteNativeExecutionTerminalRepository;
   public readonly nativeQuestionReplyIntents: SqliteNativeQuestionReplyIntentRepository;
+  public readonly nativeQuestionReplyAuthorizations: SqliteNativeQuestionReplyAuthorizationRepository;
 
   constructor(filePath = ':memory:') {
     this.db = new DatabaseSync(filePath);
@@ -154,6 +156,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     this.nativeExecutionObservations = new SqliteNativeExecutionObservationRepository(this.db);
     this.nativeExecutionTerminals = new SqliteNativeExecutionTerminalRepository(this.db);
     this.nativeQuestionReplyIntents = new SqliteNativeQuestionReplyIntentRepository(this.db);
+    this.nativeQuestionReplyAuthorizations = new SqliteNativeQuestionReplyAuthorizationRepository(this.db);
   }
 
   private initSchema(): void {
@@ -170,6 +173,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     SqliteNativeExecutionObservationRepository.initSchema(this.db);
     SqliteNativeExecutionTerminalRepository.initSchema(this.db);
     SqliteNativeQuestionReplyIntentRepository.initSchema(this.db);
+    SqliteNativeQuestionReplyAuthorizationRepository.initSchema(this.db);
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS projects (

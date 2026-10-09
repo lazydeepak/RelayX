@@ -637,4 +637,55 @@ describe('native question reply intent preparation', () => {
       assert.throws(()=>value.db.nativeQuestionReplyIntents.get('reply:key'),/index mismatch/);
     } finally { value.db.close(); }
   });
+  const authorizationEvidence={now:390,expiresAt:450,plannerApprovalEvidenceHash:digest('planner-approval'),
+    privacyEvidenceHash:digest('reply-privacy'),runtimeEvidenceHash:digest('reply-runtime')};
+  it('authorizes the exact reply intent for a bounded lifetime without consuming or sending it', () => {
+    const value=runningWithQuestion(); try {
+      const intent=value.db.nativeQuestionReplyIntents.prepare(input);
+      const authorization=value.db.nativeQuestionReplyAuthorizations.authorize('reply:key',authorizationEvidence);
+      assert.equal(authorization.state,'AUTHORIZED_UNCONSUMED');
+      assert.equal(authorization.intentHash,digest(JSON.stringify(intent)));
+      assert.deepEqual(value.db.nativeQuestionReplyAuthorizations.checkUsable('reply:key',{...authorizationEvidence,now:400}),{usable:true,reasons:[]});
+      assert.equal(value.db.db.prepare('SELECT COUNT(*) AS n FROM native_question_reply_authorizations').get()?.n,1);
+      assert.equal(value.db.db.prepare("SELECT status FROM attempts WHERE id='attempt'").get()?.status,'running');
+    } finally { value.db.close(); }
+  });
+  it('expires and invalidates reply authorization when approval, privacy or runtime evidence changes', () => {
+    const value=runningWithQuestion(); try {
+      value.db.nativeQuestionReplyIntents.prepare(input); value.db.nativeQuestionReplyAuthorizations.authorize('reply:key',authorizationEvidence);
+      assert.deepEqual(value.db.nativeQuestionReplyAuthorizations.checkUsable('reply:key',{...authorizationEvidence,now:450}),
+        {usable:false,reasons:['AUTHORIZATION_NOT_CURRENT']});
+      const changed=value.db.nativeQuestionReplyAuthorizations.checkUsable('reply:key',{now:400,
+        plannerApprovalEvidenceHash:digest('changed'),privacyEvidenceHash:digest('changed'),runtimeEvidenceHash:digest('changed')});
+      assert.deepEqual(changed,{usable:false,reasons:['PLANNER_APPROVAL_CHANGED','PRIVACY_EVIDENCE_CHANGED','RUNTIME_EVIDENCE_CHANGED']});
+    } finally { value.db.close(); }
+  });
+  it('invalidates authorization when the question resolves or run/server authority changes', () => {
+    let value=runningWithQuestion(); try {
+      value.db.nativeQuestionReplyIntents.prepare(input); value.db.nativeQuestionReplyAuthorizations.authorize('reply:key',authorizationEvidence);
+      value.db.nativeQuestions.save({status:'READ',serverId:'server',serverRevision:2,apiSpecHash:'digest',observedAt:400,
+        sessionId:'ses_exact',directory:'/project',questions:[],completePendingSet:true});
+      assert.deepEqual(value.db.nativeQuestionReplyAuthorizations.checkUsable('reply:key',{...authorizationEvidence,now:410}),
+        {usable:false,reasons:['QUESTION_BOUNDARY_CHANGED']});
+    } finally { value.db.close(); }
+    value=runningWithQuestion(); try {
+      value.db.nativeQuestionReplyIntents.prepare(input); value.db.db.exec("UPDATE attempts SET status='interrupted'");
+      assert.throws(()=>value.db.nativeQuestionReplyAuthorizations.authorize('reply:key',authorizationEvidence),/RELAY_AUTHORITY_CHANGED/);
+    } finally { value.db.close(); }
+  });
+  it('keeps reply authorization immutable, transactional and tamper-evident', async () => {
+    const value=runningWithQuestion(); try {
+      value.db.nativeQuestionReplyIntents.prepare(input);
+      value.db.nativeQuestionReplyAuthorizations.authorize('reply:key',authorizationEvidence);
+      value.db.nativeQuestionReplyAuthorizations.authorize('reply:key',authorizationEvidence);
+      assert.throws(()=>value.db.nativeQuestionReplyAuthorizations.authorize('reply:key',{...authorizationEvidence,expiresAt:440}),/Conflicting/);
+      value.db.db.exec("UPDATE native_question_reply_authorizations SET intent_hash='forged'");
+      assert.throws(()=>value.db.nativeQuestionReplyAuthorizations.get('reply:key'),/index mismatch/);
+    } finally { value.db.close(); }
+    const rollback=runningWithQuestion(); try {
+      rollback.db.nativeQuestionReplyIntents.prepare(input);
+      await assert.rejects(rollback.db.runInTransaction(async()=>{rollback.db.nativeQuestionReplyAuthorizations.authorize('reply:key',authorizationEvidence);throw new Error('abort');}));
+      assert.equal(rollback.db.nativeQuestionReplyAuthorizations.get('reply:key'),undefined);
+    } finally { rollback.db.close(); }
+  });
 });

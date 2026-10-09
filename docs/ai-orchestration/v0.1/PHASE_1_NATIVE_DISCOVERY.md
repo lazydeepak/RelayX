@@ -602,3 +602,31 @@ tests pass. Reply-intent cases cover exact correlation, option/custom/multiplici
 rules, idempotency, pending-request expiry, missing run evidence, revoked API
 authority, rollback and stored-record tampering. TypeScript checks and production
 builds pass.
+
+## Bounded native question reply authorization
+
+A prepared answer now requires a separate immutable authorization before any future
+reply claim can exist. The authorization binds the exact reply-intent digest to a
+Planner-approval evidence digest, privacy evidence, runtime-health evidence and a
+finite validity window. Authorization performs no HTTP request, does not consume the
+permit and leaves the question and Attempt unchanged.
+
+Authorization and use-time checks both require the exact server revision and native
+question-reply capability, the active Assignment/Attempt/Delivery authority, durable
+Worker-start evidence, and the same latest pending-question observation digest. A
+resolved or changed question, stopped run, superseded server, expired lease, changed
+Planner approval, or changed privacy/runtime evidence fails closed. Pricing/model
+eligibility is not duplicated here: replying supplies an already approved answer to
+an existing tool call and does not itself select or invoke an inference route.
+
+The authorization remains `AUTHORIZED_UNCONSUMED`. A future one-shot claim must
+recheck it immediately before transport and permanently prevent reacquisition after
+any attempted reply, including ambiguous network outcomes. No reply sender exists in
+this slice.
+
+203 focused compatibility, eligibility, transport, delivery/execution evidence,
+restart advancement, question reply intent/authorization, persistence, recovery and
+migration tests pass. Authorization cases cover finite lifetime, exact intent binding,
+approval/privacy/runtime drift, question resolution, relay authority loss,
+idempotency, conflict, rollback and stored-record tampering. TypeScript checks and
+production builds pass.
