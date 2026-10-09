@@ -185,10 +185,14 @@ describe('RelayIngress bootstrap — exactly one Assignment across ticks and res
     }
     const pair = await engine.createPair(project.id, 'Bootstrap Pair', planner.id, worker.id);
     pairId = pair.id;
+    // A restored/replaced Pair may retain an immutable anchor that differs from
+    // its current relational row ID. relay_ingress must satisfy its pairs(id) FK.
+    db.db.prepare('UPDATE pairs SET stable_pair_id=? WHERE id=?').run('immutable-pair-anchor',pairId);
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
     await engine.startPair(pair.id);
 
     const fresh = await db.pairs.findById(pair.id);
+    assert.notStrictEqual(fresh!.stableId,fresh!.id);
     assert.strictEqual(fresh!.operationalState, 'ACTIVE', 'pair is ACTIVE');
     assert.strictEqual(fresh!.relayState, 'RUNNING', 'pair is RUNNING');
     assert.ok(fresh!.activeAssignmentId == null, 'no active assignment to start');

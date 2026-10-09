@@ -7374,18 +7374,20 @@ private isRuntimeSuspensionItemFor(
     const side = await this.resolveBatonSide(pair, 'planner', trail);
     if (!side.ok || side.runtime.providerType !== 'chatgpt') return null;
 
-    let ingress = await this.repos.relayIngresses.findActiveForPair(pair.stableId);
+    // relay_ingress.stable_pair_id is a legacy column name whose FK targets the
+    // current pairs.id row. The Pair's immutable stableId may legitimately differ.
+    let ingress = await this.repos.relayIngresses.findActiveForPair(pair.id);
     if (ingress && ingress.externalSessionId !== side.externalSessionId) {
       trail.push('bootstrap root belongs to a different Planner session; refused');
       return null;
     }
     if (!ingress) {
       ingress = await this.repos.runInTransaction(async () => {
-        const existing = await this.repos.relayIngresses.findActiveForPair(pair.stableId);
+        const existing = await this.repos.relayIngresses.findActiveForPair(pair.id);
         if (existing) return existing;
         const id = String(createId('ingress'));
         const root = {
-          ingressId: id, stablePairId: pair.stableId, sourceSide: 'planner' as const,
+          ingressId: id, stablePairId: pair.id, sourceSide: 'planner' as const,
           providerType: side.runtime.providerType, externalSessionId: side.externalSessionId,
           providerTurnIdentity: id, observedText: '', armEvidence: { armId: '' },
           state: 'armed' as const, createdAt: Date.now(), updatedAt: Date.now(),
@@ -7413,7 +7415,7 @@ private isRuntimeSuspensionItemFor(
       const assignment = await this.repos.runInTransaction(async () => {
         const current = await this.repos.relayIngresses.findById(rootId);
         if (!current || current.state === 'materialized' || current.state === 'superseded' ||
-            current.externalSessionId !== side.externalSessionId || current.stablePairId !== pair.stableId ||
+            current.externalSessionId !== side.externalSessionId || current.stablePairId !== pair.id ||
             current.armEvidence.armId !== completion.armId) return null;
         const freshPair = await this.repos.pairs.findById(pair.id);
         if (!freshPair) return null;

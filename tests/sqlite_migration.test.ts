@@ -9,6 +9,19 @@ import { Pair, Project, RuntimeSession, RelayEvent, Attempt } from '../src/relay
 import { ProviderType, EventId, AttemptId, AssignmentId, PairId, RuntimeSessionId } from '../src/relay/domain/types.ts';
 
 describe('RelayX SQLite Migration & Legacy Schema Upgrade', () => {
+  it('repairs relay_ingress for an already-versioned v6 database', () => {
+    const testDbPath = join(tmpdir(), `relay_ingress_repair_${Date.now()}.sqlite`);
+    let db: SqliteRelayDatabase | undefined;
+    try {
+      db = new SqliteRelayDatabase(testDbPath);
+      db.db.exec('DROP TABLE relay_ingress; PRAGMA user_version = 6;');
+      db.close(); db = undefined;
+      db = new SqliteRelayDatabase(testDbPath);
+      assert.strictEqual(db.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='relay_ingress'").get()?.n,1);
+      assert.deepStrictEqual(db.db.prepare('SELECT * FROM relay_ingress').all(),[]);
+      assert.strictEqual(db.db.prepare('PRAGMA user_version').get()?.user_version,6);
+    } finally { db?.close(); if (existsSync(testDbPath)) unlinkSync(testDbPath); }
+  });
   it('repairs missing identity anchors in v6 files without rewriting identities or permissions', () => {
     const testDbPath = join(tmpdir(), `relay_identity_repair_${Date.now()}.sqlite`);
     let db: SqliteRelayDatabase | undefined;

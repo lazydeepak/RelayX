@@ -572,6 +572,7 @@ CREATE TABLE IF NOT EXISTS handoffs (
     this.migrateSideObservationSchema();
     this.migrateSideCheckpointSchema();
     this.migrateProviderSettingsSchema();
+    this.ensureRelayIngressSchema();
 
     // Phase 1 health domain tables (additive only)
     this.db.exec(`
@@ -979,7 +980,13 @@ CREATE TABLE IF NOT EXISTS handoffs (
         ON verification_results(attempt_id)`);
     }
 
-    // --- relay_ingress: durable bootstrap root (schema v5) ---
+    // relay_ingress is repaired unconditionally after all version-gated migrations.
+    // Keeping creation here would skip databases already stamped v3 or later.
+
+    this.db.exec('PRAGMA user_version = 3;');
+  }
+
+  private ensureRelayIngressSchema(): void {
     this.db.exec(`CREATE TABLE IF NOT EXISTS relay_ingress (
       ingress_id TEXT PRIMARY KEY,
       stable_pair_id TEXT NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,
@@ -998,9 +1005,6 @@ CREATE TABLE IF NOT EXISTS handoffs (
       UNIQUE (stable_pair_id, source_side, external_session_id, provider_turn_identity)
     );`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_relay_ingress_pair_state ON relay_ingress(stable_pair_id, state)`);
-
-    // Stamping v5 here skips the v4 Pair backfill and v5 identity migration.
-    this.db.exec('PRAGMA user_version = 3;');
   }
 
   public async runInTransaction<T>(work: () => Promise<T>): Promise<T> {

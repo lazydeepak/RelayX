@@ -135,9 +135,18 @@ after failure and cannot trigger an immediate retry on the next supervision tick
 
 Review verification: expanded focused/protected suite 79/79 passes, including an
 actual bridge stop/restart, truncated-tail recovery and a slow-transport timing regression. TypeScript, build,
-bridge syntax and diff checks pass. Full suite: 1,524 tests, 1,523 passed, zero failed
-test cases and one skipped (117.61 seconds). `npm test` exits 1 only for the unchanged
+bridge syntax and diff checks pass. Full suite after the schema repairs: 1,526 tests,
+1,525 passed, zero failed test cases and one skipped (115.90 seconds). `npm test` exits 1 only for the unchanged
 `bootstrap_regression.test.ts` suite-construction error against the unavailable
 hard-coded macOS live database. No live macOS/provider acceptance is claimed.
+
+The final review also exposed two bootstrap schema compatibility gaps. Creation of
+`relay_ingress` is now an unconditional idempotent repair after all version-gated
+migrations, so databases already stamped v3–v6 cannot skip the table. Its legacy
+`stable_pair_id` column has a foreign key to the current `pairs.id` row; bootstrap now
+stores and queries that row ID rather than the Pair's separately preserved immutable
+`stableId`. The bootstrap regression suite runs with deliberately different row and
+stable IDs, and a v6 migration regression removes the table before reopen. Expanded
+focused/protected verification is 80/80.
 
 The earlier inventories included this construction error alongside failed test cases (25 entries at the 24-failure checkpoint). All previously listed test-case failures are now resolved or their stale fixtures/contracts corrected with evidence above. Next architecture work can proceed with this explicit environment limitation; actual macOS/OpenCode acceptance remains outstanding.
