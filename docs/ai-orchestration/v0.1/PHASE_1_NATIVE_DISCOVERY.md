@@ -205,3 +205,42 @@ was performed for this slice.
 This is observation reconciliation, not yet Engine recovery of outstanding Attempts
 or Deliveries. Question observation/correlation, SSE event recovery, historical
 pagination and integration with authoritative execution boundaries remain pending.
+
+## Pending-question observation and correlation
+
+`nativeQuestionReader.ts` adds a GET-only observation of `/question`, scoped by the
+registered project directory and filtered to one exact `ses_*` session. It requires
+a current INSPECTED server and explicit question-read compatibility. Each retained
+request must include a unique provider request ID plus a tool correlation containing
+both message ID and call ID. Missing or duplicate correlations fail the whole read.
+Question text/header, nonempty uniquely labelled options, and explicit multiple/custom
+flags are normalized into a whitelist projection. Other sessions are omitted.
+
+The successful result is the complete pending set for that exact session at the
+observation time, assuming the server honors its documented directory query. This
+claim is narrower than transcript page completeness. A later absence can therefore
+be recorded as resolved pending state, but it does not prove how it was answered or
+that the Worker continued successfully.
+
+`SqliteRelayDatabase.nativeQuestions` stores append-only, internally hashed pending
+sets tied to the exact server revision, API digest, session and directory. It rejects
+stale ownership, unsupported compatibility, clock rollback, same-time conflicts,
+scope/index tampering and malformed correlation. Writes participate in outer RelayX
+transactions. `reconcileNativeQuestions` classifies request IDs as appeared, changed,
+unchanged or resolved and stores the new observation. Provider outages and storage
+failures do not overwrite prior evidence or report success.
+
+This slice does not yet bind a question to an authoritative RelayX Assignment and
+Attempt because native dispatch records do not exist. The persisted provider tuple
+`sessionId + messageId + callId + requestId` supplies the exact boundary needed for
+that later binding. It does not enter WAITING_FOR_QUESTION, generate a Planner prompt,
+send an answer or infer completion. Question reply remains disabled.
+
+36 focused question observation, structural compatibility and SQLite migration tests
+pass. Coverage includes cross-session filtering, missing/duplicate correlation,
+malformed options, freshness/scope checks, appeared/changed/resolved comparison,
+idempotency, time conflicts, stored-evidence tampering, rollback, task-table isolation
+and ownership loss before persistence. TypeScript checks and production builds pass.
+The final scope-integrity addition changed repository validation and was rechecked by
+focused tests and TypeScript. No full-suite rerun or installed-server acceptance was
+performed for this slice.
