@@ -37,10 +37,33 @@ defaults. Times are numeric milliseconds on one caller-supplied clock.
   from the hard-coded macOS live database in `bootstrap_regression.test.ts`.
   That full suite was not rerun for this isolated module.
 
+## Public discovery adapters
+
+`catalog.ts` now provides OpenRouter and Models.dev structured parsers and an
+injected-fetch public GET refresh operation. Snapshots include raw response text,
+SHA-256 digest, source URL, parser version, fetch/check times and optional ETag.
+Prices remain uninterpreted values: tiny decimal strings are not rounded to zero,
+and missing prices remain unknown. No snapshot produces an eligibility lease.
+
+Conditional refresh retains original evidence on 304 while updating check time.
+Network/HTTP/parse failures retain stale browsing data without refreshing timestamps.
+Cross-source caches, duplicate model identities and clock rollback are rejected.
+Malformed records and providers with unknown endpoints produce warnings; endpoints
+are never inferred from provider names. The caller supplies cancellation/deadline
+signals and owns scheduling, backoff, persistence and snapshot retention. Raw public
+response data is retained in snapshots, while transport error strings are omitted.
+
+Verification on 2026-10-09: 86 combined catalog/eligibility tests pass and TypeScript
+checks pass. Production builds passed before the final warning/clock guard changes;
+those changes were rechecked by tests and TypeScript. Public unauthenticated GETs
+returned catalogs parsed as 469 OpenRouter models and 6,895 Models.dev models.
+Models.dev had 25 providers without an API endpoint; these were explicitly excluded.
+No inference request or account-specific request was made. Downloaded live snapshots
+are local scratch evidence, not pinned test fixtures or account billing proof.
+
 ## Next integration work
 
-Public OpenRouter/Models.dev discovery adapters, catalog persistence, authoritative
-account evidence acquisition, capability checks, qualification measurement/ranking,
+Catalog persistence, authoritative account evidence acquisition, capability checks, qualification measurement/ranking,
 quota observations, charge/402/429 invalidation and dispatch integration remain
 unimplemented. No inference, billing probe, source upload, live account verification
 or legacy dispatch behavior changed in this slice. No model is newly authorized.
