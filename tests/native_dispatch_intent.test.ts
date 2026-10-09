@@ -340,3 +340,75 @@ describe('native async prompt submission', () => {
     } finally { value.db.close(); } }
   });
 });
+
+describe('native dispatch transcript reconciliation', () => {
+  const claimEvidence = { now: 320, accountPolicyHash: 'account-policy', taskQuotaEvidenceHash: operationalEvidence.taskQuotaEvidenceHash,
+    privacyEvidenceHash: operationalEvidence.privacyEvidenceHash, runtimeEvidenceHash: operationalEvidence.runtimeEvidenceHash };
+  function claimed() { const value = setup(); value.db.nativeDispatchIntents.prepare(value.input);
+    value.db.nativeDispatchAuthorizations.authorize({ dispatchKey: 'dispatch:key', authorizedAt: 310, eligibility: eligibility(), operationalEvidence });
+    value.db.nativeDispatchClaims.claim('dispatch:key',claimEvidence); return value; }
+  function observe(value: ReturnType<typeof setup>, observedAt: number, kind: 'exact'|'absent'|'mismatch'|'old') {
+    const messages: NativeTranscriptPage['messages'] = [];
+    if (kind !== 'absent') messages.push({ id: providerMessageIdFor('dispatch:key'), sessionId: 'ses_exact', role: 'user', createdAt: kind === 'old' ? 319 : 325,
+      providerId: 'provider', modelId: 'model', parts: [{ id: `part-${observedAt}`, type: 'text', text: kind === 'mismatch' ? 'Wrong work' : 'Do work' }] });
+    value.db.nativeTranscripts.save({ status: 'READ',serverId:'server',serverRevision:2,apiSpecHash:'digest',observedAt,
+      session:{id:'ses_exact',directory:'/project'},messages,completeHistory:false });
+  }
+  it('confirms only the exact deterministic post-claim user message and leaves execution unproven', () => {
+    const value = claimed(); try { observe(value,350,'exact'); const result = value.db.nativeDispatchReconciliations.reconcile('dispatch:key');
+      assert.equal(result.verdict,'DELIVERED'); assert.equal(result.reason,'EXACT_MESSAGE_PERSISTED');
+      assert.deepEqual(value.db.nativeDispatchReconciliations.latest('dispatch:key'),result);
+      const delivery = value.db.db.prepare("SELECT status,delivered_at,failure_reason,evidence_json FROM deliveries WHERE id='delivery'").get();
+      assert.equal(delivery?.status,'delivered'); assert.equal(delivery?.delivered_at,350); assert.equal(delivery?.failure_reason,null);
+      const evidence = JSON.parse(String(delivery?.evidence_json)); assert.equal(evidence.source,'reconciliation_probe');
+      assert.equal(evidence.details.providerMessageId,providerMessageIdFor('dispatch:key')); assert.equal(JSON.stringify(evidence).includes('Do work'),false);
+      assert.equal(value.db.db.prepare("SELECT status FROM attempts WHERE id='attempt'").get()?.status,'prepared');
+    } finally { value.db.close(); }
+  });
+  it('marks a partial-page absence ambiguous and permits later exact evidence to recover it', () => {
+    const value = claimed(); try { observe(value,350,'absent'); const first = value.db.nativeDispatchReconciliations.reconcile('dispatch:key');
+      assert.equal(first.verdict,'AMBIGUOUS'); assert.equal(first.reason,'MESSAGE_ABSENT_FROM_PARTIAL_PAGE');
+      assert.equal(value.db.db.prepare("SELECT status FROM deliveries WHERE id='delivery'").get()?.status,'ambiguous');
+      observe(value,360,'exact'); const second = value.db.nativeDispatchReconciliations.reconcile('dispatch:key');
+      assert.equal(second.verdict,'DELIVERED'); assert.equal(value.db.db.prepare('SELECT COUNT(*) AS n FROM native_dispatch_reconciliations').get()?.n,2);
+      assert.equal(value.db.db.prepare("SELECT status FROM deliveries WHERE id='delivery'").get()?.status,'delivered');
+    } finally { value.db.close(); }
+  });
+  it('treats a deterministic ID with changed payload as ambiguous', () => {
+    const value = claimed(); try { observe(value,350,'mismatch'); const result = value.db.nativeDispatchReconciliations.reconcile('dispatch:key');
+      assert.equal(result.verdict,'AMBIGUOUS'); assert.equal(result.reason,'MESSAGE_EVIDENCE_MISMATCH');
+    } finally { value.db.close(); }
+  });
+  it('does not accept a deterministic ID whose provider timestamp predates the claim', () => {
+    const value = claimed(); try { observe(value,350,'old'); const result = value.db.nativeDispatchReconciliations.reconcile('dispatch:key');
+      assert.equal(result.verdict,'AMBIGUOUS'); assert.equal(result.reason,'MESSAGE_EVIDENCE_MISMATCH');
+    } finally { value.db.close(); }
+  });
+  it('requires a newer transcript and an intact pre-dispatch boundary', () => {
+    let value = claimed(); try { assert.throws(() => value.db.nativeDispatchReconciliations.reconcile('dispatch:key'),/Post-claim transcript unavailable/);
+      assert.equal(value.db.nativeDispatchReconciliations.latest('dispatch:key'),undefined);
+    } finally { value.db.close(); }
+    value = claimed(); try { observe(value,350,'exact'); value.db.db.exec("UPDATE native_transcript_observations SET payload_hash='" + digest('forged') + "' WHERE observed_at=250");
+      assert.throws(() => value.db.nativeDispatchReconciliations.reconcile('dispatch:key'),/boundary mismatch/);
+      assert.equal(value.db.db.prepare("SELECT status FROM deliveries WHERE id='delivery'").get()?.status,'delivering');
+    } finally { value.db.close(); }
+  });
+  it('is idempotent for one observation, terminal after delivery, and rolls back with outer work', async () => {
+    let value = claimed(); try { observe(value,350,'exact'); const first = value.db.nativeDispatchReconciliations.reconcile('dispatch:key');
+      assert.deepEqual(value.db.nativeDispatchReconciliations.reconcile('dispatch:key'),first); observe(value,360,'absent');
+      assert.deepEqual(value.db.nativeDispatchReconciliations.reconcile('dispatch:key'),first);
+      assert.equal(value.db.db.prepare('SELECT COUNT(*) AS n FROM native_dispatch_reconciliations').get()?.n,1);
+    } finally { value.db.close(); }
+    value = claimed(); try { observe(value,350,'exact');
+      await assert.rejects(value.db.runInTransaction(async () => { value.db.nativeDispatchReconciliations.reconcile('dispatch:key'); throw new Error('abort'); }));
+      assert.equal(value.db.nativeDispatchReconciliations.latest('dispatch:key'),undefined);
+      assert.equal(value.db.db.prepare("SELECT status FROM deliveries WHERE id='delivery'").get()?.status,'delivering');
+    } finally { value.db.close(); }
+  });
+  it('detects stored reconciliation tampering', () => {
+    const value = claimed(); try { observe(value,350,'exact'); value.db.nativeDispatchReconciliations.reconcile('dispatch:key');
+      value.db.db.exec("UPDATE native_dispatch_reconciliations SET verdict='AMBIGUOUS'");
+      assert.throws(() => value.db.nativeDispatchReconciliations.latest('dispatch:key'),/index mismatch/);
+    } finally { value.db.close(); }
+  });
+});

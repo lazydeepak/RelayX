@@ -419,9 +419,9 @@ turn a restart into a duplicate prompt.
 The claim table stores no credentials or provider response bodies. Its authorization
 digest and independent serialized digest detect mutation. Missing, expired or changed
 authorization and relay authority fail before mutation, and an outer RelayX rollback
-restores both the claim and Delivery status. This slice still has no POST client: a
-future transport coordinator may invoke the provider only after a newly acquired
-claim and must follow every response or failure with exact-session reconciliation.
+restores both the claim and Delivery status. At this checkpoint there was no POST
+client; the transport coordinator in the following section invokes the provider only
+after a newly acquired claim and routes every response or failure to reconciliation.
 
 108 focused eligibility, authorization, claim, intent, observation-recovery and
 migration tests pass. Claim cases cover the atomic Delivery transition, permanent
@@ -453,10 +453,39 @@ resend. Delivery stays `delivering` and Attempt stays `prepared` until independe
 provider evidence supports their respective transitions.
 
 The implementation was exercised against an injectable fetch boundary; no installed
-OpenCode server or provider account was available for a live POST. The next slice
-must reconcile the deterministic message ID against an authoritative post-send
-transcript and durably classify delivered, conclusively not delivered, or ambiguous.
+OpenCode server or provider account was available for a live POST. The following
+section reconciles the deterministic message ID against an authoritative post-send
+transcript and durably classifies delivered or ambiguous. A partial page cannot
+establish conclusively not delivered.
 
 133 focused compatibility, eligibility, submission, authorization, claim, intent,
 observation-recovery and migration tests pass. TypeScript checks and production
 builds pass.
+
+## Durable post-send transcript reconciliation
+
+`SqliteRelayDatabase.nativeDispatchReconciliations` now classifies a claimed send
+only from a newer exact-session transcript. A delivered verdict requires the
+deterministic `msg_relayx_*` user message, provider and model, text-part sequence,
+and a provider creation time at or after the claim. It also verifies the original
+pre-dispatch transcript row and digest, so the evidence chain remains anchored to
+the intent's boundary.
+
+A missing ID in the current page is `AMBIGUOUS`, never conclusively not delivered,
+because native transcript pages are explicitly partial. A matching ID with changed
+role, route, payload or an older timestamp is also ambiguous. Reconciliations are
+append-only by observation time: newer exact evidence may recover an ambiguous
+Delivery to `delivered`, while a delivered verdict is terminal and cannot be
+downgraded by a later partial page.
+
+The reconciliation row and Delivery transition commit atomically. Evidence contains
+only correlation IDs and digests, not prompt text. Exact persistence moves Delivery
+to `delivered`; ambiguity moves it to `ambiguous`; Attempt remains `prepared` in
+both cases because message persistence does not prove Worker execution. No branch
+resends the prompt.
+
+140 focused compatibility, eligibility, submission, reconciliation, authorization,
+claim, intent, observation-recovery and migration tests pass. Reconciliation cases
+cover exact persistence, partial-page absence, route/payload/time mismatch, recovery
+from ambiguity, terminal delivery, boundary integrity, idempotency, rollback and
+stored-record tampering. TypeScript checks and production builds pass.
