@@ -24,7 +24,7 @@ export type NativeDiscovery = {
   dispatchAuthorized: false;
 } | {
   status: 'BLOCKED';
-  reason: 'SERVER_NOT_AUTHORIZED' | 'INVALID_ENDPOINT' | 'API_UNSUPPORTED' | 'AUTH_FAILED' | 'SERVER_UNAVAILABLE' | 'RESPONSE_INVALID';
+  reason: 'SERVER_NOT_AUTHORIZED' | 'INVALID_ENDPOINT' | 'API_UNSUPPORTED' | 'AUTH_FAILED' | 'AUTH_UNAVAILABLE' | 'SERVER_UNAVAILABLE' | 'RESPONSE_INVALID';
 };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -35,6 +35,14 @@ function text(value: unknown): value is string {
 }
 class DiscoveryError extends Error {
   constructor(readonly reason: Extract<NativeDiscovery, { status: 'BLOCKED' }>['reason']) { super(reason); }
+}
+
+export function normalizeNativeEndpoint(value: string): string {
+  const endpoint = new URL(value);
+  if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password
+    || endpoint.search || endpoint.hash || endpoint.pathname !== '/') throw new Error('Invalid native endpoint');
+  if (endpoint.protocol === 'http:' && !['127.0.0.1', '[::1]'].includes(endpoint.hostname)) throw new Error('Invalid native endpoint');
+  return endpoint.origin;
 }
 
 /** Read-only compatibility adapter for the published /global/health + /provider
@@ -56,11 +64,7 @@ export async function inspectNativeOpenCode(options: {
   }
   let endpoint: URL;
   try {
-    endpoint = new URL(server.endpoint);
-    if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password
-      || endpoint.search || endpoint.hash || endpoint.pathname !== '/') throw new Error();
-    // Cleartext auth is restricted to literal loopback; remote servers use TLS.
-    if (endpoint.protocol === 'http:' && !['127.0.0.1', '[::1]'].includes(endpoint.hostname)) throw new Error();
+    endpoint = new URL(normalizeNativeEndpoint(server.endpoint));
   } catch { return { status: 'BLOCKED', reason: 'INVALID_ENDPOINT' }; }
   if (!Number.isFinite(options.observedAt) || options.observedAt < 0) return { status: 'BLOCKED', reason: 'RESPONSE_INVALID' };
   const get = async (path: string): Promise<string> => {

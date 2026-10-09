@@ -4,7 +4,8 @@
 discovery adapter for RX-04. It requires an explicit managed/adopted server reference;
 it does not discover arbitrary processes or treat system services as RelayX-owned.
 This reference is a caller contract, not independently verified ownership. Future
-process supervision/operator adoption must establish and persist that authority.
+process supervision/operator adoption must establish that authority. The durable
+registration and lifecycle foundation below now persists those references.
 
 The adapter fetches `/doc`, requires OpenAPI 3 and advertised GET operations with
 200 responses for `/global/health` and `/provider`, then validates actual health
@@ -49,7 +50,47 @@ The full suite was not rerun for this isolated adapter; the previous checkpoint 
 1,614 passing test cases with the known macOS live-database suite-construction error.
 
 There is no installed OpenCode executable in this environment, so no actual installed
-server `/doc`, health, inventory or inference was verified. Process ownership
-persistence, startup supervision, exact-session message transport, event recovery,
+server `/doc`, health, inventory or inference was verified. Startup supervision,
+exact-session message transport, event recovery,
 question response, version-specific capability validation and dispatch integration
 remain future work. This draft branch is stacked on the model discovery PR.
+
+## Durable ownership and lifecycle foundation
+
+`SqliteRelayDatabase.nativeServers` now stores native server registrations and
+append-only revision history in the existing database. Additive tables and a unique
+active-endpoint index preserve existing relay data and the v6 schema marker.
+Registrations require an actor, ownership evidence reference, opaque secure-store
+auth reference and explicit managed/adopted mode. Endpoints use the same validation
+as discovery. Managed registrations require literal loopback. Project roots are
+stored metadata, not permission grants or independently verified filesystem roots.
+The repository does not prove that caller-supplied ownership evidence is valid;
+trusted operator adoption/process supervision must establish it.
+
+Lifecycle states are REGISTERED, INSPECTED, BLOCKED and REVOKED. Registration does
+not claim a running process. Inspection stores API digest/version, declared operations
+and historical healthy time. Failed inspection removes current inspection evidence
+while preserving historical healthy time. Revocation is terminal, clears inspection
+and frees the endpoint for a new explicit identity. IDs and endpoint bindings cannot
+be silently overwritten. No PID is treated as process identity, and no process is
+spawned or killed by this foundation.
+
+`probeRegisteredNativeServer` resolves authorization by secure-store reference,
+rechecks ownership after asynchronous resolution, performs GET discovery outside
+database transactions and applies results only at the captured revision. Revocation
+or a newer observation supersedes a delayed probe. Missing secure-store access is
+recorded as AUTH_UNAVAILABLE without persisting the credential or exception text.
+Registration and each transition commit with their audit revision in one savepoint;
+outer RelayX transactions retain rollback authority. Backwards observation clocks
+and mismatched server evidence are rejected.
+
+55 focused lifecycle, discovery, catalog persistence and SQLite migration tests pass,
+including file-backed reopen, stable identity/endpoint conflicts, terminal revocation,
+delayed observation races, secure-store resolution races, exact probe evidence,
+missing credential handling, transaction rollback and audit-write failure. TypeScript
+checks and production builds pass. The full suite was not rerun for this additive
+slice; the prior checkpoint and macOS suite-construction limitation remain as above.
+
+Actual process startup/supervision, credential-store implementation and operator UI
+adoption are still pending RX-04 OPEN-04 (macOS deployment and installed version audit).
+No new live server, inference call or automatic dispatch authorization was introduced.
