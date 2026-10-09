@@ -244,3 +244,47 @@ and ownership loss before persistence. TypeScript checks and production builds p
 The final scope-integrity addition changed repository validation and was rechecked by
 focused tests and TypeScript. No full-suite rerun or installed-server acceptance was
 performed for this slice.
+
+## SSE observation and reconnect recovery
+
+`nativeEventObserver.ts` reads a bounded prefix of the inspected server's `/event`
+SSE stream for one registered directory and exact session. It requires explicit
+event-stream compatibility, current ownership evidence, caller byte/event limits and
+caller cancellation. SSE comments are ignored; CRLF, chunk boundaries and multiline
+data are supported. Each JSON envelope must match the directory and contain a provider
+event ID/type/properties. Exact-session identity is derived only from declared
+sessionID fields in event properties, message info or part data. Other sessions are
+omitted. SSE `id` and payload ID must agree when both are present.
+
+The result retains provider event ID/type, message/part correlation when available,
+an SHA-256 digest of the raw JSON data and observed order within that connection.
+Raw event properties are not persisted, avoiding incidental provider configuration
+or tool payload retention. Duplicate IDs with identical data are deduplicated;
+conflicting reuse of an ID fails the connection. Event order is an observation within
+one connection only and is never promoted to a global provider ordering guarantee.
+
+`SqliteRelayDatabase.nativeEvents` stores each connection boundary and each unique
+provider event in additive tables tied to the exact server audit revision and API
+digest. Replayed event IDs are recorded as batch duplicates without duplicating the
+event. Conflicting replay, clock rollback, stale/revoked ownership and unsupported
+compatibility roll back atomically. Writes participate in outer RelayX transactions.
+No Assignment, Attempt or Delivery state is changed by event persistence.
+
+`recoverNativeEventConnection` loads the durable cursor and sends it as
+`Last-Event-ID`. This header is a replay request, not proof that OpenCode honored it.
+Every reconnect is therefore marked `UNVERIFIED_RECONNECT`. Every bounded connection
+also ends at either EOF or RelayX's event limit; both boundaries require authoritative
+transcript and pending-question reconciliation. The recovery result explicitly sets
+both requirements. Events alone cannot prove message persistence, question resolution,
+Worker completion or safe redispatch.
+
+37 focused SSE observation, structural compatibility and SQLite migration tests pass.
+Coverage includes exact-session filtering, comments, CRLF/chunk/multiline parsing,
+identity conflicts, provider-ID replay, cursor recovery, content/auth failures, byte
+and event limits, stale ownership, rollback and unchanged task tables. TypeScript
+checks and production builds pass. No full-suite rerun or installed OpenCode server
+acceptance was performed for this slice.
+
+Long-lived connection supervision, retry/backoff policy and combined execution of the
+required transcript/question reconciliations remain pending Engine integration. The
+published SDK documents an event stream but no replay guarantee was assumed here.
