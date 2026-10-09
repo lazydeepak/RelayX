@@ -69,6 +69,40 @@ const allArms = [];
 /** Every observation, in arrival order. */
 const observations = [];
 const MAX_OBSERVATIONS = 5000;
+let nextObservationSeq = 1;
+
+function appendLedger(record) {
+  fs.appendFileSync(LOG_PATH, `${JSON.stringify(record)}\n`);
+}
+
+function findArm(armId) {
+  return allArms.find((arm) => arm.armId === armId);
+}
+
+/** Recover the observer boundary before accepting requests. Malformed/truncated
+ * trailing records are ignored; a valid earlier arm is never discarded. */
+function hydrateLedger() {
+  if (!fs.existsSync(LOG_PATH)) return;
+  for (const line of fs.readFileSync(LOG_PATH, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    let record;
+    try { record = JSON.parse(line); } catch { continue; }
+    if (record.ledgerType === 'arm' && record.arm?.armId && record.arm?.conversationId) {
+      const arm = { ...record.arm };
+      allArms.push(arm);
+      arms.set(arm.conversationId, arm);
+    } else if (record.ledgerType === 'arm_state' && record.armId) {
+      const arm = findArm(record.armId);
+      if (arm) Object.assign(arm, record.changes ?? {});
+    } else if (!record.ledgerType && record.state) {
+      observations.push(record);
+      if (observations.length > MAX_OBSERVATIONS) observations.shift();
+      if (Number.isSafeInteger(record.seq)) nextObservationSeq = Math.max(nextObservationSeq, record.seq + 1);
+    }
+  }
+}
+
+hydrateLedger();
 
 function json(res, code, body) {
   const payload = JSON.stringify(body, null, 2);
@@ -125,7 +159,7 @@ const server = http.createServer(async (req, res) => {
         const conversationId = String(body.conversationId ?? '').trim();
         if (!conversationId) return json(res, 400, { ok: false, reason: 'conversationId required' });
         const armId = `arm_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`;
-        arms.set(conversationId, {
+        const arm = {
           armId,
           conversationId,
           // Which Delivery this arm was created for. Scoping completions to it is what stops a
@@ -138,8 +172,10 @@ const server = http.createServer(async (req, res) => {
           deliveredAt: null,
           consumed: false,
           completed: false,
-        });
-        allArms.push(arms.get(conversationId));
+        };
+        appendLedger({ ledgerType: 'arm', arm });
+        arms.set(conversationId, arm);
+        allArms.push(arm);
         console.log(
           `[bridge] ARM ${armId} -> conversation ${conversationId}` +
             (body.note ? ` (${body.note})` : ''),
@@ -165,6 +201,8 @@ const server = http.createServer(async (req, res) => {
         if (!arm.consumed) {
           arm.consumed = true;
           arm.deliveredAt = new Date().toISOString();
+          appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+            changes: { consumed: true, deliveredAt: arm.deliveredAt } });
           console.log(`[bridge] arm ${arm.armId} delivered to the observer`);
         }
         return json(res, 200, {
@@ -179,10 +217,10 @@ const server = http.createServer(async (req, res) => {
 
       case 'POST /observation': {
         const body = await readBody(req);
-        const record = { seq: observations.length + 1, receivedAt: new Date().toISOString(), ...body };
+        const record = { ...body, seq: nextObservationSeq++, receivedAt: new Date().toISOString() };
         observations.push(record);
         if (observations.length > MAX_OBSERVATIONS) observations.shift();
-        fs.appendFileSync(LOG_PATH, `${JSON.stringify(record)}\n`);
+        appendLedger(record);
 
         // Retire the arm that just produced its completion, so it is never re-delivered.
         if (record.state === 'finished' && record.armId) {
@@ -190,6 +228,8 @@ const server = http.createServer(async (req, res) => {
             if (arm.armId === record.armId) {
               arm.completed = true;
               arm.completedAt = record.receivedAt;
+              appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+                changes: { completed: true, completedAt: arm.completedAt } });
               console.log(`[bridge] arm ${arm.armId} completed and retired`);
             }
           }

@@ -175,8 +175,8 @@ function makeRetryEligible(f: Fixture, assignmentId: AssignmentId): void {
     .get(assignmentId) as { id: string; created_at: number } | undefined;
   assert.ok(newest, 'the Assignment must have a Delivery to age');
   f.db.db
-    .prepare('UPDATE deliveries SET created_at=? WHERE id=?')
-    .run(Date.now() - 60 * 60_000, newest.id);
+    .prepare('UPDATE deliveries SET created_at=?,updated_at=? WHERE id=?')
+    .run(Date.now() - 60 * 60_000, Date.now() - 60 * 60_000, newest.id);
 }
 
 /**

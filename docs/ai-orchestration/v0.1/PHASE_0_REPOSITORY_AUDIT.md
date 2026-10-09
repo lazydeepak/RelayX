@@ -117,4 +117,26 @@ Focused UI/contract suite: 104/104 passes. Separately invoked rendered RecoveryP
 
 Full run after these corrections: 1,522 tests, 1,521 passed, zero test-case failures, one skipped (113.38 seconds). **`npm test` still exits 1** because `bootstrap_regression.test.ts` fails during suite construction: `ERR_SQLITE_ERROR: unable to open database file` for `/Users/lazydeepak/Library/Application Support/RelayX/relay.sqlite`. The test runner's case totals do not include this construction error as a failed case. This is an unexecuted historical live-data gate, not a successful live acceptance check. No suite was removed/skipped to make the command green.
 
+## PR review follow-up: observer restart and failure-time backoff
+
+The Planner observer bridge now journals arm creation, delivery and completion state
+into its existing append-only external log and hydrates that ledger before listening.
+The restored ledger retains retired bootstrap boundaries and their exact observations,
+so a bridge-process restart cannot strand a database ingress on an arm the bridge has
+forgotten. Writes occur before mutation acknowledgement; malformed or truncated log
+lines do not erase earlier valid evidence. Observation sequence numbers remain
+monotonic across bounded-log reloads.
+
+Planner handoff retry delay is now measured from `Delivery.updatedAt`, which
+`markFailed()` sets when a definite failure becomes known, rather than from send-intent
+creation. A slow or timing-out transport therefore receives the complete quiet period
+after failure and cannot trigger an immediate retry on the next supervision tick.
+
+Review verification: expanded focused/protected suite 78/78 passes, including an
+actual bridge stop/restart and a slow-transport timing regression. TypeScript, build,
+bridge syntax and diff checks pass. Full suite: 1,524 tests, 1,523 passed, zero failed
+test cases and one skipped (117.61 seconds). `npm test` exits 1 only for the unchanged
+`bootstrap_regression.test.ts` suite-construction error against the unavailable
+hard-coded macOS live database. No live macOS/provider acceptance is claimed.
+
 The earlier inventories included this construction error alongside failed test cases (25 entries at the 24-failure checkpoint). All previously listed test-case failures are now resolved or their stale fixtures/contracts corrected with evidence above. Next architecture work can proceed with this explicit environment limitation; actual macOS/OpenCode acceptance remains outstanding.

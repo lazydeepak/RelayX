@@ -27,8 +27,8 @@
  * ## How time is controlled
  *
  * There is no injected clock in the engine, and adding one to satisfy a test would be a subsystem
- * change. Instead the tests move the PERSISTED `deliveries.created_at` timestamp backwards with
- * SQL, which is exactly what a real 10 seconds of wall-clock would do to the same row. That also
+ * change. Instead the tests move the PERSISTED `deliveries.updated_at` failure timestamp backwards
+ * with SQL, which is exactly what a real 10 seconds of wall-clock would do to the same row. That also
  * tests the property that matters most: the schedule is derived from the record, so it survives a
  * restart with nothing extra to reconstruct.
  */
@@ -145,7 +145,7 @@ function ageNewestDelivery(f: Fixture, assignmentId: AssignmentId, msAgo: number
 
   const newestId = rows[0]!.id;
   const target = Date.now() - msAgo;
-  f.db.db.prepare('UPDATE deliveries SET created_at=? WHERE id=?').run(target, newestId);
+  f.db.db.prepare('UPDATE deliveries SET created_at=?,updated_at=? WHERE id=?').run(target, target, newestId);
 
   // Clamp the older rows behind the newest one so attempt order and clock order still agree.
   for (const row of rows.slice(1)) {
@@ -225,6 +225,19 @@ describe('Hand-over retry backoff: a failed Delivery is retried on a schedule, n
       'a tick inside the backoff performs no hand-over action',
     );
     assert.match(waiting.batonDecisions[0]!.reason, /backing off/i);
+  });
+
+  it('starts backoff when a slow transport records failure, not when its Delivery was created', async () => {
+    const derivedId = await stageFirstFailedHandover(f);
+    const latest = (await deliveriesFor(f, derivedId))[0]!;
+    f.db.db.prepare('UPDATE deliveries SET created_at=?,updated_at=? WHERE id=?')
+      .run(Date.now() - 60 * SECOND, Date.now() - 9 * SECOND, latest.id);
+    await tick(f);
+    assert.equal(await deliveryCount(f, derivedId), 1,
+      'an old send that failed only nine seconds ago must retain the full post-failure quiet period');
+    ageNewestDelivery(f, derivedId, 10 * SECOND);
+    await tick(f);
+    assert.equal(await deliveryCount(f, derivedId), 2, 'retry becomes eligible ten seconds after failure');
   });
 
   it('2: the first eligible retry happens at 10 seconds, and re-arms the ladder at 20', async () => {

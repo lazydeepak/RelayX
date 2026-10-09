@@ -7646,7 +7646,7 @@ private isRuntimeSuspensionItemFor(
     const ladder = [10_000, 20_000, 60_000, 300_000];
     const delay = ladder[failures - 1] ?? 1_800_000;
     if (failures >= 5) await raise(false);
-    if (Date.now() - latest.createdAt < delay) return result(`Backing off Planner transport for ${delay}ms after ${failures} definite failures.`);
+    if (Date.now() - latest.updatedAt < delay) return result(`Backing off Planner transport for ${delay}ms after ${failures} definite failures.`);
     const dispatched = await this.dispatchAssignment(assignment.id, 'AUTOMATED');
     if (dispatched.delivery.status === 'delivered') {
       for (const item of (await this.repos.attention.findOpen()).filter(item =>
