@@ -288,3 +288,37 @@ acceptance was performed for this slice.
 Long-lived connection supervision, retry/backoff policy and combined execution of the
 required transcript/question reconciliations remain pending Engine integration. The
 published SDK documents an event stream but no replay guarantee was assumed here.
+
+## Combined observation recovery checkpoint
+
+`nativeObservationRecovery.ts` now coordinates the three authoritative observation
+paths after restart or an SSE boundary. It loads the durable event cursor, consumes
+one bounded SSE connection, reads the exact-session transcript page, then reads the
+complete pending-question set. Network operations occur sequentially outside SQLite
+transactions. Each response independently rechecks the same server revision and API
+digest. This is a coordinated observation window, not a claim that the provider
+offers an atomic cross-endpoint snapshot.
+
+If any phase is blocked, the result names EVENTS, TRANSCRIPT or QUESTIONS and none
+of the new checkpoint is stored. Once all reads succeed, relative transcript/question
+changes are computed and the event batch, transcript page and question set commit in
+one existing RelayX transaction. Repository checks run again inside that transaction,
+so concurrent revocation or a newer observation causes full rollback. A failure in
+the final repository write also rolls back the event and transcript writes.
+
+Successful results explicitly state `taskStateChanged: false` and
+`dispatchAttempted: false`. The coordinator does not interpret an event, completed
+assistant timestamp or resolved question as Worker completion. It does not reconcile
+an Assignment/Attempt because native dispatch records and pre-send boundaries do not
+exist yet. Those authority decisions remain an Engine responsibility.
+
+Review found that the durable question canonicalizer emitted fields in a different
+order than the reader. Since comparisons intentionally use canonical JSON, unchanged
+questions were falsely reported as changed. Canonical ordering now matches the reader,
+and the repeated-checkpoint test proves unchanged classification.
+
+43 combined recovery, SSE, transcript and question persistence tests pass. They cover
+all-evidence commit, each blocked phase, final-write rollback, ownership loss after
+network reads, durable cursor reuse, replay deduplication, unchanged evidence and
+unchanged task tables. TypeScript checks and production builds pass. No full-suite
+rerun or installed-server acceptance was performed for this isolated coordinator.

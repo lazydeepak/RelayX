@@ -34,11 +34,11 @@ export class SqliteNativeQuestionRepository implements NativeQuestionStore {
           if (!text(question.question) || !text(question.header) || typeof question.multiple !== 'boolean'
             || typeof question.custom !== 'boolean' || !Array.isArray(question.options) || question.options.length === 0) throw new Error('Invalid question content');
           const labels = new Set<string>();
-          return { question: question.question, header: question.header, multiple: question.multiple, custom: question.custom,
+          return { question: question.question, header: question.header,
             options: question.options.map(option => {
               if (!text(option.label) || !text(option.description) || labels.has(option.label)) throw new Error('Invalid question option');
               labels.add(option.label); return { label: option.label, description: option.description };
-            }) };
+            }), multiple: question.multiple, custom: question.custom };
         }) };
     });
     return { status: 'READ', serverId: input.serverId, serverRevision: input.serverRevision, apiSpecHash: input.apiSpecHash,
