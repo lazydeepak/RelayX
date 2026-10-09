@@ -73,7 +73,8 @@ const MAX_OBSERVATIONS = 5000;
 let nextObservationSeq = 1;
 
 function isArmCompletion(record) {
-  return Boolean(record.state === 'finished' && record.armId && findArm(record.armId));
+  const arm = record.armId ? findArm(record.armId) : null;
+  return Boolean(record.state === 'finished' && arm?.ingressId && !arm.recoveryConsumed);
 }
 
 /** Keep the rolling diagnostic window bounded without evicting the terminal evidence
@@ -270,6 +271,21 @@ const server = http.createServer(async (req, res) => {
           (record.reason ? ` reason="${String(record.reason).slice(0, 90)}"` : '');
         console.log(`[bridge] #${record.seq} ${brief}`);
         return json(res, 200, { ok: true, seq: record.seq });
+      }
+
+      case 'POST /consume-arm': {
+        const body = await readBody(req);
+        const arm = findArm(String(body.armId ?? '').trim());
+        if (!arm?.ingressId) return json(res, 404, { ok: false, reason: 'bootstrap arm not found' });
+        arm.recoveryConsumed = true;
+        appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+          changes: { recoveryConsumed: true } });
+        while (observations.length > MAX_OBSERVATIONS) {
+          const evictableIndex = observations.findIndex((observation) => !isArmCompletion(observation));
+          if (evictableIndex === -1) break;
+          observations.splice(evictableIndex, 1);
+        }
+        return json(res, 200, { ok: true, armId: arm.armId });
       }
 
       case 'GET /latest': {

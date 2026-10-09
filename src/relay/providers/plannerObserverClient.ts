@@ -105,6 +105,12 @@ export class PlannerObserverClient {
     };
   }
 
+  /** Release protected in-memory completion evidence only after RelayX commits it durably. */
+  async acknowledgeBootstrapArm(armId: string): Promise<void> {
+    const result = await this.request<{ ok: boolean }>('POST', '/consume-arm', { armId });
+    if (!result.ok) throw new Error('observer bridge refused bootstrap acknowledgement');
+  }
+
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
 

@@ -165,4 +165,13 @@ pass. The final full run reports 1,528 tests, 1,527 passed, zero failed test cas
 one skipped (116.91 seconds); its nonzero exit remains solely the unchanged hard-coded
 macOS live-database suite-construction error described above.
 
+Start Pair now establishes the empty-chain ingress arm synchronously before it returns,
+so the first background interval cannot baseline over a Planner turn produced just
+after execution starts. Once the exact-arm completion is committed as a materialized
+ingress and Assignment, RelayX explicitly acknowledges that arm to the bridge. Only
+unacknowledged bootstrap terminal evidence is exempt from the 5,000-observation rolling
+bound; ordinary arms and durably consumed bootstrap responses remain bounded. Focused
+bootstrap, observer-client and process-restart verification is 12/12; TypeScript, build
+and diff checks pass.
+
 The earlier inventories included this construction error alongside failed test cases (25 entries at the 24-failure checkpoint). All previously listed test-case failures are now resolved or their stale fixtures/contracts corrected with evidence above. Next architecture work can proceed with this explicit environment limitation; actual macOS/OpenCode acceptance remains outstanding.

@@ -7363,9 +7363,10 @@ private isRuntimeSuspensionItemFor(
   /** Create the first Assignment only from a persisted, exact-session arm. */
   private async materializeBootstrapTurn(
     pair: Pair,
-    batonSummary: RelayBatonDecisionReport['baton'],
+    batonSummary: RelayBatonDecisionReport['baton'] | undefined,
     trail: string[],
     context: AuthorityContext,
+    armOnly = false,
   ): Promise<RelayBatonDecisionReport | null> {
     const observer = this.plannerObserver;
     if (!observer || typeof observer.ensureBootstrapArmed !== 'function' || typeof observer.bootstrapStatus !== 'function') return null;
@@ -7411,6 +7412,7 @@ private isRuntimeSuspensionItemFor(
         ingress.armEvidence = { armId: arm.armId, boundarySource: 'observer_arm_baseline' };
         await this.repos.relayIngresses.save(ingress);
       }
+      if (armOnly) return null;
       const status = await observer.bootstrapStatus(side.externalSessionId, ingress.armEvidence.armId);
       const completion = status.completion;
       if (!status.available || status.working || !completion ||
@@ -7455,10 +7457,14 @@ private isRuntimeSuspensionItemFor(
         return created;
       });
       if (!assignment) return null;
+      if (typeof observer.acknowledgeBootstrapArm === 'function') {
+        try { await observer.acknowledgeBootstrapArm(ingress.armEvidence.armId); }
+        catch (err) { trail.push(`bootstrap arm acknowledgement deferred: ${(err as Error).message}`); }
+      }
       // DB intent/slot/ingress commit together; outbound effects remain outside.
       const dispatched = await this.dispatchAssignment(assignment.id, context);
       return {
-        pairId: pair.id, decision: 'materialized', relayDecisionTrail: trail, baton: batonSummary,
+        pairId: pair.id, decision: 'materialized', relayDecisionTrail: trail, baton: batonSummary!,
         observation: null, action: { kind: 'bootstrap_materialized', assignmentId: assignment.id,
           attemptId: dispatched.attempt.id, deliveryId: dispatched.delivery.id,
           deliveryConfirmed: dispatched.delivery.status === 'delivered' },
@@ -7894,6 +7900,9 @@ private isRuntimeSuspensionItemFor(
       actor: 'user',
       newState: pair.status,
     });
+    // Establish the empty-chain boundary before returning control to the caller. Waiting
+    // for the background tick could baseline over the Planner's first response.
+    await this.materializeBootstrapTurn(pair, undefined, [], 'OPERATOR_EXPLICIT', true);
     // Start means begin orchestration. This call performs the first deterministic
     // step immediately; the background supervision loop continues subsequent steps.
     await this.advancePairOrchestration(pair.id);

@@ -60,6 +60,7 @@ class StubPlannerObserver {
 
   public armedArmId: string | null = null;
   public armIssueCount = 0;
+  public acknowledgedArmIds: string[] = [];
   /** Set to simulate the completion being attributable only to a RETIRED arm. */
   public retiredArmId: string | null = null;
 
@@ -68,6 +69,10 @@ class StubPlannerObserver {
     this.armIssueCount += 1;
     this.armedArmId = `arm_bootstrap_${this.armIssueCount}`;
     return { armId: this.armedArmId, conversationId, reused: false };
+  }
+
+  async acknowledgeBootstrapArm(armId: string) {
+    this.acknowledgedArmIds.push(armId);
   }
 
   async status(conversationId: string) {
@@ -197,7 +202,8 @@ describe('RelayIngress bootstrap — exactly one Assignment across ticks and res
     assert.strictEqual(fresh!.relayState, 'RUNNING', 'pair is RUNNING');
     assert.ok(fresh!.activeAssignmentId == null, 'no active assignment to start');
     assert.strictEqual(count(db, 'SELECT COUNT(*) AS c FROM deliveries'), 0, 'no deliveries to start');
-    assert.strictEqual(count(db, 'SELECT COUNT(*) AS c FROM relay_ingress'), 0, 'no ingress to start');
+    assert.strictEqual(count(db, 'SELECT COUNT(*) AS c FROM relay_ingress'), 1, 'start establishes the ingress boundary');
+    assert.strictEqual(observer.armIssueCount, 1, 'start arms before returning control to the caller');
   });
 
   after(() => {
@@ -243,6 +249,8 @@ describe('RelayIngress bootstrap — exactly one Assignment across ticks and res
 
     const rows = ingressRows(db);
     assert.strictEqual(rows.length, 1, 'exactly one RelayIngress');
+    assert.deepEqual(observer.acknowledgedArmIds,[observer.armedArmId],
+      'durably materialized ingress releases its protected bridge evidence');
     assert.strictEqual(rows[0].state, 'materialized');
     assert.strictEqual(rows[0].provider_turn_identity, POST_ARM_KEY, 'stable provider turn identity');
     assert.strictEqual(rows[0].observed_text, POST_ARM_TEXT, 'exact observed Planner turn text');

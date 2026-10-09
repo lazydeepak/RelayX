@@ -80,4 +80,20 @@ describe('Planner observer bridge restart durability', () => {
     const all=await fetch(`http://127.0.0.1:${port}/all?conversationId=conversation`).then(response=>response.json()) as {observations:Array<{armId:string}>};
     assert.deepEqual(all.observations.map(observation=>observation.armId),[arm.armId]);
   });
+  it('bounds terminal evidence after RelayX durably consumes its bootstrap arm', async () => {
+    const directory=mkdtempSync(join(tmpdir(),'relayx-observer-')); directories.push(directory);
+    const log=join(directory,'observations.jsonl'); const port=18000+(process.pid%10000);
+    const child=await start(port,log);
+    const armed=await fetch(`http://127.0.0.1:${port}/arm`,{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({conversationId:'conversation',ingressId:'ingress'})}).then(response=>response.json()) as {armId:string};
+    await fetch(`http://127.0.0.1:${port}/observation`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
+      state:'finished',conversationId:'conversation',armId:armed.armId,latestCompletedResponse:'done',completedTurnKey:'turn'})});
+    await fetch(`http://127.0.0.1:${port}/consume-arm`,{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({armId:armed.armId})});
+    await stop(child);
+    for(let seq=0;seq<5001;seq++) appendFileSync(log,`${JSON.stringify({state:'working',conversationId:'other',seq:seq+2})}\n`);
+    await start(port,log);
+    const health=await fetch(`http://127.0.0.1:${port}/health`).then(response=>response.json()) as {observations:number};
+    assert.equal(health.observations,5000);
+  });
 });
