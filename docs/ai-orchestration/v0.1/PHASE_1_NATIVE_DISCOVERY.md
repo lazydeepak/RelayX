@@ -489,3 +489,30 @@ claim, intent, observation-recovery and migration tests pass. Reconciliation cas
 cover exact persistence, partial-page absence, route/payload/time mismatch, recovery
 from ambiguity, terminal delivery, boundary integrity, idempotency, rollback and
 stored-record tampering. TypeScript checks and production builds pass.
+
+## Independent Worker-start evidence
+
+`SqliteRelayDatabase.nativeExecutionObservations` now promotes the exact Attempt
+from `prepared` to `running` only after Delivery has independently reconciled to
+`delivered` and a transcript shows one assistant message directly parented by the
+deterministic dispatched user message. The assistant provider/model must match the
+frozen route and its provider creation time cannot predate the user message.
+
+The confirmed Delivery transcript remains the authoritative source for the user
+turn, while the newest partial page supplies the assistant child. This allows
+restart recovery after the user turn has fallen outside the newest page without
+weakening parent correlation. No child leaves Attempt prepared; multiple children,
+a changed route or backwards time fail closed rather than choosing one.
+
+The execution observation and Attempt transition commit atomically. Stored evidence
+contains message IDs and a transcript digest but no response text. Delivery remains
+`delivered`, Attempt receives `running`, and `finished_at` remains empty. Even an
+assistant message with a completion timestamp does not complete the Attempt in this
+slice; physical completion requires a separate terminal-state contract and evidence.
+
+145 focused compatibility, eligibility, submission, delivery reconciliation,
+Worker-start observation, authorization, claim, intent, observation-recovery and
+migration tests pass. Worker-start cases cover exact parent correlation, partial-page
+recovery, absence, duplicate children, route/time mismatch, prerequisite Delivery,
+idempotency, rollback and stored-record tampering. TypeScript checks and production
+builds pass.

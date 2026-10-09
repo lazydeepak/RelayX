@@ -412,3 +412,66 @@ describe('native dispatch transcript reconciliation', () => {
     } finally { value.db.close(); }
   });
 });
+
+describe('native Worker-start observation', () => {
+  const claimEvidence = { now: 320, accountPolicyHash: 'account-policy', taskQuotaEvidenceHash: operationalEvidence.taskQuotaEvidenceHash,
+    privacyEvidenceHash: operationalEvidence.privacyEvidenceHash, runtimeEvidenceHash: operationalEvidence.runtimeEvidenceHash };
+  function delivered() { const value = setup(); value.db.nativeDispatchIntents.prepare(value.input);
+    value.db.nativeDispatchAuthorizations.authorize({ dispatchKey:'dispatch:key',authorizedAt:310,eligibility:eligibility(),operationalEvidence });
+    value.db.nativeDispatchClaims.claim('dispatch:key',claimEvidence); const user = userMessage(350);
+    value.db.nativeTranscripts.save({ status:'READ',serverId:'server',serverRevision:2,apiSpecHash:'digest',observedAt:350,
+      session:{id:'ses_exact',directory:'/project'},messages:[user],completeHistory:false });
+    value.db.nativeDispatchReconciliations.reconcile('dispatch:key'); return value; }
+  function userMessage(seed: number): NativeTranscriptPage['messages'][number] { return { id:providerMessageIdFor('dispatch:key'),sessionId:'ses_exact',role:'user',createdAt:325,
+    providerId:'provider',modelId:'model',parts:[{id:`user-part-${seed}`,type:'text',text:'Do work'}] }; }
+  function observe(value: ReturnType<typeof setup>, assistants: Array<{ id:string; parentId?:string; providerId?:string; modelId?:string; createdAt?:number }>) {
+    value.db.nativeTranscripts.save({ status:'READ',serverId:'server',serverRevision:2,apiSpecHash:'digest',observedAt:360,
+      session:{id:'ses_exact',directory:'/project'},messages:assistants.map(item => ({ id:item.id,sessionId:'ses_exact',role:'assistant' as const,
+        createdAt:item.createdAt ?? 330,parentId:item.parentId ?? providerMessageIdFor('dispatch:key'),providerId:item.providerId ?? 'provider',modelId:item.modelId ?? 'model',
+        parts:[{id:`part-${item.id}`,type:'text',text:'Started'}] })),completeHistory:false });
+  }
+  it('promotes the exact Attempt only after a directly correlated assistant message appears', () => {
+    const value = delivered(); try { observe(value,[{id:'msg_assistant'}]); const result = value.db.nativeExecutionObservations.observe('dispatch:key');
+      assert.equal(result.observed,true); assert.equal(result.observation?.state,'EXECUTION_STARTED');
+      assert.deepEqual(value.db.nativeExecutionObservations.get('dispatch:key'),result.observation);
+      const attempt = value.db.db.prepare("SELECT status,evidence_json,finished_at FROM attempts WHERE id='attempt'").get();
+      assert.equal(attempt?.status,'running'); assert.equal(attempt?.finished_at,null);
+      const evidence = JSON.parse(String(attempt?.evidence_json)); assert.equal(evidence.details.assistantMessageId,'msg_assistant');
+      assert.equal(JSON.stringify(evidence).includes('Started'),false); assert.equal(value.db.db.prepare("SELECT status FROM deliveries WHERE id='delivery'").get()?.status,'delivered');
+    } finally { value.db.close(); }
+  });
+  it('leaves Attempt prepared when no correlated assistant message exists', () => {
+    const value = delivered(); try { observe(value,[]); assert.deepEqual(value.db.nativeExecutionObservations.observe('dispatch:key'),{observed:false});
+      assert.equal(value.db.nativeExecutionObservations.get('dispatch:key'),undefined);
+      assert.equal(value.db.db.prepare("SELECT status FROM attempts WHERE id='attempt'").get()?.status,'prepared');
+    } finally { value.db.close(); }
+  });
+  it('fails closed on multiple children, wrong route, or pre-user assistant time', () => {
+    const cases = [
+      [{id:'msg_a'},{id:'msg_b'}],
+      [{id:'msg_a',providerId:'other'}],
+      [{id:'msg_a',createdAt:324}],
+    ];
+    for (const assistants of cases) { const value = delivered(); try { observe(value,assistants);
+      assert.throws(() => value.db.nativeExecutionObservations.observe('dispatch:key'),/Ambiguous|route mismatch/);
+      assert.equal(value.db.db.prepare("SELECT status FROM attempts WHERE id='attempt'").get()?.status,'prepared');
+    } finally { value.db.close(); } }
+  });
+  it('requires confirmed Delivery evidence before execution promotion', () => {
+    const value = setup(); try { value.db.nativeDispatchIntents.prepare(value.input);
+      assert.throws(() => value.db.nativeExecutionObservations.observe('dispatch:key'),/delivered dispatch evidence unavailable/);
+    } finally { value.db.close(); }
+  });
+  it('is idempotent, rolls back with outer work, and detects stored tampering', async () => {
+    let value = delivered(); try { observe(value,[{id:'msg_assistant'}]); const first = value.db.nativeExecutionObservations.observe('dispatch:key');
+      assert.deepEqual(value.db.nativeExecutionObservations.observe('dispatch:key'),first);
+      value.db.db.exec("UPDATE native_execution_observations SET assistant_message_id='forged'");
+      assert.throws(() => value.db.nativeExecutionObservations.get('dispatch:key'),/index mismatch/);
+    } finally { value.db.close(); }
+    value = delivered(); try { observe(value,[{id:'msg_assistant'}]);
+      await assert.rejects(value.db.runInTransaction(async () => { value.db.nativeExecutionObservations.observe('dispatch:key'); throw new Error('abort'); }));
+      assert.equal(value.db.nativeExecutionObservations.get('dispatch:key'),undefined);
+      assert.equal(value.db.db.prepare("SELECT status FROM attempts WHERE id='attempt'").get()?.status,'prepared');
+    } finally { value.db.close(); }
+  });
+});

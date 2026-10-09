@@ -51,6 +51,7 @@ import { SqliteNativeDispatchIntentRepository } from './SqliteNativeDispatchInte
 import { SqliteNativeDispatchAuthorizationRepository } from './SqliteNativeDispatchAuthorizationRepository.ts';
 import { SqliteNativeDispatchClaimRepository } from './SqliteNativeDispatchClaimRepository.ts';
 import { SqliteNativeDispatchReconciliationRepository } from './SqliteNativeDispatchReconciliationRepository.ts';
+import { SqliteNativeExecutionObservationRepository } from './SqliteNativeExecutionObservationRepository.ts';
 
 function tableExists(db: DatabaseSync, tableName: string): boolean {
   const rows = db
@@ -109,6 +110,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
   public readonly nativeDispatchAuthorizations: SqliteNativeDispatchAuthorizationRepository;
   public readonly nativeDispatchClaims: SqliteNativeDispatchClaimRepository;
   public readonly nativeDispatchReconciliations: SqliteNativeDispatchReconciliationRepository;
+  public readonly nativeExecutionObservations: SqliteNativeExecutionObservationRepository;
 
   constructor(filePath = ':memory:') {
     this.db = new DatabaseSync(filePath);
@@ -145,6 +147,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     this.nativeDispatchAuthorizations = new SqliteNativeDispatchAuthorizationRepository(this.db);
     this.nativeDispatchClaims = new SqliteNativeDispatchClaimRepository(this.db);
     this.nativeDispatchReconciliations = new SqliteNativeDispatchReconciliationRepository(this.db);
+    this.nativeExecutionObservations = new SqliteNativeExecutionObservationRepository(this.db);
   }
 
   private initSchema(): void {
@@ -158,6 +161,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     SqliteNativeDispatchAuthorizationRepository.initSchema(this.db);
     SqliteNativeDispatchClaimRepository.initSchema(this.db);
     SqliteNativeDispatchReconciliationRepository.initSchema(this.db);
+    SqliteNativeExecutionObservationRepository.initSchema(this.db);
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS projects (
