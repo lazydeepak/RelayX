@@ -684,7 +684,7 @@ export class RelayEngine {
   private readonly planFirstVerification: PlanFirstVerificationEvaluator;
 
   /**
-   * Read-only client for the in-page Planner Observer, or `null` when the observer is not wired.
+   * Client for the in-page Planner Observer, or `null` when the observer is not wired.
    *
    * It is a loopback HTTP client with no browser capability: it cannot open, activate, focus or
    * navigate the Planner tab, and it never runs AppleScript. Monitoring the Planner therefore
@@ -693,8 +693,10 @@ export class RelayEngine {
    * Deliberately opt-in. When absent, the Planner side is observed exactly as it always was, by
    * the AppleScript transcript read, so wiring the observer cannot silently change behaviour for
    * any caller that has not asked for it.
+   *
+   * Not `readonly` so tests can inject a stub observer for Start Pair bootstrap.
    */
-  private readonly plannerObserver: PlannerObserverClient | null;
+  private plannerObserver: PlannerObserverClient | null;
 
   constructor(
     public readonly repos: IRelayRepositories,
@@ -7369,11 +7371,27 @@ private isRuntimeSuspensionItemFor(
     armOnly = false,
   ): Promise<RelayBatonDecisionReport | null> {
     const observer = this.plannerObserver;
-    if (!observer || typeof observer.ensureBootstrapArmed !== 'function' || typeof observer.bootstrapStatus !== 'function') return null;
+    // Bootstrap arm establishment is ONLY required for the explicit operator Start Pair
+    // (armOnly: true). Background supervision ticks (armOnly: false) must never fail
+    // the whole orchestration just because the observer is not wired — they simply
+    // skip bootstrap and continue with baton-based continuity.
+    if (!observer || typeof observer.ensureBootstrapArmed !== 'function' || typeof observer.bootstrapStatus !== 'function') {
+      if (armOnly) {
+        throw new RelayDomainError(
+          'Planner observer not available; bootstrap arm cannot be established',
+          'BOOTSTRAP_OBSERVER_UNAVAILABLE',
+        );
+      }
+      return null;
+    }
     // Bootstrap never competes with backlog, a failed send, or existing recovery.
     if ((await this.repos.assignments.findByPairId(pair.id)).length) return null;
     const side = await this.resolveBatonSide(pair, 'planner', trail);
-    if (!side.ok || side.runtime.providerType !== 'chatgpt') return null;
+    if (!side.ok || side.runtime.providerType !== 'chatgpt') {
+      const msg = side.ok ? 'Planner provider must be ChatGPT for bootstrap' : side.failure;
+      if (armOnly) throw new RelayDomainError(msg, 'BOOTSTRAP_SIDE_INVALID');
+      return null;
+    }
 
     // relay_ingress.stable_pair_id is a legacy column name whose FK targets the
     // current pairs.id row. The Pair's immutable stableId may legitimately differ.
@@ -7408,7 +7426,11 @@ private isRuntimeSuspensionItemFor(
     try {
       if (!ingress.armEvidence.armId) {
         const arm = await observer.ensureBootstrapArmed(side.externalSessionId, ingress.ingressId);
-        if (!arm.armId || arm.conversationId !== side.externalSessionId) return null;
+        if (!arm.armId || arm.conversationId !== side.externalSessionId) {
+          const msg = 'Observer bridge refused bootstrap arm or returned mismatched session';
+          if (armOnly) throw new RelayDomainError(msg, 'BOOTSTRAP_ARM_REFUSED');
+          return null;
+        }
         ingress.armEvidence = { armId: arm.armId, boundarySource: 'observer_arm_baseline' };
         await this.repos.relayIngresses.save(ingress);
       }
@@ -7471,6 +7493,9 @@ private isRuntimeSuspensionItemFor(
         reason: 'An exact-arm Planner turn created one durable Assignment; delivery evidence alone determines baton ownership.',
       };
     } catch (err) {
+      // armOnly=true means this was an explicit Start Pair call — the failure must
+      // propagate so the Pair never transitions to RUNNING without a boundary.
+      if (armOnly) throw err;
       trail.push(`bootstrap stopped without automatic resend: ${(err as Error).message}`);
       return null;
     }
@@ -7894,15 +7919,18 @@ private isRuntimeSuspensionItemFor(
       );
     }
 
+    // Establish the bootstrap boundary BEFORE committing RUNNING state. If the
+    // observer bridge is unavailable or refuses the arm, Start Pair must fail
+    // rather than returning a RUNNING Pair with no boundary (which would allow
+    // the Planner's first turn to complete unattributed).
+    await this.materializeBootstrapTurn(pair, undefined, [], 'OPERATOR_EXPLICIT', true);
+
     pair.startRelay();
     await this.repos.pairs.save(pair);
     await this.emitEvent('pair', pair.id, 'pair.started', {
       actor: 'user',
       newState: pair.status,
     });
-    // Establish the empty-chain boundary before returning control to the caller. Waiting
-    // for the background tick could baseline over the Planner's first response.
-    await this.materializeBootstrapTurn(pair, undefined, [], 'OPERATOR_EXPLICIT', true);
     // Start means begin orchestration. This call performs the first deterministic
     // step immediately; the background supervision loop continues subsequent steps.
     await this.advancePairOrchestration(pair.id);

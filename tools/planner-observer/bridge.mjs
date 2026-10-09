@@ -229,6 +229,20 @@ const server = http.createServer(async (req, res) => {
             reason: 'this arm already produced its completion; awaiting the next delivery',
           });
         }
+        // An arm that was delivered (consumed) but never completed indicates a recovery gap:
+        // the bridge/extension restarted before the observer could report `finished`. We must
+        // NOT re-arm against it — doing so would rebaseline over a potentially completed Planner
+        // response and leave the ingress waiting forever for a completion that will never match.
+        // Return a fail-closed recovery state instead.
+        if (arm.consumed) {
+          return json(res, 200, {
+            ok: true,
+            armed: false,
+            armId: arm.armId,
+            recoveryRequired: true,
+            reason: 'bootstrap arm was consumed but never completed; bridge restart detected before observer finished — manual reconciliation required',
+          });
+        }
         if (!arm.consumed) {
           arm.consumed = true;
           arm.deliveredAt = new Date().toISOString();

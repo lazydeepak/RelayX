@@ -333,4 +333,84 @@ describe('RelayIngress bootstrap — exactly one Assignment across ticks and res
       'nothing may claim a baton without a confirmed Delivery',
     );
   });
+
+  it('Start Pair fails when the observer bridge refuses the bootstrap arm', async () => {
+    // A bridge that throws on ensureBootstrapArmed simulates an unavailable observer.
+    // Start Pair must NOT transition the Pair to RUNNING — it must fail so the
+    // Planner's first turn cannot complete unattributed.
+    const failingObserver = {
+      async ensureBootstrapArmed() {
+        throw new Error('observer bridge unavailable');
+      },
+      async bootstrapStatus() { throw new Error('unreachable'); },
+      async acknowledgeBootstrapArm() { throw new Error('unreachable'); },
+    };
+    // Create a fresh engine with the failing observer for this test
+    const { db, engine } = openEngine();
+    engine['plannerObserver'] = failingObserver as any;
+
+    // Need a fresh pair that hasn't been started yet
+    const project = await engine.createProject('Bootstrap Failure Project');
+    const planner = new RuntimeSession({
+      id: createId('sess'),
+      providerType: 'chatgpt',
+      name: 'Planner',
+      status: 'available',
+      consecutiveObservationFailures: 0,
+      externalSessionId: 'conv-planner-failure',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const worker = new RuntimeSession({
+      id: createId('sess'),
+      providerType: 'opencode',
+      name: 'Worker',
+      status: 'available',
+      consecutiveObservationFailures: 0,
+      externalSessionId: 'ses_worker_failure',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await db.runtimes.save(planner);
+    await db.runtimes.save(worker);
+    for (const [i, s] of [planner, worker].entries()) {
+      await db.associations.save(
+        new RuntimeProjectAssociation({
+          id: `assoc_failure_${i}` as any,
+          runtimeSessionId: s.id,
+          projectId: project.id,
+          providerType: s.providerType,
+          externalSessionId: s.externalSessionId ?? '',
+          verificationState: 'verified',
+          provenance: 'setup',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        }),
+      );
+    }
+    const pair = await engine.createPair(project.id, 'Bootstrap Failure Pair', planner.id, worker.id);
+    const freshPairId = pair.id;
+    db.db.prepare('UPDATE pairs SET stable_pair_id=? WHERE id=?').run('immutable-pair-anchor-failure', freshPairId);
+    assert.strictEqual((await engine.loadAndActivate(freshPairId)).outcome, 'activated');
+
+    await assert.rejects(
+      engine.startPair(freshPairId as any),
+      (err: Error) => {
+        assert.match(err.message, /observer bridge unavailable/);
+        return true;
+      },
+      'Start Pair must throw when bootstrap arm cannot be established',
+    );
+
+    const fresh = await db.pairs.findById(freshPairId);
+    // Pair must remain with relayState STOPPED (not RUNNING) because the boundary was not established
+    assert.notStrictEqual(fresh!.relayState, 'RUNNING', 'Pair must not be RUNNING without bootstrap boundary');
+    assert.strictEqual(fresh!.relayState, 'STOPPED', 'Pair relayState remains STOPPED on bootstrap failure');
+    assert.ok(fresh!.activeAssignmentId == null, 'no Assignment was materialized');
+    // Ingress exists as the durable boundary record but has no armId (arm establishment failed)
+    const ingressRows = all(db, "SELECT * FROM relay_ingress WHERE stable_pair_id = ?", freshPairId);
+    assert.strictEqual(ingressRows.length, 1, 'ingress boundary record exists');
+    assert.strictEqual(ingressRows[0].arm_evidence_json, '{"armId":""}', 'ingress has no armId because arm establishment failed');
+    db.close();
+  });
 });
