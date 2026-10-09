@@ -1,7 +1,7 @@
 import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -40,5 +40,17 @@ describe('Planner observer bridge restart durability', () => {
     assert.equal(all.observations.length,1); assert.equal(all.observations[0]!.armId,armed.armId); assert.equal(all.observations[0]!.state,'finished');
     const next=await fetch(`http://127.0.0.1:${port}/next?conversationId=conversation`).then(response=>response.json()) as {armed:boolean;armId:string};
     assert.deepEqual(next,{ok:true,armed:false,armId:armed.armId,reason:'this arm already produced its completion; awaiting the next delivery'});
+  });
+  it('separates new arm records from a crash-truncated ledger tail', async () => {
+    const directory=mkdtempSync(join(tmpdir(),'relayx-observer-')); directories.push(directory);
+    const log=join(directory,'observations.jsonl'); const port=18000+(process.pid%10000);
+    appendFileSync(log,'{"state":"working","conversationId":"broken');
+    const first=await start(port,log);
+    const armed=await fetch(`http://127.0.0.1:${port}/arm`,{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({conversationId:'conversation',ingressId:'ingress'})}).then(response=>response.json()) as {armId:string};
+    await stop(first); await start(port,log);
+    const health=await fetch(`http://127.0.0.1:${port}/health`).then(response=>response.json()) as {allArms:Array<{armId:string}>};
+    assert.deepEqual(health.allArms.map(arm=>arm.armId),[armed.armId],
+      'the first post-crash arm remains a separate durable ledger record');
   });
 });

@@ -124,16 +124,17 @@ into its existing append-only external log and hydrates that ledger before liste
 The restored ledger retains retired bootstrap boundaries and their exact observations,
 so a bridge-process restart cannot strand a database ingress on an arm the bridge has
 forgotten. Writes occur before mutation acknowledgement; malformed or truncated log
-lines do not erase earlier valid evidence. Observation sequence numbers remain
-monotonic across bounded-log reloads.
+lines do not erase earlier valid evidence, and startup inserts a physical record
+separator after any crash-truncated tail before accepting new writes. Observation
+sequence numbers remain monotonic across bounded-log reloads.
 
 Planner handoff retry delay is now measured from `Delivery.updatedAt`, which
 `markFailed()` sets when a definite failure becomes known, rather than from send-intent
 creation. A slow or timing-out transport therefore receives the complete quiet period
 after failure and cannot trigger an immediate retry on the next supervision tick.
 
-Review verification: expanded focused/protected suite 78/78 passes, including an
-actual bridge stop/restart and a slow-transport timing regression. TypeScript, build,
+Review verification: expanded focused/protected suite 79/79 passes, including an
+actual bridge stop/restart, truncated-tail recovery and a slow-transport timing regression. TypeScript, build,
 bridge syntax and diff checks pass. Full suite: 1,524 tests, 1,523 passed, zero failed
 test cases and one skipped (117.61 seconds). `npm test` exits 1 only for the unchanged
 `bootstrap_regression.test.ts` suite-construction error against the unavailable

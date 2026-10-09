@@ -83,7 +83,8 @@ function findArm(armId) {
  * trailing records are ignored; a valid earlier arm is never discarded. */
 function hydrateLedger() {
   if (!fs.existsSync(LOG_PATH)) return;
-  for (const line of fs.readFileSync(LOG_PATH, 'utf8').split('\n')) {
+  const contents = fs.readFileSync(LOG_PATH, 'utf8');
+  for (const line of contents.split('\n')) {
     if (!line.trim()) continue;
     let record;
     try { record = JSON.parse(line); } catch { continue; }
@@ -100,6 +101,10 @@ function hydrateLedger() {
       if (Number.isSafeInteger(record.seq)) nextObservationSeq = Math.max(nextObservationSeq, record.seq + 1);
     }
   }
+  // A killed append can leave an invalid fragment without its newline. Always close
+  // the final physical record before accepting new writes so the next valid arm is
+  // independently parseable on another restart.
+  if (contents.length > 0 && !contents.endsWith('\n')) fs.appendFileSync(LOG_PATH, '\n');
 }
 
 hydrateLedger();
