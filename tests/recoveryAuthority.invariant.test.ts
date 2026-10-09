@@ -23,8 +23,8 @@ describe('Recovery Authority — Invariant R1 (fixed PLANNER)', () => {
     assertNoSelectableRecoveryDestination('planner');
     const badWorker = 'worker';
     const badUnknown = 'unknown';
-    expect(() => assertNoSelectableRecoveryDestination(badWorker)).toThrow('Planner-first recovery violation');
-    expect(() => assertNoSelectableRecoveryDestination(badUnknown)).toThrow('Planner-first recovery violation');
+    expect(() => assertNoSelectableRecoveryDestination(badWorker)).toThrow(/Planner-first recovery violation/i);
+    expect(() => assertNoSelectableRecoveryDestination(badUnknown)).toThrow(/Planner-first recovery violation/i);
   });
 });
 

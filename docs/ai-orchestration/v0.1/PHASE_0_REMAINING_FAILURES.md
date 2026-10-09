@@ -2,6 +2,12 @@
 
 2026-10-09, Linux cloud, Node 24.19.0, clean `npm ci`.
 
+## Current checkpoint
+
+After the discovery fixture, priority contract and Planner Open repairs, the full run reports 1,521 passed, zero test-case failures, one skipped (1,522 tests, 113.38 seconds). The command exits 1 because the historical `bootstrap_regression.test.ts` suite cannot initialize its hardcoded Mac database (`ERR_SQLITE_ERROR`, unable to open database file). It remains unchanged and unexecuted. Build/TypeScript pass; focused UI contracts 104/104 and separately invoked rendered UI invariants 10/10 pass.
+
+## Previous checkpoint inventory
+
 Full suite: 1,522 tests, 1,497 passed, 24 failed, one skipped; 330 suites; 47.58 seconds. The failures remain unmodified. This inventory includes the environment-bound historical Mac database suite. It is not a claim that every remaining failure is environment-specific.
 
 - `tests/assignment_create_shortcuts.test.ts:1:4104` — existing Create & Dispatch contract remains: submit still calls onCreate with the selected pair

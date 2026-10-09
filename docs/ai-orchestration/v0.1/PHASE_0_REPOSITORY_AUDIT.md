@@ -104,3 +104,17 @@ Unresolved pending/delivering/ambiguous sends never permit retry. Exhausted shor
 Supervision no longer advances a Pair a second time after its baton path already dispatched a handoff in that tick, preserving one-step boundaries and preventing premature retry/attention processing. Pause/Stop, execution-slot and recovery dispatch guards remain in the shared path.
 
 Final verification: focused/protected suite 73/73 passes; build, TypeScript, bridge syntax and diff checks pass. Full suite on clean locked dependencies: 1,522 tests, 1,497 passed, 24 failed, one skipped (47.58 seconds). The 15 previously failing handoff/retry cases now pass, plus the replacement-session regression. See [remaining failures](PHASE_0_REMAINING_FAILURES.md). Live macOS/provider acceptance remains unverified. Synchronization uses review branch `codex/relayx-phase0-repairs`; the original main baseline is retained for comparison.
+
+## Follow-up: discovery fixtures and Planner Open
+
+The project-discovery fixture intercepted a retained-handle read script while production discovery calls `buildReadActiveTabUrlAppleScript`. It therefore returned an empty host response before all the search/navigation failure scenarios. The fixture now intercepts the actual exported helper's script; search acceptance, result settling, configurable Tab counts, JS-gate errors and invalid Project identity assertions remain intact. Production discovery was not replaced with a synthetic success or altered to satisfy the fixture. All 31 discovery tests pass (74.55 seconds of real polling).
+
+PairView's Planner Open button had bypassed `onOpenPlannerSession` with `window.open`. It now uses the existing session-ID callback, which invokes `openRuntimeSession` and surfaces verified results/failures. Full stored identity remains authoritative; displayed URL elision is not passed to the opener.
+
+Outdated source-contract assertions now explicitly require forwarding the operator's priority through modal/App/bridge. The OpenCode capability expectation reflects its production macOS-only integration (`partial` on Darwin, `unsupported` elsewhere), and the recovery rejection assertion checks the same message case-insensitively. These are corrections to fixtures/contracts after inspecting production behavior; tests were not removed, skipped or relaxed to allow unauthorized recovery.
+
+Focused UI/contract suite: 104/104 passes. Separately invoked rendered RecoveryPanel invariants: 10/10 passes (the existing npm test glob does not include `.test.tsx`). TypeScript and build pass. Full-suite outcome follows below.
+
+Full run after these corrections: 1,522 tests, 1,521 passed, zero test-case failures, one skipped (113.38 seconds). **`npm test` still exits 1** because `bootstrap_regression.test.ts` fails during suite construction: `ERR_SQLITE_ERROR: unable to open database file` for `/Users/lazydeepak/Library/Application Support/RelayX/relay.sqlite`. The test runner's case totals do not include this construction error as a failed case. This is an unexecuted historical live-data gate, not a successful live acceptance check. No suite was removed/skipped to make the command green.
+
+The earlier inventories included this construction error alongside failed test cases (25 entries at the 24-failure checkpoint). All previously listed test-case failures are now resolved or their stale fixtures/contracts corrected with evidence above. Next architecture work can proceed with this explicit environment limitation; actual macOS/OpenCode acceptance remains outstanding.

@@ -100,7 +100,7 @@ describe('Assignment modal — Create Project / Create Pair shortcuts', () => {
     // the core contract is unchanged: required fields, onCreate(pair, title, instr).
     assert.match(modalSource, /const handleSubmit = async \(e: React\.FormEvent\) => \{\s*e\.preventDefault\(\);/);
     assert.match(modalSource, /if \(!title\.trim\(\) \|\| !instruction\.trim\(\)\) return;/);
-    assert.match(modalSource, /onCreate\(selectedPairId \|\| pairs\[0\]\?\.id, title, instruction\);/);
+    assert.match(modalSource, /onCreate\(selectedPairId \|\| pairs\[0\]\?\.id, title, instruction, priority\);/);
     assert.match(modalSource, /Create & Dispatch/);
   });
 
