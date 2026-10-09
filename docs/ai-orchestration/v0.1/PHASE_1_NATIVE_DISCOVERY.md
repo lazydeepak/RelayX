@@ -168,3 +168,40 @@ identities, duplicate IDs, malformed roles/timestamps, paging limits, auth failu
 revocation and mutable-store revision races. TypeScript checks and production builds
 pass. No full-suite rerun or live installed-server acceptance was performed for this
 isolated reader slice. The previous full-suite checkpoint and macOS limitation remain.
+
+## Durable transcript observations and restart reconciliation
+
+`SqliteRelayDatabase.nativeTranscripts` stores append-only page observations in
+the existing database. Each page references the exact native server audit revision,
+session ID, directory, API digest and observation time. A SHA-256 payload digest
+checks stored canonical evidence on retrieval. Writes reject superseded/revoked
+server evidence, unsupported read compatibility, backwards observations and
+same-time conflicting content. Identical observations are idempotent. Savepoints
+retain outer transaction rollback; prior pages and streaming text are never edited.
+Unknown response fields are removed by whitelist projection. Digest checks establish
+internal consistency, not authenticity against malicious database replacement.
+
+`reconcileNativeTranscript` performs a fresh GET-only read, loads the last durable
+page for the exact scope, compares message identities/content and atomically stores
+the new page. On restart it therefore reuses prior evidence rather than redispatching.
+Changes are relative to the last observed page: added, changed, unchanged and
+notInCurrentPage. A message absent from a partial page is not declared deleted, and
+a message returning from an earlier page may be added relative to the immediate
+baseline. Provider order and older observations remain intact. Model/provider claims
+and completion timestamps remain observations, not free-tier or task-completion proof.
+
+Provider outages preserve the last durable page. Storage failures and ownership
+changes before persistence surface as errors rather than successful reconciliation.
+No retention pruning or automatic recovery dispatch policy is introduced.
+
+47 focused transcript persistence, reader and SQLite migration tests pass. These
+cover file-backed reopen, immutable streaming revisions, scope isolation, idempotency,
+clock/conflict rejection, stale server ownership, digest/index corruption, rollback,
+provider outage, ownership change before persistence and unchanged task tables.
+TypeScript checks pass; production builds passed before the final two test additions,
+which changed no production code. No full-suite rerun or installed-server acceptance
+was performed for this slice.
+
+This is observation reconciliation, not yet Engine recovery of outstanding Attempts
+or Deliveries. Question observation/correlation, SSE event recovery, historical
+pagination and integration with authoritative execution boundaries remain pending.
