@@ -8,7 +8,7 @@ function register(db: SqliteRelayDatabase) {
   db.nativeServers.register({ serverId: 'server', endpoint: 'http://127.0.0.1:4096', ownership: 'ADOPTED', authKeyRef: 'key', projectRoots: ['/project'], registeredBy: 'operator', ownershipEvidenceRef: 'evidence', now: 100 });
   db.nativeServers.applyDiscovery('server', 1, 200, { status: 'INSPECTED', server: { serverId: 'server', endpoint: 'http://127.0.0.1:4096', ownership: 'ADOPTED' }, observedAt: 200,
     serverVersion: '1', apiVersion: '1', apiSpecHash: 'digest', rawApiSpec: '{}', providers: [], declaredOperations: [], dispatchAuthorized: false,
-    compatibility: { sessionRead: true, messageRead: true, questionRead: true, questionReply: true, eventStream: false, blockers: [] } });
+    compatibility: { sessionRead: true, messageRead: true, messageSend: false, questionRead: true, questionReply: true, eventStream: false, blockers: [] } });
 }
 function observation(at = 250): NativeQuestionObservation {
   return { status: 'READ', serverId: 'server', serverRevision: 2, apiSpecHash: 'digest', observedAt: at, sessionId: 'ses_exact', directory: '/project', completePendingSet: true,

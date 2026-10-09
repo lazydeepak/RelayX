@@ -6,13 +6,14 @@ import type { NativeTranscriptPage } from '../src/relay/providers/nativeTranscri
 import type { NativeQuestionObservation } from '../src/relay/providers/nativeQuestionReconciliation';
 import type { NativeEventRead } from '../src/relay/providers/nativeEventObserver';
 import { COST_DIMENSIONS, type EligibilityRequest } from '../src/relay/model-intelligence/eligibility';
+import { claimAndSubmitNativePrompt, providerMessageIdFor } from '../src/relay/providers/nativePromptSubmission';
 
 function setup() {
   const db = new SqliteRelayDatabase();
   db.nativeServers.register({ serverId: 'server', endpoint: 'http://127.0.0.1:4096', ownership: 'ADOPTED', authKeyRef: 'key', projectRoots: ['/project'], registeredBy: 'operator', ownershipEvidenceRef: 'evidence', now: 100 });
   db.nativeServers.applyDiscovery('server', 1, 200, { status: 'INSPECTED', server: { serverId: 'server', endpoint: 'http://127.0.0.1:4096', ownership: 'ADOPTED' }, observedAt: 200,
     serverVersion: '1', apiVersion: '1', apiSpecHash: 'digest', rawApiSpec: '{}', providers: [], declaredOperations: [], dispatchAuthorized: false,
-    compatibility: { sessionRead: true, messageRead: true, questionRead: true, questionReply: true, eventStream: true, blockers: [] } });
+    compatibility: { sessionRead: true, messageRead: true, messageSend: true, questionRead: true, questionReply: true, eventStream: true, blockers: [] } });
   const transcript: NativeTranscriptPage = { status: 'READ', serverId: 'server', serverRevision: 2, apiSpecHash: 'digest', observedAt: 250,
     session: { id: 'ses_exact', directory: '/project' }, messages: [], completeHistory: false };
   const questions: NativeQuestionObservation = { status: 'READ', serverId: 'server', serverRevision: 2, apiSpecHash: 'digest', observedAt: 250,
@@ -270,5 +271,72 @@ describe('native dispatch one-shot claim', () => {
       value.db.db.prepare('UPDATE native_dispatch_claims SET claim_json=?').run(JSON.stringify(parsed));
       assert.throws(() => value.db.nativeDispatchClaims.get('dispatch:key'), /Invalid native dispatch claim/);
     } finally { value.db.close(); }
+  });
+});
+
+describe('native async prompt submission', () => {
+  const claimEvidence = { now: 320, accountPolicyHash: 'account-policy', taskQuotaEvidenceHash: operationalEvidence.taskQuotaEvidenceHash,
+    privacyEvidenceHash: operationalEvidence.privacyEvidenceHash, runtimeEvidenceHash: operationalEvidence.runtimeEvidenceHash };
+  function ready() { const value = setup(); value.db.nativeDispatchIntents.prepare(value.input);
+    value.db.nativeDispatchAuthorizations.authorize({ dispatchKey: 'dispatch:key', authorizedAt: 310, eligibility: eligibility(), operationalEvidence }); return value; }
+  const stores = (value: ReturnType<typeof setup>) => ({ servers: value.db.nativeServers, intents: value.db.nativeDispatchIntents, claims: value.db.nativeDispatchClaims });
+
+  it('posts the frozen text and exact model once, then requires transcript reconciliation', async () => {
+    const value = ready(); try { const calls: Array<{ url: string; init?: RequestInit }> = [];
+      const result = await claimAndSubmitNativePrompt(stores(value), { dispatchKey: 'dispatch:key', claimEvidence,
+        resolveAuthorization: async key => { assert.equal(key, 'key'); return 'Basic secret'; }, signal: AbortSignal.timeout(1000),
+        fetch: (async (url, init) => { calls.push({ url: String(url), init }); return new Response(null, { status: 204 }); }) as typeof fetch });
+      assert.deepEqual(result, { status: 'RECONCILIATION_REQUIRED', dispatchKey: 'dispatch:key', providerMessageId: providerMessageIdFor('dispatch:key'), transport: 'ATTEMPTED_204', httpStatus: 204 });
+      assert.equal(calls.length, 1); const request = calls[0]; const url = new URL(request.url);
+      assert.equal(url.pathname, '/session/ses_exact/prompt_async'); assert.equal(url.searchParams.get('directory'), '/project');
+      assert.equal(request.init?.method, 'POST'); assert.equal((request.init?.headers as Record<string,string>).Authorization, 'Basic secret');
+      assert.deepEqual(JSON.parse(String(request.init?.body)), { messageID: providerMessageIdFor('dispatch:key'),
+        model: { providerID: 'provider', modelID: 'model' }, parts: [{ type: 'text', text: 'Do work' }] });
+      assert.equal(value.db.db.prepare("SELECT status FROM deliveries WHERE id='delivery'").get()?.status, 'delivering');
+      assert.equal(value.db.db.prepare("SELECT status FROM attempts WHERE id='attempt'").get()?.status, 'prepared');
+    } finally { value.db.close(); }
+  });
+
+  it('does not POST an existing claim and ignores changed or expired reacquisition evidence', async () => {
+    const value = ready(); try { value.db.nativeDispatchClaims.claim('dispatch:key', claimEvidence); let calls = 0; let authCalls = 0;
+      value.db.nativeServers.revoke('server', 2, 330);
+      const result = await claimAndSubmitNativePrompt(stores(value), { dispatchKey: 'dispatch:key',
+        claimEvidence: { ...claimEvidence, now: 999, accountPolicyHash: 'changed' }, resolveAuthorization: async () => { authCalls++; throw new Error('unavailable'); },
+        signal: AbortSignal.timeout(1000), fetch: (async () => { calls++; return new Response(null, { status: 204 }); }) as typeof fetch });
+      assert.equal(result.status, 'RECONCILIATION_REQUIRED'); if (result.status === 'RECONCILIATION_REQUIRED') assert.equal(result.transport, 'NOT_ATTEMPTED_EXISTING_CLAIM');
+      assert.equal(calls, 0); assert.equal(authCalls, 0);
+    } finally { value.db.close(); }
+  });
+
+  for (const response of [new Response(null, { status: 400 }), new Response(null, { status: 500 })]) {
+    it(`keeps HTTP ${response.status} non-authoritative and reconciliation-required`, async () => {
+      const value = ready(); try { const result = await claimAndSubmitNativePrompt(stores(value), { dispatchKey: 'dispatch:key', claimEvidence,
+        resolveAuthorization: async () => 'Basic secret', signal: AbortSignal.timeout(1000), fetch: (async () => response) as typeof fetch });
+        assert.equal(result.status, 'RECONCILIATION_REQUIRED'); if (result.status === 'RECONCILIATION_REQUIRED') {
+          assert.equal(result.transport, 'ATTEMPTED_HTTP_ERROR'); assert.equal(result.httpStatus, response.status);
+        }
+      } finally { value.db.close(); }
+    });
+  }
+
+  it('treats thrown transport errors as ambiguous without leaking their text', async () => {
+    const value = ready(); try { const result = await claimAndSubmitNativePrompt(stores(value), { dispatchKey: 'dispatch:key', claimEvidence,
+      resolveAuthorization: async () => 'Basic secret', signal: AbortSignal.timeout(1000), fetch: (async () => { throw new Error('Basic secret leak'); }) as typeof fetch });
+      assert.equal(result.status, 'RECONCILIATION_REQUIRED'); assert.equal(JSON.stringify(result).includes('secret'), false);
+      if (result.status === 'RECONCILIATION_REQUIRED') assert.equal(result.transport, 'ATTEMPTED_NETWORK_ERROR');
+    } finally { value.db.close(); }
+  });
+
+  it('blocks unsupported contracts, missing auth and pre-claim abort without consuming the key', async () => {
+    for (const kind of ['contract','auth','abort'] as const) { const value = ready(); try {
+      if (kind === 'contract') { const server = value.db.nativeServers.get('server')!; assert.ok(server.inspection?.compatibility); server.inspection.compatibility.messageSend = false;
+        value.db.db.prepare('UPDATE native_servers SET record_json=? WHERE server_id=?').run(JSON.stringify(server),'server'); }
+      const controller = new AbortController(); if (kind === 'abort') controller.abort(); let calls = 0;
+      const result = await claimAndSubmitNativePrompt(stores(value), { dispatchKey: 'dispatch:key', claimEvidence,
+        resolveAuthorization: async () => kind === 'auth' ? undefined : 'Basic secret', signal: controller.signal,
+        fetch: (async () => { calls++; return new Response(null, { status: 204 }); }) as typeof fetch });
+      assert.equal(result.status, 'BLOCKED'); assert.equal(calls, 0); assert.equal(value.db.nativeDispatchClaims.get('dispatch:key'), undefined);
+      assert.equal(value.db.db.prepare("SELECT status FROM deliveries WHERE id='delivery'").get()?.status, 'pending');
+    } finally { value.db.close(); } }
   });
 });

@@ -15,6 +15,10 @@ function document() {
     paths: {
       '/session/{sessionID}': { get: { ...response({ $ref: '#/components/schemas/Session' }), parameters: [parameter('sessionID')] } },
       '/session/{sessionID}/message': { get: { ...response(array(object({ info: { $ref: '#/components/schemas/Message' }, parts: array({ type: 'object' }) }))), parameters: [parameter('sessionID')] } },
+      '/session/{sessionID}/prompt_async': { post: { parameters: [parameter('sessionID'), { name: 'directory', in: 'query', required: false, schema: string }],
+        requestBody: { content: { 'application/json': { schema: object({ messageID: { type: 'string', pattern: '^msg' }, model: object({ providerID: string, modelID: string }),
+          parts: array({ oneOf: [object({ type: { type: 'string', const: 'text' }, text: string }), object({ type: { type: 'string', const: 'file' } })] }) }) } } },
+        responses: { '204': { description: 'accepted' } } } },
       '/question': { get: response(array(object({ id: string, sessionID: string, questions: array(object({ question: string, header: string, options: array(object({ label: string, description: string })) })) }))) },
       '/question/{requestID}/reply': { post: { ...response({ type: 'boolean' }), parameters: [parameter('requestID')], requestBody: { content: { 'application/json': { schema: object({ answers: array(array(string)) }) } } } } },
       '/event': { get: response(string, 'text/event-stream') },
@@ -23,11 +27,11 @@ function document() {
 }
 describe('native API structural compatibility', () => {
   it('accepts implemented response and ordered question-answer contracts', () => {
-    assert.deepEqual(checkNativeApiCompatibility(document()), { sessionRead: true, messageRead: true, questionRead: true, questionReply: true, eventStream: true, blockers: [] });
+    assert.deepEqual(checkNativeApiCompatibility(document()), { sessionRead: true, messageRead: true, messageSend: true, questionRead: true, questionReply: true, eventStream: true, blockers: [] });
   });
   it('rejects declarations with no schemas and never assumes methods from paths', () => {
     const result = checkNativeApiCompatibility({ openapi: '3.1.0', paths: { '/session/{sessionID}': { post: response(string) }, '/question': { get: {} } } });
-    assert.equal(result.blockers.length, 5);
+    assert.equal(result.blockers.length, 6);
   });
   it('requires exact session identity and project directory', () => {
     const doc = document(); doc.components.schemas.Session.required = ['id'];
@@ -49,6 +53,19 @@ describe('native API structural compatibility', () => {
   it('rejects messages without exact session correlation', () => {
     const doc = document(); doc.components.schemas.Message.required = ['id', 'role'];
     assert.equal(checkNativeApiCompatibility(doc).messageRead, false);
+  });
+  it('requires the exact asynchronous text/model/directory/204 send contract', () => {
+    const variants = [
+      (doc: ReturnType<typeof document>) => { const schema = doc.paths['/session/{sessionID}/prompt_async'].post.requestBody.content['application/json'].schema;
+        delete (schema.properties as Record<string, unknown>).messageID; },
+      (doc: ReturnType<typeof document>) => { doc.paths['/session/{sessionID}/prompt_async'].post.parameters[1].name = 'workspace'; },
+      (doc: ReturnType<typeof document>) => { const schema = doc.paths['/session/{sessionID}/prompt_async'].post.requestBody.content['application/json'].schema;
+        (schema.properties as Record<string, unknown>).parts = array(object({ type: { type: 'string', const: 'file' } })); },
+      (doc: ReturnType<typeof document>) => { const schema = doc.paths['/session/{sessionID}/prompt_async'].post.requestBody.content['application/json'].schema;
+        (schema.properties as Record<string, unknown>).model = object({ modelID: string }); },
+      (doc: ReturnType<typeof document>) => { doc.paths['/session/{sessionID}/prompt_async'].post.responses = { '200': { description: 'wrong ack' } } as never; },
+    ];
+    for (const mutate of variants) { const doc = document(); mutate(doc); assert.equal(checkNativeApiCompatibility(doc).messageSend, false); }
   });
   it('rejects unknown message roles rather than silently assigning an assistant role', () => {
     const doc = document(); (doc.components.schemas.Message.properties.role as { enum: string[] }).enum.push('unknown');

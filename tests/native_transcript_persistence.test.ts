@@ -10,7 +10,7 @@ function register(db: SqliteRelayDatabase) {
   db.nativeServers.register({ serverId: 'server', endpoint: 'http://127.0.0.1:4096', ownership: 'ADOPTED', authKeyRef: 'key-ref', projectRoots: ['/project'], registeredBy: 'operator', ownershipEvidenceRef: 'adoption', now: 100 });
   db.nativeServers.applyDiscovery('server', 1, 200, { status: 'INSPECTED', server: { serverId: 'server', endpoint: 'http://127.0.0.1:4096', ownership: 'ADOPTED' },
     observedAt: 200, serverVersion: '1', apiVersion: '1', apiSpecHash: 'digest', rawApiSpec: '{}', providers: [], declaredOperations: [], dispatchAuthorized: false,
-    compatibility: { sessionRead: true, messageRead: true, questionRead: false, questionReply: false, eventStream: false, blockers: [] } });
+    compatibility: { sessionRead: true, messageRead: true, messageSend: false, questionRead: false, questionReply: false, eventStream: false, blockers: [] } });
 }
 function page(): NativeTranscriptPage {
   return { status: 'READ', serverId: 'server', serverRevision: 2, apiSpecHash: 'digest', observedAt: 250, session: { id: 'ses_exact', directory: '/project', title: 'Title' },

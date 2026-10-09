@@ -427,3 +427,36 @@ claim and must follow every response or failure with exact-session reconciliatio
 migration tests pass. Claim cases cover the atomic Delivery transition, permanent
 reacquisition refusal, expired/missing/changed authority, outer rollback and stored
 record tampering. TypeScript checks and production builds pass.
+
+## Native asynchronous prompt submission
+
+The send contract is grounded in OpenCode's generated v2 SDK and OpenAPI document
+at upstream commit `388406238bd5ca15564a762840a2362c3a45bd9c`. RelayX now marks
+`messageSend` compatible only when `/session/{sessionID}/prompt_async` declares the
+exact path identity, optional directory query, JSON body with deterministic message
+ID support, text parts, explicit provider/model fields, and a bodyless 204 response.
+The pinned upstream OpenAPI passes this send check. This is structural compatibility,
+not a runtime or billing attestation.
+
+`claimAndSubmitNativePrompt` resolves credentials and checks the contract before
+consuming the one-shot claim. A newly acquired claim sends exactly one POST using
+the frozen directory, session, text payload and model route. Its deterministic
+`msg_relayx_*` message ID is derived from the dispatch key for later exact-session
+correlation. Credentials are used only in the Authorization header and neither
+response bodies nor thrown transport text enter the result.
+
+Every post-claim result is `RECONCILIATION_REQUIRED`. A 204 means only that the
+server accepted the asynchronous request; it does not prove the user message was
+persisted or that Worker execution began. HTTP errors, network errors, revocation
+after claim, and an existing claim also require reconciliation and never trigger a
+resend. Delivery stays `delivering` and Attempt stays `prepared` until independent
+provider evidence supports their respective transitions.
+
+The implementation was exercised against an injectable fetch boundary; no installed
+OpenCode server or provider account was available for a live POST. The next slice
+must reconcile the deterministic message ID against an authoritative post-send
+transcript and durably classify delivered, conclusively not delivered, or ambiguous.
+
+133 focused compatibility, eligibility, submission, authorization, claim, intent,
+observation-recovery and migration tests pass. TypeScript checks and production
+builds pass.

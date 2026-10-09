@@ -8,7 +8,7 @@ function record(): NativeServerRecord {
   return { serverId: 'server', endpoint: 'http://127.0.0.1:4096', ownership: 'ADOPTED', revision: 2, lifecycle: 'INSPECTED',
     authKeyRef: 'opaque-key-ref', projectRoots: ['/project with space'], registeredBy: 'operator', ownershipEvidenceRef: 'adopted', createdAt: 100, updatedAt: 200,
     inspection: { observedAt: 200, apiSpecHash: 'digest', apiVersion: '1', serverVersion: '1', declaredOperations: [],
-      compatibility: { sessionRead: true, messageRead: true, questionRead: false, questionReply: false, eventStream: false, blockers: [] } } };
+      compatibility: { sessionRead: true, messageRead: true, messageSend: false, questionRead: false, questionReply: false, eventStream: false, blockers: [] } } };
 }
 const session = () => ({ id: 'ses_exact', directory: '/project with space', title: 'Renamed session', unknown: 'private-extra' });
 function transcript() {

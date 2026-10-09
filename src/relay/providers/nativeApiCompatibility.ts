@@ -4,6 +4,7 @@
 export interface NativeApiCompatibility {
   sessionRead: boolean;
   messageRead: boolean;
+  messageSend: boolean;
   questionRead: boolean;
   questionReply: boolean;
   eventStream: boolean;
@@ -18,7 +19,7 @@ export function checkNativeApiCompatibility(document: unknown): NativeApiCompati
   const blockers: string[] = [];
   const root = object(document) ? document : {};
   if (typeof root.openapi !== 'string' || !root.openapi.startsWith('3.')) return {
-    sessionRead: false, messageRead: false, questionRead: false, questionReply: false, eventStream: false,
+    sessionRead: false, messageRead: false, messageSend: false, questionRead: false, questionReply: false, eventStream: false,
     blockers: ['UNSUPPORTED_OPENAPI_VERSION'],
   };
   const resolve = (schema: unknown, seen = new Set<string>()): ObjectMap | undefined => {
@@ -74,11 +75,21 @@ export function checkNativeApiCompatibility(document: unknown): NativeApiCompati
     const matches = parameters.map(parameter => resolve(parameter)).filter(parameter => parameter?.in === 'path' && parameter.name === name);
     return matches.length === 1 && matches[0]?.required === true && type(matches[0]?.schema, 'string');
   };
-  const responseSchema = (path: string, method = 'get', media = 'application/json'): unknown => {
+  const parameter = (path: string, method: string, name: string, location: string, required?: boolean): boolean => {
+    const paths = object(root.paths) ? root.paths : {};
+    const item = resolve(paths[path]); const op = operation(path, method);
+    const parameters = [...(Array.isArray(item?.parameters) ? item.parameters : []), ...(Array.isArray(op?.parameters) ? op.parameters : [])];
+    const matches = parameters.map(candidate => resolve(candidate)).filter(candidate => candidate?.in === location && candidate.name === name);
+    return matches.length === 1 && (required === undefined || matches[0]?.required === required) && type(matches[0]?.schema, 'string');
+  };
+  const response = (path: string, method: string, status: string): ObjectMap | undefined => {
     const op = operation(path, method);
     const responses = op && object(op.responses) ? op.responses : {};
-    const response = resolve(responses['200']);
-    const content = response && object(response.content) ? response.content : {};
+    return resolve(responses[status]);
+  };
+  const responseSchema = (path: string, method = 'get', media = 'application/json', status = '200'): unknown => {
+    const result = response(path, method, status);
+    const content = result && object(result.content) ? result.content : {};
     return object(content[media]) ? content[media].schema : undefined;
   };
   const session = responseSchema('/session/{sessionID}');
@@ -87,6 +98,23 @@ export function checkNativeApiCompatibility(document: unknown): NativeApiCompati
   const message = items(responseSchema('/session/{sessionID}/message'));
   const messageRead = pathParameter('/session/{sessionID}/message', 'get', 'sessionID')
     && messageInfo(field(message, 'info', true)) && type(field(message, 'parts', true), 'array');
+  const promptPath = '/session/{sessionID}/prompt_async'; const promptOperation = operation(promptPath, 'post');
+  const promptRequest = resolve(promptOperation?.requestBody); const promptContent = promptRequest && object(promptRequest.content) ? promptRequest.content : {};
+  const promptBody = object(promptContent['application/json']) ? promptContent['application/json'].schema : undefined;
+  const promptParts = resolve(items(field(promptBody, 'parts', true))); const promptVariants = Array.isArray(promptParts?.oneOf) ? promptParts.oneOf : Array.isArray(promptParts?.anyOf) ? promptParts.anyOf : [promptParts];
+  const acceptsText = promptVariants.some(candidate => {
+    const part = resolve(candidate); const discriminator = resolve(field(part, 'type', true));
+    const values = discriminator?.const === undefined ? discriminator?.enum : [discriminator.const];
+    return Array.isArray(values) && values.length === 1 && values[0] === 'text' && type(field(part, 'text', true), 'string');
+  });
+  const promptModel = field(promptBody, 'model', false); const promptMessageId = resolve(field(promptBody, 'messageID', false));
+  const ack = response(promptPath, 'post', '204');
+  const messageSend = pathParameter(promptPath, 'post', 'sessionID')
+    && parameter(promptPath, 'post', 'directory', 'query', false)
+    && type(promptMessageId, 'string') && typeof promptMessageId?.pattern === 'string' && promptMessageId.pattern.startsWith('^msg')
+    && type(field(promptBody, 'parts', true), 'array') && acceptsText
+    && type(field(promptModel, 'providerID', true), 'string') && type(field(promptModel, 'modelID', true), 'string')
+    && !!ack && (!object(ack.content) || Object.keys(ack.content).length === 0);
   const question = items(responseSchema('/question'));
   const questionInfo = items(field(question, 'questions', true));
   const option = items(field(questionInfo, 'options', true));
@@ -102,7 +130,7 @@ export function checkNativeApiCompatibility(document: unknown): NativeApiCompati
     && type(answers, 'array') && type(items(answers), 'array') && type(items(items(answers)), 'string')
     && type(responseSchema('/question/{requestID}/reply', 'post'), 'boolean');
   const eventStream = type(responseSchema('/event', 'get', 'text/event-stream'), 'string');
-  const report = { sessionRead, messageRead, questionRead, questionReply, eventStream };
+  const report = { sessionRead, messageRead, messageSend, questionRead, questionReply, eventStream };
   for (const [capability, supported] of Object.entries(report)) if (!supported) blockers.push(`UNSUPPORTED_CONTRACT:${capability}`);
   return { ...report, blockers };
 }
