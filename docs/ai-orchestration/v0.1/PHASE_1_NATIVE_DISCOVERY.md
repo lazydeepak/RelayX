@@ -363,3 +363,9 @@ Delivery states. TypeScript checks and production builds pass.
 The next slice needs a separate durable authorization decision bound to this exact
 intent and eligibility lease before any send method can exist. HTTP acceptance,
 provider-persisted message evidence and Worker completion must remain separate states.
+
+Full review checkpoint after this slice: `npm test` completed 342 suites in 117.5
+seconds with 1,760 passing test cases, zero failed test cases and one skipped case.
+The command exits 1 solely because `bootstrap_regression.test.ts` fails during suite
+construction when its hard-coded macOS live database cannot open on Linux. This is
+the previously documented live-acceptance limitation, not a failed test case.
