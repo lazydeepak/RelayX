@@ -17,6 +17,7 @@ export interface NativeServerRecord extends NativeServerReference {
     apiVersion: string;
     serverVersion: string;
     declaredOperations: Extract<NativeDiscovery, { status: 'INSPECTED' }>['declaredOperations'];
+    compatibility?: Extract<NativeDiscovery, { status: 'INSPECTED' }>['compatibility'];
   };
 }
 export interface NativeServerStore {

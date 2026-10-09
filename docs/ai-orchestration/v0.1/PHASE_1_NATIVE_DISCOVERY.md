@@ -33,8 +33,8 @@ as an input and never returned. Provider keys/options, error bodies and transpor
 error strings are omitted from results. A failed probe returns an explicit blocker.
 
 `INSPECTED` means only that this discovery contract succeeded. Declared session,
-question and event operations are evidence for later compatibility review, not
-validated message semantics. `dispatchAuthorized` is always false. No prompts,
+question and event operations feed the structural compatibility report below;
+they are not verified runtime message semantics. `dispatchAuthorized` is always false. No prompts,
 session creation, model switches, process launch or GUI/CLI fallback are performed.
 Existing shared-session and fixed-server legacy clients are unchanged.
 
@@ -94,3 +94,39 @@ slice; the prior checkpoint and macOS suite-construction limitation remain as ab
 Actual process startup/supervision, credential-store implementation and operator UI
 adoption are still pending RX-04 OPEN-04 (macOS deployment and installed version audit).
 No new live server, inference call or automatic dispatch authorization was introduced.
+
+## Structural session/question/event compatibility
+
+`nativeApiCompatibility.ts` now checks the running OpenAPI document's declared
+response/request subset for five independent capabilities. The report is returned
+by discovery and persisted with inspection evidence. Existing inspection records
+may omit it; omission must never be treated as compatibility approval.
+
+- Session GET: required string sessionID path parameter and required string id/directory.
+- Message GET: exact sessionID path parameter, array envelope, required info/parts,
+  and required message id/sessionID with only user/assistant roles. Every declared
+  message-info union variant must satisfy correlation fields.
+- Pending-question GET: array envelope, question id/sessionID, question/header text
+  and option label/description declarations.
+- Question reply: exact requestID path parameter, answers as an ordered array of
+  string arrays, and boolean acknowledgement schema.
+- Event GET: explicit text/event-stream string declaration.
+
+Local JSON references (including escaped names) are resolved with bounded cycle
+checks. External/unresolved references, reference siblings with unsupported
+constraints and unsupported schema composition fail closed. Each failed capability
+has a human-readable reason code; a healthy server with incomplete schemas can be
+INSPECTED while reporting all native task capabilities unsupported.
+
+These checks are a structural subset, not full JSON Schema validation or behavioral
+proof. In particular, message part types, event payload/order/reconnect semantics,
+query-directory isolation and question tool/run correlation still need implemented
+runtime validation. Native prompt-send compatibility is not checked or enabled.
+Future clients must check these reports and validate every actual payload; the
+report does not authorize billing, process ownership or dispatch.
+
+60 focused compatibility/discovery/lifecycle tests pass. They cover exact identities,
+ordered answers, option labels, missing schemas, unknown roles, message unions,
+wrong event media type, references/cycles, persisted reports and immutable input
+documents. TypeScript checks and production builds pass. No full-suite rerun or
+installed OpenCode server acceptance was performed for this isolated parser slice.

@@ -6,11 +6,12 @@ import { tmpdir } from 'node:os';
 import { SqliteRelayDatabase } from '../src/relay/persistence/sqlite/SqliteDatabase';
 import { probeRegisteredNativeServer } from '../src/relay/providers/nativeServerLifecycle';
 import type { NativeDiscovery } from '../src/relay/providers/nativeOpenCodeDiscovery';
+import { checkNativeApiCompatibility } from '../src/relay/providers/nativeApiCompatibility';
 
 const registration = () => ({ serverId: 'server', endpoint: 'http://127.0.0.1:4096/', ownership: 'ADOPTED' as const,
   authKeyRef: 'secure-store-ref', projectRoots: ['/workspace/project'], registeredBy: 'operator', ownershipEvidenceRef: 'adoption-evidence', now: 100 });
 const inspected = (): NativeDiscovery => ({ status: 'INSPECTED', server: { serverId: 'server', endpoint: 'http://127.0.0.1:4096', ownership: 'ADOPTED' },
-  observedAt: 200, serverVersion: '1', apiVersion: '1', apiSpecHash: 'digest', rawApiSpec: '{}', providers: [], declaredOperations: [], dispatchAuthorized: false });
+  observedAt: 200, serverVersion: '1', apiVersion: '1', apiSpecHash: 'digest', rawApiSpec: '{}', providers: [], declaredOperations: [], compatibility: checkNativeApiCompatibility({}), dispatchAuthorized: false });
 const spec = { openapi: '3.1.0', info: { version: '1' }, paths: { '/global/health': { get: { responses: { '200': {} } } }, '/provider': { get: { responses: { '200': {} } } } } };
 const probeOptions = () => ({ observedAt: 200, signal: AbortSignal.timeout(1000), resolveAuthorization: async () => 'Basic secret', fetch: (async url => {
   const path = new URL(String(url)).pathname;
@@ -35,6 +36,7 @@ describe('durable native server ownership and lifecycle', () => {
       const record = db.nativeServers.get('server')!;
       assert.equal(record.ownership, 'ADOPTED'); assert.equal(record.lifecycle, 'INSPECTED'); assert.equal(record.lastHealthyAt, 200);
       assert.equal(record.authKeyRef, 'secure-store-ref'); assert.equal(record.inspection?.apiSpecHash, 'digest');
+      assert.equal(record.inspection?.compatibility?.questionReply, false);
       assert.equal(db.db.prepare('PRAGMA user_version').get()?.user_version, 6);
       assert.equal(db.db.prepare('SELECT COUNT(*) AS n FROM native_server_history').get()?.n, 2);
     } finally { db?.close(); rmSync(dir, { recursive: true, force: true }); }

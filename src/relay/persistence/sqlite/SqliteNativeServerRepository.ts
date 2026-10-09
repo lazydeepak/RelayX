@@ -56,7 +56,7 @@ export class SqliteNativeServerRepository implements NativeServerStore {
         || result.server.ownership !== record.ownership || result.observedAt !== observedAt || result.dispatchAuthorized !== false) throw new Error('Native discovery identity mismatch');
       return { ...record, lifecycle: 'INSPECTED', lastHealthyAt: observedAt, blocker: undefined,
         inspection: { observedAt, apiSpecHash: result.apiSpecHash, apiVersion: result.apiVersion,
-          serverVersion: result.serverVersion, declaredOperations: result.declaredOperations } };
+          serverVersion: result.serverVersion, declaredOperations: result.declaredOperations, compatibility: result.compatibility } };
     });
   }
   private update(serverId: string, revision: number, now: number, transform: (record: NativeServerRecord) => NativeServerRecord): boolean {

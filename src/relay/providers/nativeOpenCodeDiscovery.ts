@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { checkNativeApiCompatibility, type NativeApiCompatibility } from './nativeApiCompatibility';
 
 export interface NativeServerReference {
   serverId: string;
@@ -20,6 +21,7 @@ export type NativeDiscovery = {
   rawApiSpec: string;
   providers: NativeProviderInventory[];
   declaredOperations: Array<{ method: string; path: string; operationId?: string }>;
+  compatibility: NativeApiCompatibility;
   /** Discovery never grants dispatch or account billing permission. */
   dispatchAuthorized: false;
 } | {
@@ -123,7 +125,7 @@ export async function inspectNativeOpenCode(options: {
     return { status: 'INSPECTED', server: { serverId: server.serverId, endpoint: endpoint.origin, ownership: server.ownership },
       observedAt: options.observedAt, serverVersion: health.version, apiVersion: spec.info.version,
       apiSpecHash: createHash('sha256').update(rawApiSpec).digest('hex'), rawApiSpec, providers,
-      declaredOperations, dispatchAuthorized: false };
+      declaredOperations, compatibility: checkNativeApiCompatibility(spec), dispatchAuthorized: false };
   } catch (error) {
     return { status: 'BLOCKED', reason: error instanceof DiscoveryError ? error.reason : 'SERVER_UNAVAILABLE' };
   }

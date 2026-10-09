@@ -28,6 +28,8 @@ describe('native OpenCode read-only discovery', () => {
     if (result.status !== 'INSPECTED') return;
     assert.equal(result.apiSpecHash, createHash('sha256').update(JSON.stringify(spec)).digest('hex'));
     assert.equal(result.serverVersion, '1.18.35'); assert.equal(result.dispatchAuthorized, false);
+    assert.equal(result.compatibility.sessionRead, false);
+    assert.ok(result.compatibility.blockers.includes('UNSUPPORTED_CONTRACT:sessionRead'));
     assert.deepEqual(result.providers, [{ providerId: 'provider', connected: true, modelIds: ['vendor/model'] }]);
     assert.ok(result.declaredOperations.some(op => op.method === 'POST'));
     assert.equal(JSON.stringify(result).includes('Basic secret'), false);
