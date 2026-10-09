@@ -572,3 +572,33 @@ The command also retains the known suite-construction error in
 `bootstrap_regression.test.ts`, whose hard-coded macOS live-database path cannot open
 on Linux. Consequently the full `npm test` command exits 1; neither issue exercises
 the native dispatch evidence path.
+
+## Immutable native question reply intent
+
+RelayX can now freeze a proposed Planner answer for one exact pending OpenCode
+question without granting permission to reply. The intent binds the answer to the
+claimed dispatch, active Assignment and running Attempt, confirmed Delivery, exact
+server revision/session/directory, provider request/message/call correlation, newest
+question-observation digest, Planner decision identity and policy version. Preparing
+the intent performs no HTTP request and leaves the Attempt running.
+
+Answer validation follows the structurally inspected native reply contract. There
+must be one answer array per question; single-choice questions accept exactly one
+value, multi-choice answers reject duplicates, non-custom questions accept only
+declared option labels, and custom-enabled questions may carry a nonempty Planner
+answer. The latest complete pending set must still contain the same request, and the
+running Attempt must retain its authoritative Assignment and Delivery pointers.
+
+Reply intents are immutable and idempotent by reply key, with provider request
+identity scoped to its exact server and session. Stored answer and intent digests,
+indexed fields and upstream dispatch/question evidence are checked before reuse.
+This slice deliberately adds no reply authorization, one-shot claim or transport;
+those must remain separate durability boundaries so restart cannot duplicate an
+answer or turn an expired question into generic chat.
+
+199 focused compatibility, eligibility, transport, delivery/execution evidence,
+restart advancement, question reply intent, persistence, recovery and migration
+tests pass. Reply-intent cases cover exact correlation, option/custom/multiplicity
+rules, idempotency, pending-request expiry, missing run evidence, revoked API
+authority, rollback and stored-record tampering. TypeScript checks and production
+builds pass.

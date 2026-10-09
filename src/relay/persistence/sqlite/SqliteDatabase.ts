@@ -53,6 +53,7 @@ import { SqliteNativeDispatchClaimRepository } from './SqliteNativeDispatchClaim
 import { SqliteNativeDispatchReconciliationRepository } from './SqliteNativeDispatchReconciliationRepository.ts';
 import { SqliteNativeExecutionObservationRepository } from './SqliteNativeExecutionObservationRepository.ts';
 import { SqliteNativeExecutionTerminalRepository } from './SqliteNativeExecutionTerminalRepository.ts';
+import { SqliteNativeQuestionReplyIntentRepository } from './SqliteNativeQuestionReplyIntentRepository.ts';
 
 function tableExists(db: DatabaseSync, tableName: string): boolean {
   const rows = db
@@ -113,6 +114,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
   public readonly nativeDispatchReconciliations: SqliteNativeDispatchReconciliationRepository;
   public readonly nativeExecutionObservations: SqliteNativeExecutionObservationRepository;
   public readonly nativeExecutionTerminals: SqliteNativeExecutionTerminalRepository;
+  public readonly nativeQuestionReplyIntents: SqliteNativeQuestionReplyIntentRepository;
 
   constructor(filePath = ':memory:') {
     this.db = new DatabaseSync(filePath);
@@ -151,6 +153,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     this.nativeDispatchReconciliations = new SqliteNativeDispatchReconciliationRepository(this.db);
     this.nativeExecutionObservations = new SqliteNativeExecutionObservationRepository(this.db);
     this.nativeExecutionTerminals = new SqliteNativeExecutionTerminalRepository(this.db);
+    this.nativeQuestionReplyIntents = new SqliteNativeQuestionReplyIntentRepository(this.db);
   }
 
   private initSchema(): void {
@@ -166,6 +169,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     SqliteNativeDispatchReconciliationRepository.initSchema(this.db);
     SqliteNativeExecutionObservationRepository.initSchema(this.db);
     SqliteNativeExecutionTerminalRepository.initSchema(this.db);
+    SqliteNativeQuestionReplyIntentRepository.initSchema(this.db);
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS projects (

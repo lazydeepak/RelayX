@@ -570,3 +570,71 @@ describe('native restart evidence advancement', () => {
     } finally { value.db.close(); }
   });
 });
+
+describe('native question reply intent preparation', () => {
+  const claimEvidence={now:320,accountPolicyHash:'account-policy',taskQuotaEvidenceHash:operationalEvidence.taskQuotaEvidenceHash,
+    privacyEvidenceHash:operationalEvidence.privacyEvidenceHash,runtimeEvidenceHash:operationalEvidence.runtimeEvidenceHash};
+  function runningWithQuestion() {
+    const value=setup(); value.db.nativeDispatchIntents.prepare(value.input);
+    value.db.nativeDispatchAuthorizations.authorize({dispatchKey:'dispatch:key',authorizedAt:310,eligibility:eligibility(),operationalEvidence});
+    value.db.nativeDispatchClaims.claim('dispatch:key',claimEvidence);
+    const user:NativeTranscriptPage['messages'][number]={id:providerMessageIdFor('dispatch:key'),sessionId:'ses_exact',role:'user',createdAt:325,
+      providerId:'provider',modelId:'model',parts:[{id:'user-part',type:'text',text:'Do work'}]};
+    const assistant:NativeTranscriptPage['messages'][number]={id:'message',sessionId:'ses_exact',role:'assistant',createdAt:330,
+      parentId:user.id,providerId:'provider',modelId:'model',parts:[{id:'assistant-part',type:'text',text:'Question'}]};
+    value.db.nativeTranscripts.save({status:'READ',serverId:'server',serverRevision:2,apiSpecHash:'digest',observedAt:350,
+      session:{id:'ses_exact',directory:'/project'},messages:[user],completeHistory:false});
+    value.db.nativeDispatchReconciliations.reconcile('dispatch:key');
+    value.db.nativeTranscripts.save({status:'READ',serverId:'server',serverRevision:2,apiSpecHash:'digest',observedAt:360,
+      session:{id:'ses_exact',directory:'/project'},messages:[assistant],completeHistory:false});
+    value.db.nativeExecutionObservations.observe('dispatch:key');
+    const questions:NativeQuestionObservation={status:'READ',serverId:'server',serverRevision:2,apiSpecHash:'digest',observedAt:370,
+      sessionId:'ses_exact',directory:'/project',completePendingSet:true,questions:[{requestId:'request',sessionId:'ses_exact',messageId:'message',callId:'call',questions:[
+        {question:'Choose?',header:'Choice',options:[{label:'One',description:'First'},{label:'Two',description:'Second'}],multiple:false,custom:false},
+        {question:'Select?',header:'Many',options:[{label:'A',description:'A'},{label:'B',description:'B'}],multiple:true,custom:false},
+        {question:'Explain?',header:'Custom',options:[{label:'Skip',description:'No explanation'}],multiple:false,custom:true}]}]};
+    value.db.nativeQuestions.save(questions); return value;
+  }
+  const input={replyKey:'reply:key',dispatchKey:'dispatch:key',requestId:'request',answers:[['One'],['A','B'],['Custom answer']],
+    plannerDecisionId:'planner-decision',policyVersion:'policy-v1',createdAt:380};
+  it('freezes an exact correlated answer without granting reply authority or sending', () => {
+    const value=runningWithQuestion(); try {
+      const intent=value.db.nativeQuestionReplyIntents.prepare(input);
+      assert.equal(intent.state,'PREPARED_UNAUTHORIZED'); assert.equal(intent.assignmentId,'assignment'); assert.equal(intent.attemptId,'attempt');
+      assert.equal(intent.messageId,'message'); assert.equal(intent.callId,'call'); assert.deepEqual(intent.answers,input.answers);
+      assert.deepEqual(value.db.nativeQuestionReplyIntents.get('reply:key'),intent);
+      assert.equal(value.db.db.prepare("SELECT status FROM attempts WHERE id='attempt'").get()?.status,'running');
+      assert.equal(value.db.db.prepare('SELECT COUNT(*) AS n FROM native_question_reply_intents').get()?.n,1);
+    } finally { value.db.close(); }
+  });
+  it('enforces answer count, multiplicity, allowed options and custom-answer policy', () => {
+    const value=runningWithQuestion(); try {
+      assert.throws(()=>value.db.nativeQuestionReplyIntents.prepare({...input,answers:[['One']]}),/count/);
+      assert.throws(()=>value.db.nativeQuestionReplyIntents.prepare({...input,answers:[['One','Two'],['A'],['Skip']]}),/cardinality/);
+      assert.throws(()=>value.db.nativeQuestionReplyIntents.prepare({...input,answers:[['Other'],['A'],['Skip']]}),/allowed option/);
+      assert.throws(()=>value.db.nativeQuestionReplyIntents.prepare({...input,answers:[['One'],['A','A'],['Skip']]}),/Duplicate/);
+    } finally { value.db.close(); }
+  });
+  it('is immutable, idempotent and requires the same question to remain pending', () => {
+    const value=runningWithQuestion(); try {
+      value.db.nativeQuestionReplyIntents.prepare(input); value.db.nativeQuestionReplyIntents.prepare(input);
+      assert.throws(()=>value.db.nativeQuestionReplyIntents.prepare({...input,answers:[['Two'],['A'],['Skip']]}),/Conflicting/);
+      value.db.nativeQuestions.save({status:'READ',serverId:'server',serverRevision:2,apiSpecHash:'digest',observedAt:390,
+        sessionId:'ses_exact',directory:'/project',questions:[],completePendingSet:true});
+      assert.throws(()=>value.db.nativeQuestionReplyIntents.prepare({...input,replyKey:'reply:later',createdAt:400}),/not currently pending/);
+    } finally { value.db.close(); }
+  });
+  it('fails closed on missing run evidence, unsupported reply API, tampering and outer rollback', async () => {
+    let value=setup(); try { assert.throws(()=>value.db.nativeQuestionReplyIntents.prepare(input),/dispatch authority unavailable/); } finally { value.db.close(); }
+    value=runningWithQuestion(); try {
+      value.db.nativeServers.revoke('server',2,375);
+      assert.throws(()=>value.db.nativeQuestionReplyIntents.prepare(input),/API authority unavailable/);
+    } finally { value.db.close(); }
+    value=runningWithQuestion(); try {
+      await assert.rejects(value.db.runInTransaction(async()=>{ value.db.nativeQuestionReplyIntents.prepare(input); throw new Error('abort'); }));
+      assert.equal(value.db.nativeQuestionReplyIntents.get('reply:key'),undefined);
+      value.db.nativeQuestionReplyIntents.prepare(input); value.db.db.exec("UPDATE native_question_reply_intents SET answer_digest='forged'");
+      assert.throws(()=>value.db.nativeQuestionReplyIntents.get('reply:key'),/index mismatch/);
+    } finally { value.db.close(); }
+  });
+});
