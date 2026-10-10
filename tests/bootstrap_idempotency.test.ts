@@ -27,7 +27,7 @@ import { join } from 'node:path';
 import { SqliteRelayDatabase } from '../src/relay/persistence/sqlite/SqliteDatabase.ts';
 import { RelayEngine } from '../src/relay/application/RelayEngine.ts';
 import { MockProvider } from './MockProvider.ts';
-import { RuntimeSession, RuntimeProjectAssociation } from '../src/relay/domain/entities.ts';
+import { RuntimeSession, RuntimeProjectAssociation, Assignment, Attempt } from '../src/relay/domain/entities.ts';
 import { createId } from '../src/relay/domain/types.ts';
 
 const PLANNER_EXTERNAL = 'conv-planner-bootstrap';
@@ -411,6 +411,166 @@ describe('RelayIngress bootstrap — exactly one Assignment across ticks and res
     const ingressRows = all(db, "SELECT * FROM relay_ingress WHERE stable_pair_id = ?", freshPairId);
     assert.strictEqual(ingressRows.length, 1, 'ingress boundary record exists');
     assert.strictEqual(ingressRows[0].arm_evidence_json, '{"armId":""}', 'ingress has no armId because arm establishment failed');
+    db.close();
+  });
+
+  it('Pair with existing work starts without observer and does not create bootstrap arm', async () => {
+    // A Pair that already has Assignments (existing work) should start without
+    // requiring the planner observer. The bootstrap path is skipped entirely.
+    const { db, engine } = openEngine();
+    // No observer injected — simulates non-Electron/test engine call sites.
+
+    const project = await engine.createProject('Existing Work Project');
+    const planner = new RuntimeSession({
+      id: createId('sess'),
+      providerType: 'chatgpt',
+      name: 'Planner',
+      status: 'available',
+      consecutiveObservationFailures: 0,
+      externalSessionId: 'conv-planner-existing',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const worker = new RuntimeSession({
+      id: createId('sess'),
+      providerType: 'opencode',
+      name: 'Worker',
+      status: 'available',
+      consecutiveObservationFailures: 0,
+      externalSessionId: 'ses_worker_existing',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await db.runtimes.save(planner);
+    await db.runtimes.save(worker);
+    for (const [i, s] of [planner, worker].entries()) {
+      await db.associations.save(
+        new RuntimeProjectAssociation({
+          id: `assoc_existing_${i}` as any,
+          runtimeSessionId: s.id,
+          projectId: project.id,
+          providerType: s.providerType,
+          externalSessionId: s.externalSessionId ?? '',
+          verificationState: 'verified',
+          provenance: 'setup',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        }),
+      );
+    }
+    const pair = await engine.createPair(project.id, 'Existing Work Pair', planner.id, worker.id);
+    const freshPairId = pair.id;
+    db.db.prepare('UPDATE pairs SET stable_pair_id=? WHERE id=?').run('immutable-pair-anchor-existing', freshPairId);
+    assert.strictEqual((await engine.loadAndActivate(freshPairId)).outcome, 'activated');
+
+    // Create pre-existing Assignment (simulates existing work/history)
+    const existingAssignment = Assignment.create(freshPairId, project.id, 'Pre-existing work', 'Do something');
+    existingAssignment.startAttempt(Attempt.create(existingAssignment.id, 1, {
+      sessionPairId: freshPairId,
+      workerSessionId: worker.id,
+      externalSessionId: worker.externalSessionId ?? null,
+    }));
+    await db.assignments.save(existingAssignment);
+    const freshPair = await db.pairs.findById(freshPairId);
+    freshPair!.assignWork(existingAssignment.id);
+    await db.pairs.save(freshPair!);
+
+    // Start Pair WITHOUT observer — should succeed because work exists
+    const started = await engine.startPair(freshPairId);
+    assert.strictEqual(started.relayState, 'RUNNING', 'Pair should become RUNNING');
+    assert.strictEqual(started.activeAssignmentId, existingAssignment.id, 'existing Assignment preserved');
+
+    // Verify no bootstrap ingress was created for this Pair
+    const ingressRows = all(db, "SELECT * FROM relay_ingress WHERE stable_pair_id = ?", freshPairId);
+    assert.strictEqual(ingressRows.length, 0, 'no bootstrap ingress created for Pair with existing work');
+
+    // Verify no observer calls were made (no arm establishment attempted)
+    // The observer is null, so if any call was made it would have thrown.
+    // Success here proves zero observer calls occurred.
+    db.close();
+  });
+
+  it('Start Pair with existing work preserves Assignment and does not reinterpret as bootstrap', async () => {
+    // The existing Assignment must not be replaced, duplicated, or have its
+    // instruction mutated by a bootstrap flow that never ran.
+    const { db, engine } = openEngine();
+    // No observer.
+
+    const project = await engine.createProject('Preserve Work Project');
+    const planner = new RuntimeSession({
+      id: createId('sess'),
+      providerType: 'chatgpt',
+      name: 'Planner',
+      status: 'available',
+      consecutiveObservationFailures: 0,
+      externalSessionId: 'conv-planner-preserve',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const worker = new RuntimeSession({
+      id: createId('sess'),
+      providerType: 'opencode',
+      name: 'Worker',
+      status: 'available',
+      consecutiveObservationFailures: 0,
+      externalSessionId: 'ses_worker_preserve',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await db.runtimes.save(planner);
+    await db.runtimes.save(worker);
+    for (const [i, s] of [planner, worker].entries()) {
+      await db.associations.save(
+        new RuntimeProjectAssociation({
+          id: `assoc_preserve_${i}` as any,
+          runtimeSessionId: s.id,
+          projectId: project.id,
+          providerType: s.providerType,
+          externalSessionId: s.externalSessionId ?? '',
+          verificationState: 'verified',
+          provenance: 'setup',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        }),
+      );
+    }
+    const pair = await engine.createPair(project.id, 'Preserve Work Pair', planner.id, worker.id);
+    const freshPairId = pair.id;
+    db.db.prepare('UPDATE pairs SET stable_pair_id=? WHERE id=?').run('immutable-pair-anchor-preserve', freshPairId);
+    assert.strictEqual((await engine.loadAndActivate(freshPairId)).outcome, 'activated');
+
+    // Create pre-existing Assignment with specific instruction
+    const originalInstruction = 'Original task: build the feature';
+    const existingAssignment = Assignment.create(freshPairId, project.id, 'Original', originalInstruction);
+    existingAssignment.startAttempt(Attempt.create(existingAssignment.id, 1, {
+      sessionPairId: freshPairId,
+      workerSessionId: worker.id,
+      externalSessionId: worker.externalSessionId ?? null,
+    }));
+    await db.assignments.save(existingAssignment);
+    const freshPair = await db.pairs.findById(freshPairId);
+    freshPair!.assignWork(existingAssignment.id);
+    await db.pairs.save(freshPair!);
+
+    await engine.startPair(freshPairId);
+
+    // Original Assignment must be unchanged
+    const assignment = await db.assignments.findById(existingAssignment.id);
+    assert.ok(assignment, 'original Assignment still exists');
+    assert.strictEqual(assignment!.title, 'Original', 'Assignment title unchanged');
+    assert.strictEqual(assignment!.instruction, originalInstruction, 'Assignment instruction unchanged');
+    // startPair advances orchestration, which promotes the existing pending Assignment to active
+    assert.strictEqual(assignment!.status, 'active', 'existing Assignment promoted to active by startPair');
+    assert.strictEqual((await db.pairs.findById(freshPairId))!.activeAssignmentId, existingAssignment.id);
+
+    // No new Assignment created
+    const allAssignments = await db.assignments.findByPairId(freshPairId);
+    assert.strictEqual(allAssignments.length, 1, 'no duplicate Assignment created');
+
+    // No bootstrap ingress
+    const ingressRows = all(db, "SELECT * FROM relay_ingress WHERE stable_pair_id = ?", freshPairId);
+    assert.strictEqual(ingressRows.length, 0, 'no bootstrap ingress');
+
     db.close();
   });
 });

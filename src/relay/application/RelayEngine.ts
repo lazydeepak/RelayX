@@ -4245,12 +4245,23 @@ export class RelayEngine {
       });
     }
 
-    // Resolve attention item for this assignment
+    // Resolve attention items for this assignment
     const openItems = await this.repos.attention.findOpen();
     for (const item of openItems) {
       if (item.assignmentId === delivery.assignmentId && item.type === 'ambiguous_delivery') {
         item.resolve();
         await this.repos.attention.save(item);
+      }
+    }
+    // Also resolve handoff_transfer_blocked items when confirmed delivered.
+    // The blocked-handoff attention was opened because this same Delivery's outcome
+    // was unestablished; confirming it delivers resolves that episode.
+    if (resolution === 'confirmed_delivered') {
+      for (const item of openItems) {
+        if (item.assignmentId === delivery.assignmentId && item.type === 'handoff_transfer_blocked') {
+          item.resolve();
+          await this.repos.attention.save(item);
+        }
       }
     }
 
@@ -7370,6 +7381,11 @@ private isRuntimeSuspensionItemFor(
     context: AuthorityContext,
     armOnly = false,
   ): Promise<RelayBatonDecisionReport | null> {
+    // Bootstrap never competes with backlog, a failed send, or existing recovery.
+    // Check for existing work FIRST — if the Pair already has Assignments or relay
+    // history, no bootstrap boundary is needed and we must not require the observer.
+    if ((await this.repos.assignments.findByPairId(pair.id)).length) return null;
+
     const observer = this.plannerObserver;
     // Bootstrap arm establishment is ONLY required for the explicit operator Start Pair
     // (armOnly: true). Background supervision ticks (armOnly: false) must never fail
@@ -7384,8 +7400,6 @@ private isRuntimeSuspensionItemFor(
       }
       return null;
     }
-    // Bootstrap never competes with backlog, a failed send, or existing recovery.
-    if ((await this.repos.assignments.findByPairId(pair.id)).length) return null;
     const side = await this.resolveBatonSide(pair, 'planner', trail);
     if (!side.ok || side.runtime.providerType !== 'chatgpt') {
       const msg = side.ok ? 'Planner provider must be ChatGPT for bootstrap' : side.failure;
