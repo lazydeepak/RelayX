@@ -139,6 +139,10 @@ describe('RelayIngress bootstrap — exactly one Assignment across ticks and res
   const tick = (engine: RelayEngine) =>
     engine.resumeRelayContinuity(pairId as any, { context: 'AUTOMATED', actor: 'supervisor' });
 
+  /** One supervision tick for a Pair under test, independent of the suite-wide pairId. */
+  const tickOnce = (engine: RelayEngine, id: string) =>
+    engine.resumeRelayContinuity(id as any, { context: 'AUTOMATED', actor: 'supervisor' });
+
   const ingressRows = (db: Db) => all(db, "SELECT * FROM relay_ingress WHERE stable_pair_id = ? AND state != 'superseded'", pairId);
   const assignmentCount = (db: Db) =>
     count(db, 'SELECT COUNT(*) AS c FROM assignments WHERE pair_id = ?', pairId);
@@ -571,6 +575,85 @@ describe('RelayIngress bootstrap — exactly one Assignment across ticks and res
     const ingressRows = all(db, "SELECT * FROM relay_ingress WHERE stable_pair_id = ?", freshPairId);
     assert.strictEqual(ingressRows.length, 0, 'no bootstrap ingress');
 
+    db.close();
+  });
+
+  it('a persisted arm missing from the ledger raises ONE deduplicated recovery alert and no Assignment', async () => {
+    // The bridge answers, but its ledger holds no arm matching the one this ingress recorded.
+    // That boundary can never yield a completion, so the engine must surface it exactly once.
+    let bootstrapStatusCalls = 0;
+    const absentArmObserver = {
+      async ensureBootstrapArmed(conversationId: string) {
+        return { armId: 'arm_recorded_in_the_database', conversationId, reused: false };
+      },
+      async bootstrapStatus(conversationId: string, armId: string) {
+        bootstrapStatusCalls++;
+        return {
+          available: true, unavailableReason: null, conversationId, armId,
+          armActive: false, working: false, completion: null,
+          lastState: 'arm_absent_from_ledger', lastObservedAt: new Date().toISOString(),
+          recoveryRequired: true,
+          recoveryReason: `Persisted bootstrap arm '${armId}' is absent from a reachable observer bridge ledger for conversation '${conversationId}'. The boundary recorded by this ingress can no longer produce a completion; manual reconciliation required.`,
+        };
+      },
+      async acknowledgeBootstrapArm() {},
+    };
+    const { db, engine } = openEngine();
+    engine['plannerObserver'] = absentArmObserver as any;
+
+    const project = await engine.createProject('Absent Arm Project');
+    const planner = new RuntimeSession({
+      id: createId('sess'), providerType: 'chatgpt', name: 'Planner', status: 'available',
+      consecutiveObservationFailures: 0, externalSessionId: 'conv-absent-arm',
+      createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    const worker = new RuntimeSession({
+      id: createId('sess'), providerType: 'opencode', name: 'Worker', status: 'available',
+      consecutiveObservationFailures: 0, externalSessionId: 'ses-absent-arm',
+      createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    await db.runtimes.save(planner);
+    await db.runtimes.save(worker);
+    for (const [i, s] of [planner, worker].entries()) {
+      await db.associations.save(new RuntimeProjectAssociation({
+        id: `assoc_absent_${i}` as any, runtimeSessionId: s.id, projectId: project.id,
+        providerType: s.providerType, externalSessionId: s.externalSessionId ?? '',
+        verificationState: 'verified', provenance: 'setup', createdAt: Date.now(), updatedAt: Date.now(),
+      }));
+    }
+    const pair = await engine.createPair(project.id, 'Absent Arm Pair', planner.id, worker.id);
+    const pairId = pair.id;
+    assert.strictEqual((await engine.loadAndActivate(pairId)).outcome, 'activated');
+    await engine.startPair(pairId);
+
+    // Start alone arms but does not poll, so no alert exists yet.
+    assert.strictEqual(
+      (await db.attention.findOpen()).filter(i => i.type === 'bootstrap_recovery_required').length, 0,
+      'arming alone must not raise a recovery alert');
+
+    // Each supervision tick observes the same unrecoverable gap.
+    for (let tick = 0; tick < 3; tick++) await tickOnce(engine, pairId);
+
+    const alerts = (await db.attention.findOpen()).filter(i => i.type === 'bootstrap_recovery_required');
+    assert.strictEqual(alerts.length, 1,
+      'the whole episode is ONE attention item; re-raising per tick would bury the queue');
+    assert.strictEqual(alerts[0]!.pairId, pairId, 'scoped to the affected Pair');
+    assert.strictEqual(alerts[0]!.severity, 'critical');
+    assert.match(alerts[0]!.title, /missing from the observer ledger/i,
+      'the title must describe an absent arm, not a consumed one');
+    assert.match(alerts[0]!.message, /arm_recorded_in_the_database/,
+      'the alert must name the exact arm an operator has to reconcile');
+    assert.ok(bootstrapStatusCalls >= 3, 'every tick re-observed the gap');
+
+    // And critically: nothing was fabricated to paper over it.
+    assert.strictEqual(
+      count(db, 'SELECT COUNT(*) AS c FROM assignments WHERE pair_id = ?', pairId), 0,
+      'no Assignment may be invented for a lost boundary');
+    assert.strictEqual(count(db, 'SELECT COUNT(*) AS c FROM deliveries WHERE assignment_id IN ' +
+      '(SELECT id FROM assignments WHERE pair_id = ?)', pairId), 0, 'and no Delivery');
+    const ingressRows = all(db, "SELECT * FROM relay_ingress WHERE stable_pair_id = ?", pairId);
+    assert.strictEqual(ingressRows.length, 1, 'the ingress root itself is untouched');
+    assert.strictEqual(ingressRows[0].state, 'armed', 'and it is not falsely marked materialized');
     db.close();
   });
 });

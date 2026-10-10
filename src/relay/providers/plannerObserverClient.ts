@@ -90,34 +90,105 @@ export class PlannerObserverClient {
     return { armId: res.armId, conversationId, reused: false };
   }
 
-  /** Match the persisted arm exactly, even if the bridge ledger was restarted. */
+  /**
+   * Match the persisted arm exactly, even if the bridge ledger was restarted.
+   *
+   * The five states are distinguished deliberately, because collapsing any two of them
+   * strands the Pair:
+   *
+   *   bridge unreachable            -> available:false  ("could not check")
+   *   arm absent from a REACHABLE ledger -> recoveryRequired (the log was rotated, moved,
+   *                                        or the bridge started fresh; the boundary this
+   *                                        ingress recorded no longer exists, so no
+   *                                        completion for that arm can EVER arrive)
+   *   arm present and completed      -> completion recovery, honoured from the ledger
+   *   arm present, consumed, open    -> still waiting; the extension owes us `finished`
+   *   arm present, open              -> armed and undelivered; normal active status
+   *
+   * The absent case must never resolve to `armActive: true`. Reporting an arm the bridge
+   * does not have as active makes RelayX wait forever for a `finished` that can never be
+   * recorded, with no re-arm and no operator alert. It also must NOT re-arm here: minting a
+   * replacement boundary would silently rebaseline over a possibly-completed Planner turn.
+   */
   async bootstrapStatus(conversationId: string, armId: string): Promise<PlannerObserverStatus> {
-    // Check /health for recoveryRequired (consumed-but-uncompleted arm after restart).
-    // This is a READ-ONLY endpoint — it does not mutate arm state or deliver arms.
-    const health = await this.request<{ arms?: Array<{ armId: string; conversationId: string; consumed: boolean; completed: boolean; recoveryRequired?: boolean; recoveryReason?: string }> }>('GET', '/health');
-    const armInfo = health.arms?.find(a => a.armId === armId && a.conversationId === conversationId);
-    if (armInfo?.recoveryRequired) {
+    // Read-only ledger inspection. `/health` and `/all` never deliver an arm and never persist state.
+    let ledger: {
+      arms?: Array<{ armId: string; conversationId: string; consumed?: boolean; completed?: boolean; recoveryRequired?: boolean; recoveryReason?: string }>;
+      allArms?: Array<{ armId: string; conversationId: string; completed?: boolean }>;
+    };
+    try {
+      ledger = await this.request('GET', '/health');
+    } catch (err) {
+      // Unreachable bridge is NOT ledger loss. "Could not check" must never be reported as
+      // a missing arm, or a transient outage would raise a false recovery alert.
       return {
-        available: true, unavailableReason: null, conversationId, armId,
+        available: false, unavailableReason: (err as Error).message, conversationId, armId,
         armActive: false, working: false, completion: null,
-        lastState: 'recovery_required', lastObservedAt: new Date().toISOString(),
-        recoveryRequired: true, recoveryReason: armInfo.recoveryReason ?? 'bootstrap arm consumed but never completed',
+        lastState: null, lastObservedAt: null,
+        recoveryRequired: false, recoveryReason: null,
       };
     }
 
-    const { observations } = await this.request<{ observations: RawObservation[] }>('GET', `/all?conversationId=${encodeURIComponent(conversationId)}`);
+    // Observation evidence is consulted FIRST, and it outranks the arm registry. A `finished`
+    // record is what the observer actually reported, so it survives losing the registry; the
+    // registry only records whether the arm is still tracked. Discarding a real completion
+    // because `/health` forgot its arm would silently drop a Planner turn that really happened.
+    const { observations } = await this.request<{ observations: RawObservation[] }>(
+      'GET', `/all?conversationId=${encodeURIComponent(conversationId)}`,
+    );
     const matching = (observations ?? []).filter(o => o.conversationId === conversationId && o.armId === armId);
     const latest = matching[matching.length - 1];
     const finished = matching.filter(o => o.state === 'finished').pop();
+    if (finished) {
+      return {
+        available: true, unavailableReason: null, conversationId, armId,
+        // A completed arm is no longer active, whatever the registry still lists.
+        armActive: false, working: latest?.state === 'working',
+        completion: {
+          armId, conversationId, responseText: String(finished.latestCompletedResponse ?? ''),
+          responseHash: String(finished.responseHash ?? ''), responseLength: Number(finished.responseLength ?? 0),
+          completedTurnKey: finished.completedTurnKey ?? null, observedAt: String(finished.observedAt ?? ''),
+          adoptedFromUnresolvableArm: false,
+        },
+        lastState: latest?.state ?? null, lastObservedAt: latest?.observedAt ?? null,
+        recoveryRequired: false, recoveryReason: null,
+      };
+    }
+
+    // No completion evidence. Now classify why the boundary is still outstanding.
+    const row = (ledger.arms ?? []).find(a => a.armId === armId && a.conversationId === conversationId);
+    const retained = (ledger.allArms ?? []).find(a => a.armId === armId && a.conversationId === conversationId);
+
+    // Absent from a REACHABLE ledger, with nothing completed: the recorded boundary is gone for
+    // good, so no `finished` can ever arrive. Reporting it active would stall the Pair forever.
+    if (!row && !retained) {
+      return {
+        available: true, unavailableReason: null, conversationId, armId,
+        armActive: false, working: latest?.state === 'working', completion: null,
+        lastState: 'arm_absent_from_ledger', lastObservedAt: latest?.observedAt ?? new Date().toISOString(),
+        recoveryRequired: true,
+        recoveryReason:
+          `Persisted bootstrap arm '${armId}' is absent from a reachable observer bridge ledger for ` +
+          `conversation '${conversationId}', and no completed turn was recorded for it. The boundary ` +
+          'recorded by this ingress can no longer produce a completion; manual reconciliation required.',
+      };
+    }
+
+    // Consumed but never completed: the restart gap the previous fix surfaced.
+    if (row?.recoveryRequired) {
+      return {
+        available: true, unavailableReason: null, conversationId, armId,
+        armActive: false, working: latest?.state === 'working', completion: null,
+        lastState: 'recovery_required', lastObservedAt: latest?.observedAt ?? new Date().toISOString(),
+        recoveryRequired: true,
+        recoveryReason: row.recoveryReason ?? 'bootstrap arm consumed but never completed',
+      };
+    }
+
+    // Present and open: still legitimately waiting for the extension to report `finished`.
     return {
       available: true, unavailableReason: null, conversationId, armId,
-      armActive: !finished, working: latest?.state === 'working',
-      completion: finished ? {
-        armId, conversationId, responseText: String(finished.latestCompletedResponse ?? ''),
-        responseHash: String(finished.responseHash ?? ''), responseLength: Number(finished.responseLength ?? 0),
-        completedTurnKey: finished.completedTurnKey ?? null, observedAt: String(finished.observedAt ?? ''),
-        adoptedFromUnresolvableArm: false,
-      } : null,
+      armActive: true, working: latest?.state === 'working', completion: null,
       lastState: latest?.state ?? null, lastObservedAt: latest?.observedAt ?? null,
       recoveryRequired: false, recoveryReason: null,
     };

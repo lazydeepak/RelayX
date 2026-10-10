@@ -7386,11 +7386,35 @@ private isRuntimeSuspensionItemFor(
     // history, no bootstrap boundary is needed and we must not require the observer.
     if ((await this.repos.assignments.findByPairId(pair.id)).length) return null;
 
+    // Resolve the Planner side to learn which provider actually backs this Pair. The
+    // observer bootstrap is a CHATGPT-SPECIFIC mechanism, so it can only be a
+    // requirement for a Pair whose Planner really is ChatGPT.
+    const side = await this.resolveBatonSide(pair, 'planner', trail);
+
+    // A Planner side this Pair cannot even address cannot be bootstrapped by anyone.
+    if (!side.ok) {
+      if (armOnly) throw new RelayDomainError(side.failure, 'BOOTSTRAP_SIDE_INVALID');
+      return null;
+    }
+
+    // A non-ChatGPT Planner integration was ALREADY accepted by the pairing authority
+    // (`isPlannerProvider` admits any integration registered with a planner/both role).
+    // It has no observer-based bootstrap mechanism, and fabricating one — an arm, an
+    // ingress, an Assignment — would invent evidence for a boundary nobody established.
+    // So bootstrap is INAPPLICABLE here, not FAILED: Start continues into
+    // RUNNING/awaiting-work exactly as it did before the observer bootstrap existed.
+    if (side.runtime.providerType !== 'chatgpt') {
+      trail.push(
+        `planner provider '${side.runtime.providerType}' has no observer bootstrap mechanism; ` +
+          'bootstrap is inapplicable and none was required',
+      );
+      return null;
+    }
+
     const observer = this.plannerObserver;
-    // Bootstrap arm establishment is ONLY required for the explicit operator Start Pair
-    // (armOnly: true). Background supervision ticks (armOnly: false) must never fail
-    // the whole orchestration just because the observer is not wired — they simply
-    // skip bootstrap and continue with baton-based continuity.
+    // For a ChatGPT Planner the boundary IS the bootstrap, so an empty chain cannot Start
+    // without it. Background supervision ticks (armOnly: false) never fail the whole
+    // orchestration for this — they skip bootstrap and continue on baton continuity.
     if (!observer || typeof observer.ensureBootstrapArmed !== 'function' || typeof observer.bootstrapStatus !== 'function') {
       if (armOnly) {
         throw new RelayDomainError(
@@ -7398,12 +7422,6 @@ private isRuntimeSuspensionItemFor(
           'BOOTSTRAP_OBSERVER_UNAVAILABLE',
         );
       }
-      return null;
-    }
-    const side = await this.resolveBatonSide(pair, 'planner', trail);
-    if (!side.ok || side.runtime.providerType !== 'chatgpt') {
-      const msg = side.ok ? 'Planner provider must be ChatGPT for bootstrap' : side.failure;
-      if (armOnly) throw new RelayDomainError(msg, 'BOOTSTRAP_SIDE_INVALID');
       return null;
     }
 
@@ -7450,18 +7468,33 @@ private isRuntimeSuspensionItemFor(
       }
       if (armOnly) return null;
       const status = await observer.bootstrapStatus(side.externalSessionId, ingress.armEvidence.armId);
-      // Handle recoveryRequired from bridge (consumed-but-uncompleted arm after restart)
+      // The recorded boundary can no longer yield a completion: either it was consumed and
+      // never finished, or it is gone from a reachable ledger entirely. Both are terminal for
+      // this ingress and neither may be retried by re-arming — that would rebaseline over a
+      // possibly-completed Planner turn. Surface ONE deduplicated operator task per ingress.
       if (status.recoveryRequired) {
         trail.push(`bootstrap recovery required: ${status.recoveryReason}`);
-        // Create an attention item so an operator can manually reconcile
-        const item = AttentionItem.create(
-          'critical',
-          'bootstrap_recovery_required',
-          'Bootstrap arm consumed but never completed',
-          status.recoveryReason ?? 'The observer bridge restarted after the bootstrap arm was delivered to the content script but before the Planner finished its turn. Manual reconciliation required.',
-          { pairId: pair.id, suggestedAction: `Reconcile bootstrap ingress ${ingress.ingressId} (arm ${ingress.armEvidence.armId}) manually`, suggestedTier: 'tier_2_planner_assisted' }
+        const armAbsent = status.lastState === 'arm_absent_from_ledger';
+        const suggestedAction =
+          `Reconcile bootstrap ingress ${ingress.ingressId} (arm ${ingress.armEvidence.armId}) manually`;
+        const alreadyOpen = (await this.repos.attention.findOpen()).find(item =>
+          item.type === 'bootstrap_recovery_required' && item.pairId === pair.id &&
+          item.suggestedAction === suggestedAction,
         );
-        await this.repos.attention.save(item);
+        // One item is the whole episode. Re-raising it per tick would bury the queue and
+        // imply the situation is changing when it is not.
+        if (!alreadyOpen) {
+          await this.repos.attention.save(AttentionItem.create(
+            'critical',
+            'bootstrap_recovery_required',
+            armAbsent
+              ? 'Bootstrap arm is missing from the observer ledger'
+              : 'Bootstrap arm consumed but never completed',
+            status.recoveryReason ??
+              'The observer bridge restarted after the bootstrap arm was delivered to the content script but before the Planner finished its turn. Manual reconciliation required.',
+            { pairId: pair.id, suggestedAction, suggestedTier: 'tier_2_planner_assisted' },
+          ));
+        }
         return null;
       }
       const completion = status.completion;
