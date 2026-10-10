@@ -55,6 +55,10 @@ export interface PlannerObserverStatus {
   /** Latest observer state string, for the trail: identity|armed|working|finished|unreadable|... */
   lastState: string | null;
   lastObservedAt: string | null;
+  /** True when the bridge reports a consumed-but-uncompleted arm (restart gap). */
+  recoveryRequired: boolean;
+  /** Reason for recoveryRequired, if applicable. */
+  recoveryReason: string | null;
 }
 
 interface RawObservation {
@@ -88,6 +92,17 @@ export class PlannerObserverClient {
 
   /** Match the persisted arm exactly, even if the bridge ledger was restarted. */
   async bootstrapStatus(conversationId: string, armId: string): Promise<PlannerObserverStatus> {
+    // Check /next for recoveryRequired (consumed-but-uncompleted arm after restart)
+    const nextResp = await this.request<{ ok: boolean; armed: boolean; armId: string; recoveryRequired?: boolean; reason?: string }>('GET', `/next?conversationId=${encodeURIComponent(conversationId)}`);
+    if (nextResp.recoveryRequired) {
+      return {
+        available: true, unavailableReason: null, conversationId, armId,
+        armActive: false, working: false, completion: null,
+        lastState: 'recovery_required', lastObservedAt: new Date().toISOString(),
+        recoveryRequired: true, recoveryReason: nextResp.reason ?? 'bootstrap arm consumed but never completed',
+      };
+    }
+
     const { observations } = await this.request<{ observations: RawObservation[] }>('GET', `/all?conversationId=${encodeURIComponent(conversationId)}`);
     const matching = (observations ?? []).filter(o => o.conversationId === conversationId && o.armId === armId);
     const latest = matching[matching.length - 1];
@@ -102,6 +117,7 @@ export class PlannerObserverClient {
         adoptedFromUnresolvableArm: false,
       } : null,
       lastState: latest?.state ?? null, lastObservedAt: latest?.observedAt ?? null,
+      recoveryRequired: false, recoveryReason: null,
     };
   }
 
@@ -235,6 +251,8 @@ export class PlannerObserverClient {
       completion: null,
       lastState: null,
       lastObservedAt: null,
+      recoveryRequired: false,
+      recoveryReason: null,
     };
     let observations: RawObservation[];
     let arm: { armId: string; completed: boolean } | null;
@@ -254,6 +272,18 @@ export class PlannerObserverClient {
       arm = ledger.filter((a) => !a.completed).pop() ?? null;
     } catch (err) {
       return { ...unavailable, unavailableReason: (err as Error).message };
+    }
+
+    // Check /next for recoveryRequired (consumed-but-uncompleted arm after restart)
+    // This applies when we're checking the bootstrap arm (deliveryId is the ingressId for bootstrap).
+    const nextResp = await this.request<{ ok: boolean; armed: boolean; armId: string; recoveryRequired?: boolean; reason?: string }>('GET', `/next?conversationId=${encodeURIComponent(conversationId)}`);
+    if (nextResp.recoveryRequired) {
+      return {
+        available: true, unavailableReason: null, conversationId, armId: nextResp.armId,
+        armActive: false, working: false, completion: null,
+        lastState: 'recovery_required', lastObservedAt: new Date().toISOString(),
+        recoveryRequired: true, recoveryReason: nextResp.reason ?? 'bootstrap arm consumed but never completed',
+      };
     }
 
     const latest = observations[observations.length - 1] ?? null;
@@ -314,6 +344,8 @@ export class PlannerObserverClient {
         : null,
       lastState: latest?.state ?? null,
       lastObservedAt: latest?.observedAt ?? null,
+      recoveryRequired: false,
+      recoveryReason: null,
     };
   }
 }

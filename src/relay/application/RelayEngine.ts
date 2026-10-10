@@ -7450,6 +7450,20 @@ private isRuntimeSuspensionItemFor(
       }
       if (armOnly) return null;
       const status = await observer.bootstrapStatus(side.externalSessionId, ingress.armEvidence.armId);
+      // Handle recoveryRequired from bridge (consumed-but-uncompleted arm after restart)
+      if (status.recoveryRequired) {
+        trail.push(`bootstrap recovery required: ${status.recoveryReason}`);
+        // Create an attention item so an operator can manually reconcile
+        const item = AttentionItem.create(
+          'critical',
+          'bootstrap_recovery_required',
+          'Bootstrap arm consumed but never completed',
+          status.recoveryReason ?? 'The observer bridge restarted after the bootstrap arm was delivered to the content script but before the Planner finished its turn. Manual reconciliation required.',
+          { pairId: pair.id, suggestedAction: `Reconcile bootstrap ingress ${ingress.ingressId} (arm ${ingress.armEvidence.armId}) manually`, suggestedTier: 'tier_2_planner_assisted' }
+        );
+        await this.repos.attention.save(item);
+        return null;
+      }
       const completion = status.completion;
       if (!status.available || status.working || !completion ||
           status.conversationId !== side.externalSessionId || completion.conversationId !== side.externalSessionId ||
