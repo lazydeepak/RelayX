@@ -92,14 +92,16 @@ export class PlannerObserverClient {
 
   /** Match the persisted arm exactly, even if the bridge ledger was restarted. */
   async bootstrapStatus(conversationId: string, armId: string): Promise<PlannerObserverStatus> {
-    // Check /next for recoveryRequired (consumed-but-uncompleted arm after restart)
-    const nextResp = await this.request<{ ok: boolean; armed: boolean; armId: string; recoveryRequired?: boolean; reason?: string }>('GET', `/next?conversationId=${encodeURIComponent(conversationId)}`);
-    if (nextResp.recoveryRequired) {
+    // Check /health for recoveryRequired (consumed-but-uncompleted arm after restart).
+    // This is a READ-ONLY endpoint — it does not mutate arm state or deliver arms.
+    const health = await this.request<{ arms?: Array<{ armId: string; conversationId: string; consumed: boolean; completed: boolean; recoveryRequired?: boolean; recoveryReason?: string }> }>('GET', '/health');
+    const armInfo = health.arms?.find(a => a.armId === armId && a.conversationId === conversationId);
+    if (armInfo?.recoveryRequired) {
       return {
         available: true, unavailableReason: null, conversationId, armId,
         armActive: false, working: false, completion: null,
         lastState: 'recovery_required', lastObservedAt: new Date().toISOString(),
-        recoveryRequired: true, recoveryReason: nextResp.reason ?? 'bootstrap arm consumed but never completed',
+        recoveryRequired: true, recoveryReason: armInfo.recoveryReason ?? 'bootstrap arm consumed but never completed',
       };
     }
 
@@ -274,15 +276,17 @@ export class PlannerObserverClient {
       return { ...unavailable, unavailableReason: (err as Error).message };
     }
 
-    // Check /next for recoveryRequired (consumed-but-uncompleted arm after restart)
-    // This applies when we're checking the bootstrap arm (deliveryId is the ingressId for bootstrap).
-    const nextResp = await this.request<{ ok: boolean; armed: boolean; armId: string; recoveryRequired?: boolean; reason?: string }>('GET', `/next?conversationId=${encodeURIComponent(conversationId)}`);
-    if (nextResp.recoveryRequired) {
+    // Check /health for recoveryRequired (consumed-but-uncompleted arm after restart).
+    // This is a READ-ONLY endpoint — it does not mutate arm state or deliver arms.
+    // Only applies to bootstrap arms where deliveryId is the ingressId.
+    const health = await this.request<{ arms?: Array<{ armId: string; conversationId: string; consumed: boolean; completed: boolean; recoveryRequired?: boolean; recoveryReason?: string }> }>('GET', '/health');
+    const armInfo = health.arms?.find(a => a.conversationId === conversationId && a.recoveryRequired);
+    if (armInfo?.recoveryRequired) {
       return {
-        available: true, unavailableReason: null, conversationId, armId: nextResp.armId,
+        available: true, unavailableReason: null, conversationId, armId: armInfo.armId,
         armActive: false, working: false, completion: null,
         lastState: 'recovery_required', lastObservedAt: new Date().toISOString(),
-        recoveryRequired: true, recoveryReason: nextResp.reason ?? 'bootstrap arm consumed but never completed',
+        recoveryRequired: true, recoveryReason: armInfo.recoveryReason ?? 'bootstrap arm consumed but never completed',
       };
     }
 

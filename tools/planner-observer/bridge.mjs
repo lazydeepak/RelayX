@@ -332,6 +332,12 @@ const server = http.createServer(async (req, res) => {
             ingressId: a.ingressId ?? null,
             consumed: a.consumed,
             completed: a.completed === true,
+            // Read-only recovery signal: true when arm was consumed but never completed,
+            // indicating a bridge/extension restart gap. Does NOT mutate arm state.
+            recoveryRequired: a.consumed === true && a.completed !== true,
+            recoveryReason: a.consumed === true && a.completed !== true
+              ? 'bootstrap arm consumed but never completed; bridge restart detected before observer finished — manual reconciliation required'
+              : null,
           })),
           allArms: allArms.map((a) => ({
             armId: a.armId,
