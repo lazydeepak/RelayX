@@ -147,11 +147,10 @@ describe('ChatGPTProvider Project discovery — /projects sequence', () => {
       if (script.includes('make new tab')) {
         return { success: true, output: openTabOutput };
       }
-      // The retained-identity read script. It addresses the exact (window, tab) slot Chrome
-      // reported at creation time — `set urlTxt to URL of t` — rather than "the active tab of
-      // the front window", so the mock must key on the retained-identity form. `return URL of t`
-      // below is the separate final-URL read and must not match this one.
-      if (script.includes('set urlTxt to URL of t')) {
+      // Discovery uses the exported active-tab read helper. The session transport's
+      // retained-handle scripts are a separate capability and must not stand in for it.
+      // Keep this before the final URL read matcher below.
+      if (script.includes('return "TAB_OK|||" & (URL of active tab of front window)')) {
         return { success: true, output: readActiveTabOutput };
       }
       if (script.includes('__relay_stage_ready__')) {

@@ -9,6 +9,51 @@ import { Pair, Project, RuntimeSession, RelayEvent, Attempt } from '../src/relay
 import { ProviderType, EventId, AttemptId, AssignmentId, PairId, RuntimeSessionId } from '../src/relay/domain/types.ts';
 
 describe('RelayX SQLite Migration & Legacy Schema Upgrade', () => {
+  it('repairs relay_ingress for an already-versioned v6 database', () => {
+    const testDbPath = join(tmpdir(), `relay_ingress_repair_${Date.now()}.sqlite`);
+    let db: SqliteRelayDatabase | undefined;
+    try {
+      db = new SqliteRelayDatabase(testDbPath);
+      db.db.exec('DROP TABLE relay_ingress; PRAGMA user_version = 6;');
+      db.close(); db = undefined;
+      db = new SqliteRelayDatabase(testDbPath);
+      assert.strictEqual(db.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='relay_ingress'").get()?.n,1);
+      assert.deepStrictEqual(db.db.prepare('SELECT * FROM relay_ingress').all(),[]);
+      assert.strictEqual(db.db.prepare('PRAGMA user_version').get()?.user_version,6);
+    } finally { db?.close(); if (existsSync(testDbPath)) unlinkSync(testDbPath); }
+  });
+  it('repairs missing identity anchors in v6 files without rewriting identities or permissions', () => {
+    const testDbPath = join(tmpdir(), `relay_identity_repair_${Date.now()}.sqlite`);
+    let db: SqliteRelayDatabase | undefined;
+    try {
+      db = new SqliteRelayDatabase(testDbPath);
+      db.db.exec(`
+        INSERT INTO projects (id, name, created_at, updated_at) VALUES ('project', 'Project', 1, 1);
+        INSERT INTO pairs (id, project_id, name, status, operational_state, stable_pair_id, created_at, updated_at)
+        VALUES ('missing', 'project', 'Missing', 'idle', 'IDLE', NULL, 1, 1),
+               ('empty', 'project', 'Empty', 'idle', 'IDLE', '', 1, 1),
+               ('bound', 'project', 'Bound', 'idle', 'ACTIVE', 'original-anchor', 1, 1);
+      `);
+      db.close();
+      db = undefined;
+      for (let reopen = 0; reopen < 2; reopen++) {
+        db = new SqliteRelayDatabase(testDbPath);
+        const rows = db.db.prepare('SELECT id, stable_pair_id, operational_state FROM pairs ORDER BY id').all();
+        assert.deepStrictEqual(rows.map(row => ({ ...row })), [
+          { id: 'bound', stable_pair_id: 'original-anchor', operational_state: 'ACTIVE' },
+          { id: 'empty', stable_pair_id: 'empty', operational_state: 'IDLE' },
+          { id: 'missing', stable_pair_id: 'missing', operational_state: 'IDLE' },
+        ]);
+        assert.strictEqual(db.db.prepare('PRAGMA user_version').get()?.user_version, 6);
+        db.close();
+        db = undefined;
+      }
+    } finally {
+      db?.close();
+      if (existsSync(testDbPath)) unlinkSync(testDbPath);
+    }
+  });
+
   it('migrates an old Relay database schema (missing canonical_path, git_root, archived_at, etc.), preserves data, and supports Add Project', async () => {
     const testDbPath = join(tmpdir(), `relay_legacy_migration_test_${Date.now()}.sqlite`);
     if (existsSync(testDbPath)) unlinkSync(testDbPath);

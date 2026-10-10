@@ -182,8 +182,8 @@ describe('Create Assignment modal closes on durable creation, keeps the draft ot
     assert.match(afterGuard, /setTitle\(''\)/);
     assert.match(afterGuard, /setInstruction\(''\)/);
     // The modal awaits the outcome (not fire-and-forget).
-    assert.match(modalSource, /await onCreate\(selectedPairId \|\| pairs\[0\]\?\.id, title, instruction\)/);
-    assert.match(modalSource, /onCreate: \(pairId: string, title: string, instruction: string\) => Promise<\{ created: boolean \}>/);
+    assert.match(modalSource, /await onCreate\(selectedPairId \|\| pairs\[0\]\?\.id, title, instruction, priority\)/);
+    assert.match(modalSource, /onCreate: \(pairId: string, title: string, instruction: string, priority: AssignmentPriority\) => Promise<\{ created: boolean \}>/);
   });
 
   it('an unexpected thrown error keeps the modal open (creation unproven)', () => {
@@ -227,7 +227,7 @@ describe('semantic precision: engine claims the slot; application orchestrates d
     assert.match(engineSource, /public async createAssignmentAndClaimExecutionSlot\(/);
     assert.match(serviceSource, /public async createAndDispatchAssignment\(/);
     assert.match(typesSource, /createAndDispatchAssignment\(/);
-    assert.match(bridgeSource, /createAndDispatchAssignment: async \(pairId: string, title: string, instruction: string\)/);
+    assert.match(bridgeSource, /createAndDispatchAssignment: async \(pairId: string, title: string, instruction: string, priority\?: import\('[^']+'\)\.AssignmentPriority\)/);
     assert.match(preloadSource, /CREATE_AND_DISPATCH_ASSIGNMENT/);
     assert.match(contractsSource, /CREATE_AND_DISPATCH_ASSIGNMENT: 'relay:create-and-dispatch-assignment'/);
     assert.doesNotMatch(engineSource, /public async createAndDispatchAssignment\(/);

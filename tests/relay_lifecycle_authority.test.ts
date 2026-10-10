@@ -88,11 +88,54 @@ describe('Relay Lifecycle Authority (STOPPED | RUNNING | PAUSED)', () => {
     const db = new SqliteRelayDatabase(':memory:');
     const engine = new RelayEngine(db);
 
+    // Provide a stub planner observer so Start Pair can establish its bootstrap arm
+    // and so baton evaluation can observe the Planner via the observer path.
+    const stubObserver = {
+      armedArmId: null as string | null,
+      async ensureBootstrapArmed(conversationId: string) {
+        if (!this.armedArmId) this.armedArmId = `arm_${Date.now()}`;
+        return { armId: this.armedArmId, conversationId, reused: false };
+      },
+      async bootstrapStatus() {
+        return {
+          available: true, unavailableReason: null, conversationId: '', armId: this.armedArmId,
+          armActive: false, working: false, completion: null, lastState: null, lastObservedAt: null
+        };
+      },
+      async acknowledgeBootstrapArm() {},
+      // Methods for observePlannerWithObserver (used during baton evaluation)
+      async ensureArmed(conversationId: string, note: string, deliveryId: string) {
+        if (!this.armedArmId) this.armedArmId = `arm_${Date.now()}`;
+        return { armId: this.armedArmId, conversationId, reused: false };
+      },
+      async status(conversationId: string, deliveryId: string) {
+        return {
+          available: true, unavailableReason: null, conversationId,
+          armId: this.armedArmId, armActive: false, working: this.isWorking ?? false,
+          completion: this.isComplete ? {
+            armId: this.armedArmId, conversationId,
+            responseText: this.responseSummary ?? 'Task completed.',
+            responseHash: 'sha256_mock', responseLength: (this.responseSummary ?? '').length,
+            completedTurnKey: 'mock-turn-key', observedAt: new Date().toISOString(),
+            adoptedFromUnresolvableArm: false
+          } : null,
+          lastState: this.isWorking ? 'working' : (this.isComplete ? 'finished' : 'identity'),
+          lastObservedAt: new Date().toISOString(),
+        };
+      },
+      isWorking: false,
+      isComplete: false,
+      responseSummary: 'Task completed successfully.',
+    };
+    engine['plannerObserver'] = stubObserver as any;
+
     const project = Project.create('Proj 1', '', '/path/1', '/path/1');
     await db.projects.save(project);
 
     const planner = RuntimeSession.create('chatgpt', 'Planner');
+    planner.updateExternalIdentity('conv-planner-lifecycle', '/path/1');
     const worker = RuntimeSession.create('opencode', 'Worker');
+    worker.updateExternalIdentity('ses-worker-lifecycle', '/path/1');
     await db.runtimes.save(planner);
     await db.runtimes.save(worker);
 

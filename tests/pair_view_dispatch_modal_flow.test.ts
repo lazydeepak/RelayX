@@ -88,7 +88,7 @@ describe('PairView Dispatch Assignment → CreateAssignmentModal', () => {
   it('submit continues through existing governed pipeline (handleCreateAssignment → modal onCreate)', () => {
     assert.match(appSource, /onCreate=\{handleCreateAssignment\}/, 'modal wired to handleCreateAssignment');
     assert.match(appSource, /const handleCreateAssignment = async/, 'pipeline exists');
-    assert.match(appSource, /await relayBridge\.createAndDispatchAssignment\(pairId, title, instruction\)/, 'governed pipeline preserved');
+    assert.match(appSource, /await relayBridge\.createAndDispatchAssignment\(pairId, title, instruction, priority\)/, 'governed pipeline preserves operator priority');
   });
 
   it('no assignment exists before submit; creation is deferred to explicit user submit', () => {

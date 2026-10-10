@@ -395,6 +395,7 @@ export interface RelayOrchestrationResult {
   deliveryId?: DeliveryId;
   handoffId?: HandoffId;
   planFirstRunId?: PlanFirstRunId;
+  reason?: string;
 }
 
 /**
@@ -428,6 +429,7 @@ function summariseSide(side: PairSideIdentity): Record<string, unknown> {
  * is the Planner's call and it is deliberately absent from this vocabulary.
  */
 export type RelayBatonDecision =
+  | 'materialized'
   /** Authority gate refused; no provider was contacted. */
   | 'refused'
   /** No confirmed Delivery exists. Bootstrap: no baton, nothing attributable. */
@@ -459,6 +461,7 @@ export type RelayBatonDecision =
 
 /** The action the baton model actually took, if any. */
 export type RelayBatonActionKind =
+  | 'bootstrap_materialized'
   | 'none'
   | 'handoff_reused'
   | 'handoff_created'
@@ -681,7 +684,7 @@ export class RelayEngine {
   private readonly planFirstVerification: PlanFirstVerificationEvaluator;
 
   /**
-   * Read-only client for the in-page Planner Observer, or `null` when the observer is not wired.
+   * Client for the in-page Planner Observer, or `null` when the observer is not wired.
    *
    * It is a loopback HTTP client with no browser capability: it cannot open, activate, focus or
    * navigate the Planner tab, and it never runs AppleScript. Monitoring the Planner therefore
@@ -690,8 +693,10 @@ export class RelayEngine {
    * Deliberately opt-in. When absent, the Planner side is observed exactly as it always was, by
    * the AppleScript transcript read, so wiring the observer cannot silently change behaviour for
    * any caller that has not asked for it.
+   *
+   * Not `readonly` so tests can inject a stub observer for Start Pair bootstrap.
    */
-  private readonly plannerObserver: PlannerObserverClient | null;
+  private plannerObserver: PlannerObserverClient | null;
 
   constructor(
     public readonly repos: IRelayRepositories,
@@ -3679,6 +3684,7 @@ export class RelayEngine {
 
           if (report.action.kind === 'handoff_created' || report.action.kind === 'handoff_advanced') {
             handoffsCreated++;
+            if (report.action.kind === 'handoff_advanced') pairsWithNewHandoff.add(pair.id);
             // Preserve an observable boundary between "a Handoff was recorded for a completed
             // turn" and "that Handoff was converted into an opposite-side Assignment". When
             // the conversion could not happen in this evaluation, the next tick performs it,
@@ -4239,12 +4245,23 @@ export class RelayEngine {
       });
     }
 
-    // Resolve attention item for this assignment
+    // Resolve attention items for this assignment
     const openItems = await this.repos.attention.findOpen();
     for (const item of openItems) {
       if (item.assignmentId === delivery.assignmentId && item.type === 'ambiguous_delivery') {
         item.resolve();
         await this.repos.attention.save(item);
+      }
+    }
+    // Also resolve handoff_transfer_blocked items when confirmed delivered.
+    // The blocked-handoff attention was opened because this same Delivery's outcome
+    // was unestablished; confirming it delivers resolves that episode.
+    if (resolution === 'confirmed_delivered') {
+      for (const item of openItems) {
+        if (item.assignmentId === delivery.assignmentId && item.type === 'handoff_transfer_blocked') {
+          item.resolve();
+          await this.repos.attention.save(item);
+        }
       }
     }
 
@@ -6980,7 +6997,7 @@ private isRuntimeSuspensionItemFor(
       `A completed ${baton.owner} turn (${response.messageId}) exists after the recorded boundary of ` +
         `Delivery ${baton.delivery!.id}. The Handoff ${handoff.id} is ready but the opposite-side ` +
         `Assignment was not dispatched in this evaluation (${advanced.transition}); the conversion is ` +
-        'idempotent and will complete on a subsequent tick.',
+        `idempotent and will complete on a subsequent tick. ${advanced.reason ?? ''}`,
       { kind: 'handoff_created', assignmentId: advanced.assignmentId, handoffId: handoff.id },
     );
   }
@@ -7356,12 +7373,203 @@ private isRuntimeSuspensionItemFor(
     );
   }
 
+  /** Create the first Assignment only from a persisted, exact-session arm. */
+  private async materializeBootstrapTurn(
+    pair: Pair,
+    batonSummary: RelayBatonDecisionReport['baton'] | undefined,
+    trail: string[],
+    context: AuthorityContext,
+    armOnly = false,
+  ): Promise<RelayBatonDecisionReport | null> {
+    // Bootstrap never competes with backlog, a failed send, or existing recovery.
+    // Check for existing work FIRST — if the Pair already has Assignments or relay
+    // history, no bootstrap boundary is needed and we must not require the observer.
+    if ((await this.repos.assignments.findByPairId(pair.id)).length) return null;
+
+    // Resolve the Planner side to learn which provider actually backs this Pair. The
+    // observer bootstrap is a CHATGPT-SPECIFIC mechanism, so it can only be a
+    // requirement for a Pair whose Planner really is ChatGPT.
+    const side = await this.resolveBatonSide(pair, 'planner', trail);
+
+    // A Planner side this Pair cannot even address cannot be bootstrapped by anyone.
+    if (!side.ok) {
+      if (armOnly) throw new RelayDomainError(side.failure, 'BOOTSTRAP_SIDE_INVALID');
+      return null;
+    }
+
+    // A non-ChatGPT Planner integration was ALREADY accepted by the pairing authority
+    // (`isPlannerProvider` admits any integration registered with a planner/both role).
+    // It has no observer-based bootstrap mechanism, and fabricating one — an arm, an
+    // ingress, an Assignment — would invent evidence for a boundary nobody established.
+    // So bootstrap is INAPPLICABLE here, not FAILED: Start continues into
+    // RUNNING/awaiting-work exactly as it did before the observer bootstrap existed.
+    if (side.runtime.providerType !== 'chatgpt') {
+      trail.push(
+        `planner provider '${side.runtime.providerType}' has no observer bootstrap mechanism; ` +
+          'bootstrap is inapplicable and none was required',
+      );
+      return null;
+    }
+
+    const observer = this.plannerObserver;
+    // For a ChatGPT Planner the boundary IS the bootstrap, so an empty chain cannot Start
+    // without it. Background supervision ticks (armOnly: false) never fail the whole
+    // orchestration for this — they skip bootstrap and continue on baton continuity.
+    if (!observer || typeof observer.ensureBootstrapArmed !== 'function' || typeof observer.bootstrapStatus !== 'function') {
+      if (armOnly) {
+        throw new RelayDomainError(
+          'Planner observer not available; bootstrap arm cannot be established',
+          'BOOTSTRAP_OBSERVER_UNAVAILABLE',
+        );
+      }
+      return null;
+    }
+
+    // relay_ingress.stable_pair_id is a legacy column name whose FK targets the
+    // current pairs.id row. The Pair's immutable stableId may legitimately differ.
+    let ingress = await this.repos.relayIngresses.findActiveForPair(pair.id);
+    if (ingress && ingress.externalSessionId !== side.externalSessionId) {
+      const staleId = ingress.ingressId;
+      await this.repos.runInTransaction(async () => {
+        const current = await this.repos.relayIngresses.findById(staleId);
+        if (current && (current.state === 'armed' || current.state === 'observed')
+          && current.externalSessionId !== side.externalSessionId) {
+          await this.repos.relayIngresses.updateState(staleId,'superseded');
+        }
+      });
+      trail.push('bootstrap root belonged to a previous Planner session; superseded');
+      ingress = null;
+    }
+    if (!ingress) {
+      ingress = await this.repos.runInTransaction(async () => {
+        const existing = await this.repos.relayIngresses.findActiveForPair(pair.id);
+        if (existing) return existing;
+        const id = String(createId('ingress'));
+        const root = {
+          ingressId: id, stablePairId: pair.id, sourceSide: 'planner' as const,
+          providerType: side.runtime.providerType, externalSessionId: side.externalSessionId,
+          providerTurnIdentity: id, observedText: '', armEvidence: { armId: '' },
+          state: 'armed' as const, createdAt: Date.now(), updatedAt: Date.now(),
+        };
+        await this.repos.relayIngresses.save(root);
+        return root;
+      });
+    }
+    try {
+      if (!ingress.armEvidence.armId) {
+        const arm = await observer.ensureBootstrapArmed(side.externalSessionId, ingress.ingressId);
+        if (!arm.armId || arm.conversationId !== side.externalSessionId) {
+          const msg = 'Observer bridge refused bootstrap arm or returned mismatched session';
+          if (armOnly) throw new RelayDomainError(msg, 'BOOTSTRAP_ARM_REFUSED');
+          return null;
+        }
+        ingress.armEvidence = { armId: arm.armId, boundarySource: 'observer_arm_baseline' };
+        await this.repos.relayIngresses.save(ingress);
+      }
+      if (armOnly) return null;
+      const status = await observer.bootstrapStatus(side.externalSessionId, ingress.armEvidence.armId);
+      // The recorded boundary can no longer yield a completion: either it was consumed and
+      // never finished, or it is gone from a reachable ledger entirely. Both are terminal for
+      // this ingress and neither may be retried by re-arming — that would rebaseline over a
+      // possibly-completed Planner turn. Surface ONE deduplicated operator task per ingress.
+      if (status.recoveryRequired) {
+        trail.push(`bootstrap recovery required: ${status.recoveryReason}`);
+        const armAbsent = status.lastState === 'arm_absent_from_ledger';
+        const suggestedAction =
+          `Reconcile bootstrap ingress ${ingress.ingressId} (arm ${ingress.armEvidence.armId}) manually`;
+        const alreadyOpen = (await this.repos.attention.findOpen()).find(item =>
+          item.type === 'bootstrap_recovery_required' && item.pairId === pair.id &&
+          item.suggestedAction === suggestedAction,
+        );
+        // One item is the whole episode. Re-raising it per tick would bury the queue and
+        // imply the situation is changing when it is not.
+        if (!alreadyOpen) {
+          await this.repos.attention.save(AttentionItem.create(
+            'critical',
+            'bootstrap_recovery_required',
+            armAbsent
+              ? 'Bootstrap arm is missing from the observer ledger'
+              : 'Bootstrap arm consumed but never completed',
+            status.recoveryReason ??
+              'The observer bridge restarted after the bootstrap arm was delivered to the content script but before the Planner finished its turn. Manual reconciliation required.',
+            { pairId: pair.id, suggestedAction, suggestedTier: 'tier_2_planner_assisted' },
+          ));
+        }
+        return null;
+      }
+      const completion = status.completion;
+      if (!status.available || status.working || !completion ||
+          status.conversationId !== side.externalSessionId || completion.conversationId !== side.externalSessionId ||
+          completion.armId !== ingress.armEvidence.armId || !completion.completedTurnKey || !completion.responseText.trim()) {
+        trail.push('bootstrap waiting for an exact-arm completed Planner turn');
+        return null;
+      }
+      const rootId = ingress.ingressId;
+      const assignment = await this.repos.runInTransaction(async () => {
+        const current = await this.repos.relayIngresses.findById(rootId);
+        if (!current || current.state === 'materialized' || current.state === 'superseded' ||
+            current.externalSessionId !== side.externalSessionId || current.stablePairId !== pair.id ||
+            current.armEvidence.armId !== completion.armId) return null;
+        const freshPair = await this.repos.pairs.findById(pair.id);
+        if (!freshPair) return null;
+        freshPair.assertContactPermitted(context);
+        if (context === 'AUTOMATED' && !freshPair.isAutomatedContactPermitted()) return null;
+        if (freshPair.plannerSessionId !== side.runtimeSessionId) return null;
+        const runtime = await this.repos.runtimes.findById(side.runtimeSessionId);
+        if (runtime?.externalSessionId !== side.externalSessionId) return null;
+        if ((await this.repos.assignments.findByPairId(pair.id)).length) return null;
+        const duplicate = await this.repos.relayIngresses.findByUniqueKey(pair.stableId, 'planner', side.externalSessionId, completion.completedTurnKey!);
+        if (duplicate && duplicate.ingressId !== rootId) return null;
+        const created = Assignment.create(pair.id, pair.projectId, `Planner turn ${completion.completedTurnKey!.slice(0, 12)}`, completion.responseText);
+        await this.assertExecutionSlotAvailable(freshPair, created);
+        current.providerTurnIdentity = completion.completedTurnKey!;
+        current.observedText = completion.responseText;
+        current.contentHash = completion.responseHash;
+        current.observedAt = Date.now();
+        current.state = 'materialized';
+        current.materializedAssignmentId = created.id;
+        current.updatedAt = Date.now();
+        await this.repos.assignments.save(created);
+        freshPair.assignWork(created.id);
+        await this.repos.pairs.save(freshPair);
+        await this.repos.relayIngresses.save(current);
+        await this.emitEvent('assignment', created.id, 'assignment.bootstrap_materialized', {
+          actor: 'supervisor', newState: created.status,
+          details: { ingressId: rootId, externalSessionId: side.externalSessionId, armId: current.armEvidence.armId, turnKey: current.providerTurnIdentity },
+        });
+        return created;
+      });
+      if (!assignment) return null;
+      if (typeof observer.acknowledgeBootstrapArm === 'function') {
+        try { await observer.acknowledgeBootstrapArm(ingress.armEvidence.armId); }
+        catch (err) { trail.push(`bootstrap arm acknowledgement deferred: ${(err as Error).message}`); }
+      }
+      // DB intent/slot/ingress commit together; outbound effects remain outside.
+      const dispatched = await this.dispatchAssignment(assignment.id, context);
+      return {
+        pairId: pair.id, decision: 'materialized', relayDecisionTrail: trail, baton: batonSummary!,
+        observation: null, action: { kind: 'bootstrap_materialized', assignmentId: assignment.id,
+          attemptId: dispatched.attempt.id, deliveryId: dispatched.delivery.id,
+          deliveryConfirmed: dispatched.delivery.status === 'delivered' },
+        reason: 'An exact-arm Planner turn created one durable Assignment; delivery evidence alone determines baton ownership.',
+      };
+    } catch (err) {
+      // armOnly=true means this was an explicit Start Pair call — the failure must
+      // propagate so the Pair never transitions to RUNNING without a boundary.
+      if (armOnly) throw err;
+      trail.push(`bootstrap stopped without automatic resend: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
   /**
    * Case C — no confirmed Delivery exists, so no baton can be derived.
    *
-   * ## Why this observes and never delivers
+   * A durable ingress arm can establish the first Planner boundary independently
+   * of Delivery. If that capability is absent or yields no attributable turn,
+   * this path observes and never delivers.
    *
-   * With no confirmed Delivery there is no recorded message-id boundary for either side, so
+   * With neither a confirmed Delivery nor a bootstrap arm there is no recorded boundary, so
    * "this completed turn has never been delivered" cannot be established — and neither can
    * "this completed turn belongs to this Pair's relay". An assistant turn that a human typed
    * into the same conversation is mechanically identical to one RelayX should have carried,
@@ -7380,6 +7588,8 @@ private isRuntimeSuspensionItemFor(
     context: AuthorityContext,
     actor: 'supervisor' | 'recovery',
   ): Promise<RelayBatonDecisionReport> {
+    const bootstrap = await this.materializeBootstrapTurn(pair, batonSummary, trail, context);
+    if (bootstrap) return bootstrap;
     trail.push(
       `no confirmed Delivery for this chain (${baton.confirmedDeliveryCount} confirmed, ${baton.supersededCount} superseded)`,
     );
@@ -7469,10 +7679,9 @@ private isRuntimeSuspensionItemFor(
       reason: anyWorking
         ? 'No confirmed Delivery establishes a baton, and at least one side is currently active. ' +
           'RelayX resumes observation and injects no message.'
-        : 'No confirmed Delivery establishes a baton for this chain, and with no recorded ' +
-          'message-id boundary on either side there is no way to establish that an observed ' +
-          'completed turn was never delivered or that it belongs to this Pair rather than to a ' +
-          'human in the same conversation. RelayX resumes normal watching and injects no message.',
+        : 'No confirmed Delivery establishes a baton for this chain, and no completed turn ' +
+          'has been attributed to an eligible bootstrap boundary. RelayX resumes normal ' +
+          'watching and injects no message.',
     };
 
     await this.emitEvent('pair', pair.id, 'pair.baton_evaluated', {
@@ -7495,6 +7704,61 @@ private isRuntimeSuspensionItemFor(
     });
 
     return report;
+  }
+
+  /** Only retry a conclusively undelivered report TO the Planner, never Worker work. */
+  private async retryPlannerHandoff(assignment: Assignment): Promise<RelayOrchestrationResult> {
+    const result = (reason: string): RelayOrchestrationResult => ({
+      pairId: assignment.pairId, assignmentId: assignment.id, handoffId: assignment.sourceHandoffId,
+      transition: 'awaiting_evidence', reason,
+    });
+    const deliveries = await this.repos.deliveries.findByAssignmentId(assignment.id);
+    const attempts = await this.repos.attempts.findByAssignmentId(assignment.id);
+    const numbers = new Map(attempts.map(a => [a.id, a.attemptNumber]));
+    deliveries.sort((a, b) => (numbers.get(b.attemptId) ?? 0) - (numbers.get(a.attemptId) ?? 0));
+    const latest = deliveries[0];
+    const blocked = (await this.repos.attention.findOpen()).filter(item =>
+      item.type === 'handoff_transfer_blocked' && item.assignmentId === assignment.id);
+    const raise = async (uncertain: boolean): Promise<void> => {
+      if (blocked.length) return;
+      const item = AttentionItem.create('critical', 'handoff_transfer_blocked',
+        uncertain ? 'Handoff delivery outcome unestablished' : 'Handoff delivery to Planner blocked',
+        uncertain ? 'RelayX could not establish the handoff delivery outcome. No automatic resend is permitted.'
+          : 'Delivery to the Planner conclusively failed repeatedly. This attention item does not stop the retry chain for the retained report.',
+        { pairId: assignment.pairId, assignmentId: assignment.id,
+          suggestedAction: (uncertain ? 'Do not resend until the outcome is known. Reconcile the exact Planner session. '
+            : 'Inspect Planner transport availability. ') + 'Recovery restarts from the Planner; do not resume the Worker directly.',
+          suggestedTier: 'tier_2_planner_assisted' });
+      await this.repos.attention.save(item);
+    };
+    if (deliveries.some(d => ['pending', 'delivering', 'ambiguous'].includes(d.status))) {
+      await raise(true);
+      return result('Delivery outcome is unestablished; no resend.');
+    }
+    if (!latest || deliveries.some(d => d.status === 'delivered')) return result('No failed Planner handoff to retry.');
+    if (latest.status !== 'failed') return result('Planner delivery is not conclusively failed.');
+    const frozen = attempts.find(attempt => attempt.id === latest.attemptId);
+    const pair = await this.repos.pairs.findById(assignment.pairId);
+    const planner = pair?.plannerSessionId ? await this.repos.runtimes.findById(pair.plannerSessionId) : null;
+    if (!frozen || frozen.sessionPairId !== pair?.id || frozen.workerSessionId !== planner?.id ||
+        frozen.externalSessionId !== planner?.externalSessionId) {
+      return result('Planner session identity changed since the failed delivery; automatic retry refused.');
+    }
+    const failures = deliveries.filter(d => d.status === 'failed').length;
+    const ladder = [10_000, 20_000, 60_000, 300_000];
+    const delay = ladder[failures - 1] ?? 1_800_000;
+    if (failures >= 5) await raise(false);
+    if (Date.now() - latest.updatedAt < delay) return result(`Backing off Planner transport for ${delay}ms after ${failures} definite failures.`);
+    const dispatched = await this.dispatchAssignment(assignment.id, 'AUTOMATED');
+    if (dispatched.delivery.status === 'delivered') {
+      for (const item of (await this.repos.attention.findOpen()).filter(item =>
+        item.type === 'handoff_transfer_blocked' && item.assignmentId === assignment.id)) {
+        item.resolve();
+        await this.repos.attention.save(item);
+      }
+    }
+    return { pairId: assignment.pairId, transition: 'handoff_advanced', assignmentId: assignment.id,
+      attemptId: dispatched.attempt.id, deliveryId: dispatched.delivery.id, handoffId: assignment.sourceHandoffId };
   }
 
   /**
@@ -7613,6 +7877,9 @@ private isRuntimeSuspensionItemFor(
       }
 
       if (current) {
+        if (current.sourceHandoffId && current.targetSideRole === 'planner' && current.activeDeliveryId) {
+          return await this.retryPlannerHandoff(current);
+        }
         if (current.status === 'pending' || !current.currentAttemptId) {
           const dispatched = await this.dispatchAssignment(current.id, 'AUTOMATED');
           return {
@@ -7712,6 +7979,12 @@ private isRuntimeSuspensionItemFor(
         'PAIR_OPERATIONAL_STATE_IDLE',
       );
     }
+
+    // Establish the bootstrap boundary BEFORE committing RUNNING state. If the
+    // observer bridge is unavailable or refuses the arm, Start Pair must fail
+    // rather than returning a RUNNING Pair with no boundary (which would allow
+    // the Planner's first turn to complete unattributed).
+    await this.materializeBootstrapTurn(pair, undefined, [], 'OPERATOR_EXPLICIT', true);
 
     pair.startRelay();
     await this.repos.pairs.save(pair);

@@ -66,9 +66,73 @@ const arms = new Map();
  * finished response would lose its Delivery attribution and be discarded as if it never existed.
  */
 const allArms = [];
+const armsById = new Map();
 /** Every observation, in arrival order. */
 const observations = [];
 const MAX_OBSERVATIONS = 5000;
+let nextObservationSeq = 1;
+
+function isArmCompletion(record) {
+  const arm = record.armId ? findArm(record.armId) : null;
+  return Boolean(record.state === 'finished' && arm?.ingressId && !arm.recoveryConsumed);
+}
+
+/** Keep the rolling diagnostic window bounded without evicting the terminal evidence
+ * needed to finish any arm that is itself retained in the ledger. */
+function retainObservation(record) {
+  observations.push(record);
+  while (observations.length > MAX_OBSERVATIONS) {
+    const evictableIndex = observations.findIndex((observation) => !isArmCompletion(observation));
+    if (evictableIndex === -1) break;
+    observations.splice(evictableIndex, 1);
+  }
+}
+
+function appendLedger(record) {
+  fs.appendFileSync(LOG_PATH, `${JSON.stringify(record)}\n`);
+}
+
+function findArm(armId) {
+  return armsById.get(armId);
+}
+
+/** Recover the observer boundary before accepting requests. Malformed/truncated
+ * trailing records are ignored; a valid earlier arm is never discarded. */
+function hydrateLedger() {
+  if (!fs.existsSync(LOG_PATH)) return;
+  const contents = fs.readFileSync(LOG_PATH, 'utf8');
+  for (const line of contents.split('\n')) {
+    if (!line.trim()) continue;
+    let record;
+    try { record = JSON.parse(line); } catch { continue; }
+    if (record.ledgerType === 'arm' && record.arm?.armId && record.arm?.conversationId) {
+      const arm = { ...record.arm };
+      allArms.push(arm);
+      armsById.set(arm.armId, arm);
+      arms.set(arm.conversationId, arm);
+    } else if (record.ledgerType === 'arm_state' && record.armId) {
+      const arm = findArm(record.armId);
+      if (arm) Object.assign(arm, record.changes ?? {});
+    } else if (!record.ledgerType && record.state) {
+      retainObservation(record);
+      // A `finished` observation is the durable fact. If the process died before the
+      // following arm_state append, recover the derived state from that fact rather
+      // than handing the same arm to the browser again.
+      if (isArmCompletion(record)) {
+        const arm = findArm(record.armId);
+        arm.completed = true;
+        arm.completedAt = arm.completedAt ?? record.receivedAt ?? null;
+      }
+      if (Number.isSafeInteger(record.seq)) nextObservationSeq = Math.max(nextObservationSeq, record.seq + 1);
+    }
+  }
+  // A killed append can leave an invalid fragment without its newline. Always close
+  // the final physical record before accepting new writes so the next valid arm is
+  // independently parseable on another restart.
+  if (contents.length > 0 && !contents.endsWith('\n')) fs.appendFileSync(LOG_PATH, '\n');
+}
+
+hydrateLedger();
 
 function json(res, code, body) {
   const payload = JSON.stringify(body, null, 2);
@@ -125,20 +189,24 @@ const server = http.createServer(async (req, res) => {
         const conversationId = String(body.conversationId ?? '').trim();
         if (!conversationId) return json(res, 400, { ok: false, reason: 'conversationId required' });
         const armId = `arm_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`;
-        arms.set(conversationId, {
+        const arm = {
           armId,
           conversationId,
           // Which Delivery this arm was created for. Scoping completions to it is what stops a
           // finished response being attributed to the NEXT baton: after the baton moves on, an
           // old arm's completion must never be picked up as the new owner's reply.
           deliveryId: String(body.deliveryId ?? '').trim() || null,
+          ingressId: String(body.ingressId ?? '').trim() || null,
           issuedAt: new Date().toISOString(),
           note: body.note ?? null,
           deliveredAt: null,
           consumed: false,
           completed: false,
-        });
-        allArms.push(arms.get(conversationId));
+        };
+        appendLedger({ ledgerType: 'arm', arm });
+        arms.set(conversationId, arm);
+        allArms.push(arm);
+        armsById.set(arm.armId, arm);
         console.log(
           `[bridge] ARM ${armId} -> conversation ${conversationId}` +
             (body.note ? ` (${body.note})` : ''),
@@ -161,9 +229,25 @@ const server = http.createServer(async (req, res) => {
             reason: 'this arm already produced its completion; awaiting the next delivery',
           });
         }
+        // An arm that was delivered (consumed) but never completed indicates a recovery gap:
+        // the bridge/extension restarted before the observer could report `finished`. We must
+        // NOT re-arm against it — doing so would rebaseline over a potentially completed Planner
+        // response and leave the ingress waiting forever for a completion that will never match.
+        // Return a fail-closed recovery state instead.
+        if (arm.consumed) {
+          return json(res, 200, {
+            ok: true,
+            armed: false,
+            armId: arm.armId,
+            recoveryRequired: true,
+            reason: 'bootstrap arm was consumed but never completed; bridge restart detected before observer finished — manual reconciliation required',
+          });
+        }
         if (!arm.consumed) {
           arm.consumed = true;
           arm.deliveredAt = new Date().toISOString();
+          appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+            changes: { consumed: true, deliveredAt: arm.deliveredAt } });
           console.log(`[bridge] arm ${arm.armId} delivered to the observer`);
         }
         return json(res, 200, {
@@ -178,19 +262,19 @@ const server = http.createServer(async (req, res) => {
 
       case 'POST /observation': {
         const body = await readBody(req);
-        const record = { seq: observations.length + 1, receivedAt: new Date().toISOString(), ...body };
-        observations.push(record);
-        if (observations.length > MAX_OBSERVATIONS) observations.shift();
-        fs.appendFileSync(LOG_PATH, `${JSON.stringify(record)}\n`);
+        const record = { ...body, seq: nextObservationSeq++, receivedAt: new Date().toISOString() };
+        appendLedger(record);
+        retainObservation(record);
 
         // Retire the arm that just produced its completion, so it is never re-delivered.
         if (record.state === 'finished' && record.armId) {
-          for (const arm of arms.values()) {
-            if (arm.armId === record.armId) {
-              arm.completed = true;
-              arm.completedAt = record.receivedAt;
-              console.log(`[bridge] arm ${arm.armId} completed and retired`);
-            }
+          const arm = findArm(record.armId);
+          if (arm) {
+            arm.completed = true;
+            arm.completedAt = record.receivedAt;
+            appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+              changes: { completed: true, completedAt: arm.completedAt } });
+            console.log(`[bridge] arm ${arm.armId} completed and retired`);
           }
         }
 
@@ -201,6 +285,21 @@ const server = http.createServer(async (req, res) => {
           (record.reason ? ` reason="${String(record.reason).slice(0, 90)}"` : '');
         console.log(`[bridge] #${record.seq} ${brief}`);
         return json(res, 200, { ok: true, seq: record.seq });
+      }
+
+      case 'POST /consume-arm': {
+        const body = await readBody(req);
+        const arm = findArm(String(body.armId ?? '').trim());
+        if (!arm?.ingressId) return json(res, 404, { ok: false, reason: 'bootstrap arm not found' });
+        arm.recoveryConsumed = true;
+        appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+          changes: { recoveryConsumed: true } });
+        while (observations.length > MAX_OBSERVATIONS) {
+          const evictableIndex = observations.findIndex((observation) => !isArmCompletion(observation));
+          if (evictableIndex === -1) break;
+          observations.splice(evictableIndex, 1);
+        }
+        return json(res, 200, { ok: true, armId: arm.armId });
       }
 
       case 'GET /latest': {
@@ -230,13 +329,21 @@ const server = http.createServer(async (req, res) => {
             armId: a.armId,
             conversationId: a.conversationId,
             deliveryId: a.deliveryId ?? null,
+            ingressId: a.ingressId ?? null,
             consumed: a.consumed,
             completed: a.completed === true,
+            // Read-only recovery signal: true when arm was consumed but never completed,
+            // indicating a bridge/extension restart gap. Does NOT mutate arm state.
+            recoveryRequired: a.consumed === true && a.completed !== true,
+            recoveryReason: a.consumed === true && a.completed !== true
+              ? 'bootstrap arm consumed but never completed; bridge restart detected before observer finished — manual reconciliation required'
+              : null,
           })),
           allArms: allArms.map((a) => ({
             armId: a.armId,
             conversationId: a.conversationId,
             deliveryId: a.deliveryId ?? null,
+            ingressId: a.ingressId ?? null,
             completed: a.completed === true,
             issuedAt: a.issuedAt,
           })),

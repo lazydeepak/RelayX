@@ -74,6 +74,23 @@ describe('Relay Authority Realignment Hard Regression Proofs', () => {
     const db = new SqliteRelayDatabase(':memory:');
     const engine = new RelayEngine(db);
     
+    // Provide a stub planner observer so Start Pair can establish its bootstrap arm
+    const stubObserver = {
+      armedArmId: null as string | null,
+      async ensureBootstrapArmed(conversationId: string) {
+        if (!this.armedArmId) this.armedArmId = `arm_${Date.now()}`;
+        return { armId: this.armedArmId, conversationId, reused: false };
+      },
+      async bootstrapStatus() {
+        return {
+          available: true, unavailableReason: null, conversationId: '', armId: this.armedArmId,
+          armActive: false, working: false, completion: null, lastState: null, lastObservedAt: null
+        };
+      },
+      async acknowledgeBootstrapArm() {},
+    };
+    engine['plannerObserver'] = stubObserver as any;
+
     const project = Project.create('Proof Project' as any, '', '/path', '/path', 'g-p-123', '/path');
     await db.projects.save(project);
 
