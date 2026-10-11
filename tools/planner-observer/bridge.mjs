@@ -537,15 +537,16 @@ const server = http.createServer(async (req, res) => {
                   // A current active-observer liveness observation must:
                   // 1) share the same observer epoch as the delivered arm (same bridge lifecycle),
                   // 2) share the same observer instance identity (same content-script lifecycle),
-                  // 3) occur after delivery.
+                  // 3) occur at or after delivery.
                   // Historical armed/working observations from a previous observer instance or a previous
-                  // bridge process must NOT mask a genuine restart gap.
+                  // bridge process must NOT mask a genuine restart gap. The same-timestamp case is still
+                  // current: the observation and the delivery can be recorded within the same millisecond.
                   const validState = o.state === 'armed' || o.state === 'working';
                   return o.armId === a.armId && validState
                     && obsEpoch === deliveredEpoch
                     && obsInstance === armObserverInstance
-                    && obsTime > deliveredAtMs
-                    && (observerUnconfirmedMs === 0 || obsTime > observerUnconfirmedMs);
+                    && obsTime >= deliveredAtMs
+                    && (observerUnconfirmedMs === 0 || obsTime >= observerUnconfirmedMs);
                 }
               );
               return !hasCurrentWorkingForArm;

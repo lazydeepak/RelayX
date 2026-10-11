@@ -413,8 +413,24 @@
     S.heartbeatTimer = setInterval(() => {
       if (!S.armed || !S.armId) return stopHeartbeat();
       const gen = readGenerating();
-      if (gen.unreadable || !gen.generating) return;
       const conv = readConversation();
+
+      // The arm is the real liveness lease. If the model is idle, we still need to tell the
+      // bridge we are alive and still bound to this exact observer instance; otherwise a long
+      // wait between DOM changes is mistaken for a restart gap.
+      if (gen.unreadable || !gen.generating) {
+        void report('armed', {
+          heartbeat: true,
+          generatingSignal: gen.signal,
+          generatingControlLabel: gen.controlLabel,
+          generatingControlCount: gen.controlCount,
+          observedConversationOk: conv.ok,
+          observedConversationTurns: conv.ok ? conv.turns.length : 0,
+          trackedTurnKey: S.trackedKey,
+          note: 'armed but idle heartbeat; no generation signal yet',
+        });
+        return;
+      }
       if (!conv.ok || !conv.turns) return;
       const newAssistantTurns = conv.turns.filter(
         (t) => t.role === 'assistant' && t.turnKey !== null && !S.baselineKeys.has(t.turnKey),

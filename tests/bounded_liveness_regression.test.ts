@@ -59,4 +59,36 @@ describe('Bounded observer liveness regression', () => {
     assert.strictEqual(armRow.observerInstanceId, 'inst_liveness');
     await stop(bridge);
   });
+
+  it('armed idle heartbeats count as current liveness', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'relayx-liveness-idle-'));
+    directories.push(dir);
+    const logPath = join(dir, 'liveness-idle.jsonl');
+    const port = 19110 + (process.pid % 10000);
+    const bridge = await start(port, logPath, { RELAYX_PLANNER_OBSERVER_HEARTBEAT_MS: '100' });
+    const armed = await fetch(`http://127.0.0.1:${port}/arm`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ conversationId: 'conv-idle', ingressId: 'ingress', note: 'idle heartbeat' }),
+    }).then((r) => r.json()) as { armId: string };
+    await fetch(`http://127.0.0.1:${port}/next?conversationId=conv-idle`);
+    await fetch(`http://127.0.0.1:${port}/observation`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ state: 'armed', conversationId: 'conv-idle', armId: armed.armId, observerInstanceId: 'inst_idle' }),
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    await fetch(`http://127.0.0.1:${port}/observation`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ state: 'armed', conversationId: 'conv-idle', armId: armed.armId, observerInstanceId: 'inst_idle' }),
+    });
+    await new Promise((r) => setTimeout(r, 80));
+    const health = await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.json()) as {
+      arms: Array<{ armId: string; recoveryRequired: boolean; observerUnconfirmedAt?: string | null; observerInstanceId?: string | null }>
+    };
+    const armRow = health.arms.find((a) => a.armId === armed.armId);
+    assert.ok(armRow, 'arm present');
+    assert.strictEqual(armRow.recoveryRequired, false, 'armed idle heartbeat should count as current liveness');
+    assert.strictEqual(armRow.observerInstanceId, 'inst_idle');
+    assert.ok(!armRow.observerUnconfirmedAt, 'idle armed heartbeat must not expire while connected');
+    await stop(bridge);
+  });
 });
