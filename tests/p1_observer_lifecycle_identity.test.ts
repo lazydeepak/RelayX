@@ -174,4 +174,66 @@ describe('P1 observer lifecycle identity — both findings corrected', () => {
 
     await stop(bridge);
   });
+
+  // --- Bounded observer liveness regression (new mechanism, #3-authorized) ---
+  it('heartbeat timeout records durable observer_unconfirmed without false recovery', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'relayx-p1-heartbeat-'));
+    directories.push(dir);
+    const logPath = join(dir, 'heartbeat.jsonl');
+    const port = 19003 + (process.pid % 10000);
+    const bridge = await start(port, logPath, { RELAYX_PLANNER_OBSERVER_HEARTBEAT_MS: '100' });
+    const armed = await fetch(`http://127.0.0.1:${port}/arm`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ conversationId: 'conv-p1', ingressId: 'ingress', note: 'heartbeat-test' }),
+    }).then((r) => r.json()) as { armId: string };
+    await fetch(`http://127.0.0.1:${port}/next?conversationId=conv-p1`);
+    const instanceId = 'heartbeat_inst';
+    await fetch(`http://127.0.0.1:${port}/observation`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(makeWorkingObservation(armed.armId, instanceId)),
+    });
+    // Wait for the 100ms heartbeat to expire without a new observation.
+    await new Promise((r) => setTimeout(r, 250));
+    const health = await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.json()) as {
+      arms: Array<{ armId: string; recoveryRequired: boolean; observerUnconfirmedAt?: string; observerInstanceId?: string }>;
+    };
+    const armRow = health.arms.find((a) => a.armId === armed.armId);
+    assert.ok(armRow, 'arm present');
+    assert.strictEqual(armRow.recoveryRequired, true, 'heartbeat expiration triggers recovery gap');
+    assert.ok(armRow.observerUnconfirmedAt, 'durable observer_unconfirmed recorded');
+    assert.strictEqual(armRow.observerInstanceId, instanceId, 'original observer instance preserved');
+    await stop(bridge);
+  });
+
+  it('same-instance reconnection after timeout clears unconfirmed without manual recovery', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'relayx-p1-reconnect-'));
+    directories.push(dir);
+    const logPath = join(dir, 'reconnect.jsonl');
+    const port = 19004 + (process.pid % 10000);
+    const bridge = await start(port, logPath, { RELAYX_PLANNER_OBSERVER_HEARTBEAT_MS: '100' });
+    const armed = await fetch(`http://127.0.0.1:${port}/arm`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ conversationId: 'conv-p1', ingressId: 'ingress', note: 'reconnect-test' }),
+    }).then((r) => r.json()) as { armId: string };
+    await fetch(`http://127.0.0.1:${port}/next?conversationId=conv-p1`);
+    const instanceId = 'reconnect_inst';
+    await fetch(`http://127.0.0.1:${port}/observation`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(makeWorkingObservation(armed.armId, instanceId)),
+    });
+    await new Promise((r) => setTimeout(r, 250)); // timeout expires
+    // Same instance reconnects: new observation after unconfirmed time.
+    await fetch(`http://127.0.0.1:${port}/observation`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(makeWorkingObservation(armed.armId, instanceId)),
+    });
+    const health = await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.json()) as {
+      arms: Array<{ armId: string; recoveryRequired: boolean; observerUnconfirmedAt?: string | null }>;
+    };
+    const armRow = health.arms.find((a) => a.armId === armed.armId);
+    assert.ok(armRow, 'arm present after reconnect');
+    assert.strictEqual(armRow.recoveryRequired, false, 'same-instance reconnect proves continuity via new observation');
+    assert.ok(armRow.observerUnconfirmedAt, 'durable observer_unconfirmed record preserved');
+    await stop(bridge);
+  });
 });
