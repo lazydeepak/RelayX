@@ -27,7 +27,7 @@ import { join } from 'node:path';
 import { SqliteRelayDatabase } from '../src/relay/persistence/sqlite/SqliteDatabase.ts';
 import { RelayEngine } from '../src/relay/application/RelayEngine.ts';
 import { MockProvider } from './MockProvider.ts';
-import { RuntimeSession, RuntimeProjectAssociation } from '../src/relay/domain/entities.ts';
+import { RuntimeSession, RuntimeProjectAssociation, Assignment, Attempt } from '../src/relay/domain/entities.ts';
 import { createId } from '../src/relay/domain/types.ts';
 
 const PLANNER_EXTERNAL = 'conv-planner-bootstrap';
@@ -47,8 +47,20 @@ const POST_ARM_KEY = 'b6c16ae0-0089-4528-814a-16691b77b62e';
  * id of the arm that produced it — including after the bridge retires that arm.
  */
 class StubPlannerObserver {
+  public bootstrapOverride: Record<string, unknown> | null = null;
+  async ensureBootstrapArmed(conversationId: string, ingressId: string) {
+    return this.ensureArmed(conversationId);
+  }
+
+  async bootstrapStatus(conversationId: string, armId: string) {
+    const result: any = await this.status(conversationId);
+    if (this.bootstrapOverride) result.completion = { ...result.completion, ...this.bootstrapOverride };
+    return result;
+  }
+
   public armedArmId: string | null = null;
   public armIssueCount = 0;
+  public acknowledgedArmIds: string[] = [];
   /** Set to simulate the completion being attributable only to a RETIRED arm. */
   public retiredArmId: string | null = null;
 
@@ -57,6 +69,10 @@ class StubPlannerObserver {
     this.armIssueCount += 1;
     this.armedArmId = `arm_bootstrap_${this.armIssueCount}`;
     return { armId: this.armedArmId, conversationId, reused: false };
+  }
+
+  async acknowledgeBootstrapArm(armId: string) {
+    this.acknowledgedArmIds.push(armId);
   }
 
   async status(conversationId: string) {
@@ -123,7 +139,11 @@ describe('RelayIngress bootstrap — exactly one Assignment across ticks and res
   const tick = (engine: RelayEngine) =>
     engine.resumeRelayContinuity(pairId as any, { context: 'AUTOMATED', actor: 'supervisor' });
 
-  const ingressRows = (db: Db) => all(db, 'SELECT * FROM relay_ingress WHERE stable_pair_id = ?', pairId);
+  /** One supervision tick for a Pair under test, independent of the suite-wide pairId. */
+  const tickOnce = (engine: RelayEngine, id: string) =>
+    engine.resumeRelayContinuity(id as any, { context: 'AUTOMATED', actor: 'supervisor' });
+
+  const ingressRows = (db: Db) => all(db, "SELECT * FROM relay_ingress WHERE stable_pair_id = ? AND state != 'superseded'", pairId);
   const assignmentCount = (db: Db) =>
     count(db, 'SELECT COUNT(*) AS c FROM assignments WHERE pair_id = ?', pairId);
 
@@ -174,19 +194,54 @@ describe('RelayIngress bootstrap — exactly one Assignment across ticks and res
     }
     const pair = await engine.createPair(project.id, 'Bootstrap Pair', planner.id, worker.id);
     pairId = pair.id;
+    // A restored/replaced Pair may retain an immutable anchor that differs from
+    // its current relational row ID. relay_ingress must satisfy its pairs(id) FK.
+    db.db.prepare('UPDATE pairs SET stable_pair_id=? WHERE id=?').run('immutable-pair-anchor',pairId);
     assert.strictEqual((await engine.loadAndActivate(pair.id)).outcome, 'activated');
     await engine.startPair(pair.id);
 
     const fresh = await db.pairs.findById(pair.id);
+    assert.notStrictEqual(fresh!.stableId,fresh!.id);
     assert.strictEqual(fresh!.operationalState, 'ACTIVE', 'pair is ACTIVE');
     assert.strictEqual(fresh!.relayState, 'RUNNING', 'pair is RUNNING');
     assert.ok(fresh!.activeAssignmentId == null, 'no active assignment to start');
     assert.strictEqual(count(db, 'SELECT COUNT(*) AS c FROM deliveries'), 0, 'no deliveries to start');
-    assert.strictEqual(count(db, 'SELECT COUNT(*) AS c FROM relay_ingress'), 0, 'no ingress to start');
+    assert.strictEqual(count(db, 'SELECT COUNT(*) AS c FROM relay_ingress'), 1, 'start establishes the ingress boundary');
+    assert.strictEqual(observer.armIssueCount, 1, 'start arms before returning control to the caller');
   });
 
   after(() => {
     try { rmSync(dir, { recursive: true, force: true }); } catch {}
+  });
+
+  it('mismatched arms/sessions and empty or unidentified turns cannot create work', async () => {
+    const { db, engine } = openEngine();
+    try {
+      for (const override of [
+        { armId: 'unrelated-arm' },
+        { conversationId: 'other-conversation' },
+        { completedTurnKey: null },
+        { responseText: '   ' },
+      ]) {
+        observer.bootstrapOverride = override;
+        const report = await tick(engine);
+        assert.notStrictEqual(report.decision, 'materialized');
+        assert.strictEqual(assignmentCount(db), 0);
+        assert.strictEqual(count(db, 'SELECT COUNT(*) AS c FROM deliveries'), 0);
+      }
+      assert.strictEqual(ingressRows(db).length, 1, 'one durable boundary across rejected turns');
+      assert.strictEqual(observer.armIssueCount, 1, 'rejected observations do not rebaseline');
+      db.db.prepare("UPDATE relay_ingress SET external_session_id='previous-planner-session' WHERE state='armed'").run();
+      observer.armedArmId=null; observer.bootstrapOverride={responseText:'   '};
+      await tick(engine);
+      assert.strictEqual(count(db,"SELECT COUNT(*) AS c FROM relay_ingress WHERE state='superseded'"),1,
+        'a boundary for the previous Planner session is retired');
+      assert.strictEqual(ingressRows(db).length,1,'one fresh boundary is established for the current Planner session');
+      assert.strictEqual(observer.armIssueCount,2,'the new Planner session receives its own arm');
+    } finally {
+      observer.bootstrapOverride = null;
+      db.close();
+    }
   });
 
   it('tick 1: exactly one ingress and one Assignment, carrying the exact post-arm text', async () => {
@@ -198,6 +253,8 @@ describe('RelayIngress bootstrap — exactly one Assignment across ticks and res
 
     const rows = ingressRows(db);
     assert.strictEqual(rows.length, 1, 'exactly one RelayIngress');
+    assert.deepEqual(observer.acknowledgedArmIds,[observer.armedArmId],
+      'durably materialized ingress releases its protected bridge evidence');
     assert.strictEqual(rows[0].state, 'materialized');
     assert.strictEqual(rows[0].provider_turn_identity, POST_ARM_KEY, 'stable provider turn identity');
     assert.strictEqual(rows[0].observed_text, POST_ARM_TEXT, 'exact observed Planner turn text');
@@ -246,7 +303,7 @@ describe('RelayIngress bootstrap — exactly one Assignment across ticks and res
     const attempts = Number(
       one(
         db,
-        'SELECT COUNT(*) AS c FROM attempts WHERE assignment_id = (SELECT materialized_assignment_id FROM relay_ingress WHERE stable_pair_id = ?)',
+        "SELECT COUNT(*) AS c FROM attempts WHERE assignment_id = (SELECT materialized_assignment_id FROM relay_ingress WHERE stable_pair_id = ? AND state='materialized')",
         pairId,
       ).c,
     );
@@ -279,5 +336,324 @@ describe('RelayIngress bootstrap — exactly one Assignment across ticks and res
       'latest_confirmed_delivery',
       'nothing may claim a baton without a confirmed Delivery',
     );
+  });
+
+  it('Start Pair fails when the observer bridge refuses the bootstrap arm', async () => {
+    // A bridge that throws on ensureBootstrapArmed simulates an unavailable observer.
+    // Start Pair must NOT transition the Pair to RUNNING — it must fail so the
+    // Planner's first turn cannot complete unattributed.
+    const failingObserver = {
+      async ensureBootstrapArmed() {
+        throw new Error('observer bridge unavailable');
+      },
+      async bootstrapStatus() { throw new Error('unreachable'); },
+      async acknowledgeBootstrapArm() { throw new Error('unreachable'); },
+    };
+    // Create a fresh engine with the failing observer for this test
+    const { db, engine } = openEngine();
+    engine['plannerObserver'] = failingObserver as any;
+
+    // Need a fresh pair that hasn't been started yet
+    const project = await engine.createProject('Bootstrap Failure Project');
+    const planner = new RuntimeSession({
+      id: createId('sess'),
+      providerType: 'chatgpt',
+      name: 'Planner',
+      status: 'available',
+      consecutiveObservationFailures: 0,
+      externalSessionId: 'conv-planner-failure',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const worker = new RuntimeSession({
+      id: createId('sess'),
+      providerType: 'opencode',
+      name: 'Worker',
+      status: 'available',
+      consecutiveObservationFailures: 0,
+      externalSessionId: 'ses_worker_failure',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await db.runtimes.save(planner);
+    await db.runtimes.save(worker);
+    for (const [i, s] of [planner, worker].entries()) {
+      await db.associations.save(
+        new RuntimeProjectAssociation({
+          id: `assoc_failure_${i}` as any,
+          runtimeSessionId: s.id,
+          projectId: project.id,
+          providerType: s.providerType,
+          externalSessionId: s.externalSessionId ?? '',
+          verificationState: 'verified',
+          provenance: 'setup',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        }),
+      );
+    }
+    const pair = await engine.createPair(project.id, 'Bootstrap Failure Pair', planner.id, worker.id);
+    const freshPairId = pair.id;
+    db.db.prepare('UPDATE pairs SET stable_pair_id=? WHERE id=?').run('immutable-pair-anchor-failure', freshPairId);
+    assert.strictEqual((await engine.loadAndActivate(freshPairId)).outcome, 'activated');
+
+    await assert.rejects(
+      engine.startPair(freshPairId as any),
+      (err: Error) => {
+        assert.match(err.message, /observer bridge unavailable/);
+        return true;
+      },
+      'Start Pair must throw when bootstrap arm cannot be established',
+    );
+
+    const fresh = await db.pairs.findById(freshPairId);
+    // Pair must remain with relayState STOPPED (not RUNNING) because the boundary was not established
+    assert.notStrictEqual(fresh!.relayState, 'RUNNING', 'Pair must not be RUNNING without bootstrap boundary');
+    assert.strictEqual(fresh!.relayState, 'STOPPED', 'Pair relayState remains STOPPED on bootstrap failure');
+    assert.ok(fresh!.activeAssignmentId == null, 'no Assignment was materialized');
+    // Ingress exists as the durable boundary record but has no armId (arm establishment failed)
+    const ingressRows = all(db, "SELECT * FROM relay_ingress WHERE stable_pair_id = ?", freshPairId);
+    assert.strictEqual(ingressRows.length, 1, 'ingress boundary record exists');
+    assert.strictEqual(ingressRows[0].arm_evidence_json, '{"armId":""}', 'ingress has no armId because arm establishment failed');
+    db.close();
+  });
+
+  it('Pair with existing work starts without observer and does not create bootstrap arm', async () => {
+    // A Pair that already has Assignments (existing work) should start without
+    // requiring the planner observer. The bootstrap path is skipped entirely.
+    const { db, engine } = openEngine();
+    // No observer injected — simulates non-Electron/test engine call sites.
+
+    const project = await engine.createProject('Existing Work Project');
+    const planner = new RuntimeSession({
+      id: createId('sess'),
+      providerType: 'chatgpt',
+      name: 'Planner',
+      status: 'available',
+      consecutiveObservationFailures: 0,
+      externalSessionId: 'conv-planner-existing',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const worker = new RuntimeSession({
+      id: createId('sess'),
+      providerType: 'opencode',
+      name: 'Worker',
+      status: 'available',
+      consecutiveObservationFailures: 0,
+      externalSessionId: 'ses_worker_existing',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await db.runtimes.save(planner);
+    await db.runtimes.save(worker);
+    for (const [i, s] of [planner, worker].entries()) {
+      await db.associations.save(
+        new RuntimeProjectAssociation({
+          id: `assoc_existing_${i}` as any,
+          runtimeSessionId: s.id,
+          projectId: project.id,
+          providerType: s.providerType,
+          externalSessionId: s.externalSessionId ?? '',
+          verificationState: 'verified',
+          provenance: 'setup',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        }),
+      );
+    }
+    const pair = await engine.createPair(project.id, 'Existing Work Pair', planner.id, worker.id);
+    const freshPairId = pair.id;
+    db.db.prepare('UPDATE pairs SET stable_pair_id=? WHERE id=?').run('immutable-pair-anchor-existing', freshPairId);
+    assert.strictEqual((await engine.loadAndActivate(freshPairId)).outcome, 'activated');
+
+    // Create pre-existing Assignment (simulates existing work/history)
+    const existingAssignment = Assignment.create(freshPairId, project.id, 'Pre-existing work', 'Do something');
+    existingAssignment.startAttempt(Attempt.create(existingAssignment.id, 1, {
+      sessionPairId: freshPairId,
+      workerSessionId: worker.id,
+      externalSessionId: worker.externalSessionId ?? null,
+    }));
+    await db.assignments.save(existingAssignment);
+    const freshPair = await db.pairs.findById(freshPairId);
+    freshPair!.assignWork(existingAssignment.id);
+    await db.pairs.save(freshPair!);
+
+    // Start Pair WITHOUT observer — should succeed because work exists
+    const started = await engine.startPair(freshPairId);
+    assert.strictEqual(started.relayState, 'RUNNING', 'Pair should become RUNNING');
+    assert.strictEqual(started.activeAssignmentId, existingAssignment.id, 'existing Assignment preserved');
+
+    // Verify no bootstrap ingress was created for this Pair
+    const ingressRows = all(db, "SELECT * FROM relay_ingress WHERE stable_pair_id = ?", freshPairId);
+    assert.strictEqual(ingressRows.length, 0, 'no bootstrap ingress created for Pair with existing work');
+
+    // Verify no observer calls were made (no arm establishment attempted)
+    // The observer is null, so if any call was made it would have thrown.
+    // Success here proves zero observer calls occurred.
+    db.close();
+  });
+
+  it('Start Pair with existing work preserves Assignment and does not reinterpret as bootstrap', async () => {
+    // The existing Assignment must not be replaced, duplicated, or have its
+    // instruction mutated by a bootstrap flow that never ran.
+    const { db, engine } = openEngine();
+    // No observer.
+
+    const project = await engine.createProject('Preserve Work Project');
+    const planner = new RuntimeSession({
+      id: createId('sess'),
+      providerType: 'chatgpt',
+      name: 'Planner',
+      status: 'available',
+      consecutiveObservationFailures: 0,
+      externalSessionId: 'conv-planner-preserve',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const worker = new RuntimeSession({
+      id: createId('sess'),
+      providerType: 'opencode',
+      name: 'Worker',
+      status: 'available',
+      consecutiveObservationFailures: 0,
+      externalSessionId: 'ses_worker_preserve',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await db.runtimes.save(planner);
+    await db.runtimes.save(worker);
+    for (const [i, s] of [planner, worker].entries()) {
+      await db.associations.save(
+        new RuntimeProjectAssociation({
+          id: `assoc_preserve_${i}` as any,
+          runtimeSessionId: s.id,
+          projectId: project.id,
+          providerType: s.providerType,
+          externalSessionId: s.externalSessionId ?? '',
+          verificationState: 'verified',
+          provenance: 'setup',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        }),
+      );
+    }
+    const pair = await engine.createPair(project.id, 'Preserve Work Pair', planner.id, worker.id);
+    const freshPairId = pair.id;
+    db.db.prepare('UPDATE pairs SET stable_pair_id=? WHERE id=?').run('immutable-pair-anchor-preserve', freshPairId);
+    assert.strictEqual((await engine.loadAndActivate(freshPairId)).outcome, 'activated');
+
+    // Create pre-existing Assignment with specific instruction
+    const originalInstruction = 'Original task: build the feature';
+    const existingAssignment = Assignment.create(freshPairId, project.id, 'Original', originalInstruction);
+    existingAssignment.startAttempt(Attempt.create(existingAssignment.id, 1, {
+      sessionPairId: freshPairId,
+      workerSessionId: worker.id,
+      externalSessionId: worker.externalSessionId ?? null,
+    }));
+    await db.assignments.save(existingAssignment);
+    const freshPair = await db.pairs.findById(freshPairId);
+    freshPair!.assignWork(existingAssignment.id);
+    await db.pairs.save(freshPair!);
+
+    await engine.startPair(freshPairId);
+
+    // Original Assignment must be unchanged
+    const assignment = await db.assignments.findById(existingAssignment.id);
+    assert.ok(assignment, 'original Assignment still exists');
+    assert.strictEqual(assignment!.title, 'Original', 'Assignment title unchanged');
+    assert.strictEqual(assignment!.instruction, originalInstruction, 'Assignment instruction unchanged');
+    // startPair advances orchestration, which promotes the existing pending Assignment to active
+    assert.strictEqual(assignment!.status, 'active', 'existing Assignment promoted to active by startPair');
+    assert.strictEqual((await db.pairs.findById(freshPairId))!.activeAssignmentId, existingAssignment.id);
+
+    // No new Assignment created
+    const allAssignments = await db.assignments.findByPairId(freshPairId);
+    assert.strictEqual(allAssignments.length, 1, 'no duplicate Assignment created');
+
+    // No bootstrap ingress
+    const ingressRows = all(db, "SELECT * FROM relay_ingress WHERE stable_pair_id = ?", freshPairId);
+    assert.strictEqual(ingressRows.length, 0, 'no bootstrap ingress');
+
+    db.close();
+  });
+
+  it('a persisted arm missing from the ledger raises ONE deduplicated recovery alert and no Assignment', async () => {
+    // The bridge answers, but its ledger holds no arm matching the one this ingress recorded.
+    // That boundary can never yield a completion, so the engine must surface it exactly once.
+    let bootstrapStatusCalls = 0;
+    const absentArmObserver = {
+      async ensureBootstrapArmed(conversationId: string) {
+        return { armId: 'arm_recorded_in_the_database', conversationId, reused: false };
+      },
+      async bootstrapStatus(conversationId: string, armId: string) {
+        bootstrapStatusCalls++;
+        return {
+          available: true, unavailableReason: null, conversationId, armId,
+          armActive: false, working: false, completion: null,
+          lastState: 'arm_absent_from_ledger', lastObservedAt: new Date().toISOString(),
+          recoveryRequired: true,
+          recoveryReason: `Persisted bootstrap arm '${armId}' is absent from a reachable observer bridge ledger for conversation '${conversationId}'. The boundary recorded by this ingress can no longer produce a completion; manual reconciliation required.`,
+        };
+      },
+      async acknowledgeBootstrapArm() {},
+    };
+    const { db, engine } = openEngine();
+    engine['plannerObserver'] = absentArmObserver as any;
+
+    const project = await engine.createProject('Absent Arm Project');
+    const planner = new RuntimeSession({
+      id: createId('sess'), providerType: 'chatgpt', name: 'Planner', status: 'available',
+      consecutiveObservationFailures: 0, externalSessionId: 'conv-absent-arm',
+      createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    const worker = new RuntimeSession({
+      id: createId('sess'), providerType: 'opencode', name: 'Worker', status: 'available',
+      consecutiveObservationFailures: 0, externalSessionId: 'ses-absent-arm',
+      createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    await db.runtimes.save(planner);
+    await db.runtimes.save(worker);
+    for (const [i, s] of [planner, worker].entries()) {
+      await db.associations.save(new RuntimeProjectAssociation({
+        id: `assoc_absent_${i}` as any, runtimeSessionId: s.id, projectId: project.id,
+        providerType: s.providerType, externalSessionId: s.externalSessionId ?? '',
+        verificationState: 'verified', provenance: 'setup', createdAt: Date.now(), updatedAt: Date.now(),
+      }));
+    }
+    const pair = await engine.createPair(project.id, 'Absent Arm Pair', planner.id, worker.id);
+    const pairId = pair.id;
+    assert.strictEqual((await engine.loadAndActivate(pairId)).outcome, 'activated');
+    await engine.startPair(pairId);
+
+    // Start alone arms but does not poll, so no alert exists yet.
+    assert.strictEqual(
+      (await db.attention.findOpen()).filter(i => i.type === 'bootstrap_recovery_required').length, 0,
+      'arming alone must not raise a recovery alert');
+
+    // Each supervision tick observes the same unrecoverable gap.
+    for (let tick = 0; tick < 3; tick++) await tickOnce(engine, pairId);
+
+    const alerts = (await db.attention.findOpen()).filter(i => i.type === 'bootstrap_recovery_required');
+    assert.strictEqual(alerts.length, 1,
+      'the whole episode is ONE attention item; re-raising per tick would bury the queue');
+    assert.strictEqual(alerts[0]!.pairId, pairId, 'scoped to the affected Pair');
+    assert.strictEqual(alerts[0]!.severity, 'critical');
+    assert.match(alerts[0]!.title, /missing from the observer ledger/i,
+      'the title must describe an absent arm, not a consumed one');
+    assert.match(alerts[0]!.message, /arm_recorded_in_the_database/,
+      'the alert must name the exact arm an operator has to reconcile');
+    assert.ok(bootstrapStatusCalls >= 3, 'every tick re-observed the gap');
+
+    // And critically: nothing was fabricated to paper over it.
+    assert.strictEqual(
+      count(db, 'SELECT COUNT(*) AS c FROM assignments WHERE pair_id = ?', pairId), 0,
+      'no Assignment may be invented for a lost boundary');
+    assert.strictEqual(count(db, 'SELECT COUNT(*) AS c FROM deliveries WHERE assignment_id IN ' +
+      '(SELECT id FROM assignments WHERE pair_id = ?)', pairId), 0, 'and no Delivery');
+    const ingressRows = all(db, "SELECT * FROM relay_ingress WHERE stable_pair_id = ?", pairId);
+    assert.strictEqual(ingressRows.length, 1, 'the ingress root itself is untouched');
+    assert.strictEqual(ingressRows[0].state, 'armed', 'and it is not falsely marked materialized');
+    db.close();
   });
 });

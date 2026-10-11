@@ -55,6 +55,10 @@ export interface PlannerObserverStatus {
   /** Latest observer state string, for the trail: identity|armed|working|finished|unreadable|... */
   lastState: string | null;
   lastObservedAt: string | null;
+  /** True when the bridge reports a consumed-but-uncompleted arm (restart gap). */
+  recoveryRequired: boolean;
+  /** Reason for recoveryRequired, if applicable. */
+  recoveryReason: string | null;
 }
 
 interface RawObservation {
@@ -70,11 +74,146 @@ interface RawObservation {
   reason?: string;
   generatingControlCount?: number;
   finishedControlCount?: number;
+  observerInstanceId?: string | null;
 }
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8791';
 
 export class PlannerObserverClient {
+  /** Bootstrap arms belong to ingress roots, never to fabricated Deliveries. */
+  async ensureBootstrapArmed(conversationId: string, ingressId: string): Promise<PlannerObserverArm> {
+    const health = await this.request<{ allArms?: Array<{ armId: string; conversationId: string; ingressId?: string }> }>('GET', '/health');
+    // A retired arm remains the boundary for this root. Never rebaseline it.
+    const existing = health.allArms?.filter(a => a.conversationId === conversationId && a.ingressId === ingressId).pop();
+    if (existing) return { armId: existing.armId, conversationId, reused: true };
+    const res = await this.request<{ ok: boolean; armId?: string }>('POST', '/arm', { conversationId, ingressId, note: 'bootstrap ingress' });
+    if (!res.ok || !res.armId) throw new Error('observer bridge refused bootstrap arm');
+    return { armId: res.armId, conversationId, reused: false };
+  }
+
+  /**
+   * Match the persisted arm exactly, even if the bridge ledger was restarted.
+   *
+   * The five states are distinguished deliberately, because collapsing any two of them
+   * strands the Pair:
+   *
+   *   bridge unreachable            -> available:false  ("could not check")
+   *   arm absent from a REACHABLE ledger -> recoveryRequired (the log was rotated, moved,
+   *                                        or the bridge started fresh; the boundary this
+   *                                        ingress recorded no longer exists, so no
+   *                                        completion for that arm can EVER arrive)
+   *   arm present and completed      -> completion recovery, honoured from the ledger
+   *   arm present, consumed, open    -> still waiting; the extension owes us `finished`
+   *   arm present, open              -> armed and undelivered; normal active status
+   *
+   * The absent case must never resolve to `armActive: true`. Reporting an arm the bridge
+   * does not have as active makes RelayX wait forever for a `finished` that can never be
+   * recorded, with no re-arm and no operator alert. It also must NOT re-arm here: minting a
+   * replacement boundary would silently rebaseline over a possibly-completed Planner turn.
+   */
+  async bootstrapStatus(conversationId: string, armId: string): Promise<PlannerObserverStatus> {
+    // Read-only ledger inspection. `/health` and `/all` never deliver an arm and never persist state.
+    let ledger: {
+      arms?: Array<{ armId: string; conversationId: string; consumed?: boolean; completed?: boolean; recoveryRequired?: boolean; recoveryReason?: string; observerInstanceId?: string | null; observerInstanceRestarted?: boolean; observerUnconfirmedAt?: string | null; observerUnconfirmedReason?: string | null }>;
+      allArms?: Array<{ armId: string; conversationId: string; completed?: boolean; observerInstanceId?: string | null }>;
+    };
+    try {
+      ledger = await this.request('GET', '/health');
+    } catch (err) {
+      // Unreachable bridge is NOT ledger loss. "Could not check" must never be reported as
+      // a missing arm, or a transient outage would raise a false recovery alert.
+      return {
+        available: false, unavailableReason: (err as Error).message, conversationId, armId,
+        armActive: false, working: false, completion: null,
+        lastState: null, lastObservedAt: null,
+        recoveryRequired: false, recoveryReason: null,
+      };
+    }
+
+    // Observation evidence is consulted FIRST, and it outranks the arm registry. A `finished`
+    // record is what the observer actually reported, so it survives losing the registry; the
+    // registry only records whether the arm is still tracked. Discarding a real completion
+    // because `/health` forgot its arm would silently drop a Planner turn that really happened.
+    const { observations } = await this.request<{ observations: RawObservation[] }>(
+      'GET', `/all?conversationId=${encodeURIComponent(conversationId)}`,
+    );
+    const matching = (observations ?? []).filter(o => o.conversationId === conversationId && o.armId === armId);
+    // A finished observation must come from the same observer instance that was
+    // delivered the arm. A different instance's finished record is rejected evidence
+    // and must not count as a valid completion (fix #4240058688). If the arm row is
+    // no longer active but the durable ledger still retains its identity, prefer that
+    // authoritative record over accepting an arbitrary finished report.
+    const armRows = [...(ledger.arms ?? []), ...(ledger.allArms ?? [])];
+    const armInstance = armRows.find(a => a.armId === armId)?.observerInstanceId ?? null;
+    const finished = matching.filter((o) => {
+      if (o.state !== 'finished') return false;
+      const observedInstance = typeof o.observerInstanceId === 'string' ? o.observerInstanceId.trim() : '';
+      if (!armInstance) return false;
+      if (!observedInstance) return false;
+      return observedInstance === armInstance;
+    }).pop();
+    const latest = matching[matching.length - 1];
+    if (finished) {
+      return {
+        available: true, unavailableReason: null, conversationId, armId,
+        // A completed arm is no longer active, whatever the registry still lists.
+        armActive: false, working: latest?.state === 'working',
+        completion: {
+          armId, conversationId, responseText: String(finished.latestCompletedResponse ?? ''),
+          responseHash: String(finished.responseHash ?? ''), responseLength: Number(finished.responseLength ?? 0),
+          completedTurnKey: finished.completedTurnKey ?? null, observedAt: String(finished.observedAt ?? ''),
+          adoptedFromUnresolvableArm: false,
+        },
+        lastState: latest?.state ?? null, lastObservedAt: latest?.observedAt ?? null,
+        recoveryRequired: false, recoveryReason: null,
+      };
+    }
+
+    // No completion evidence. Now classify why the boundary is still outstanding.
+    const row = (ledger.arms ?? []).find(a => a.armId === armId && a.conversationId === conversationId);
+    const retained = (ledger.allArms ?? []).find(a => a.armId === armId && a.conversationId === conversationId);
+
+    // Absent from a REACHABLE ledger, with nothing completed: the recorded boundary is gone for
+    // good, so no `finished` can ever arrive. Reporting it active would stall the Pair forever.
+    if (!row && !retained) {
+      return {
+        available: true, unavailableReason: null, conversationId, armId,
+        armActive: false, working: latest?.state === 'working', completion: null,
+        lastState: 'arm_absent_from_ledger', lastObservedAt: latest?.observedAt ?? new Date().toISOString(),
+        recoveryRequired: true,
+        recoveryReason:
+          `Persisted bootstrap arm '${armId}' is absent from a reachable observer bridge ledger for ` +
+          `conversation '${conversationId}', and no completed turn was recorded for it. The boundary ` +
+          'recorded by this ingress can no longer produce a completion; manual reconciliation required.',
+      };
+    }
+
+    // Consumed but never completed: the restart gap the previous fix surfaced.
+    if (row?.recoveryRequired) {
+      return {
+        available: true, unavailableReason: null, conversationId, armId,
+        armActive: false, working: latest?.state === 'working', completion: null,
+        lastState: 'recovery_required', lastObservedAt: latest?.observedAt ?? new Date().toISOString(),
+        recoveryRequired: true,
+        recoveryReason: row.recoveryReason ?? 'bootstrap arm consumed but never completed',
+      };
+    }
+
+    // Present and open: still legitimately waiting for the extension to report `finished`.
+    return {
+      available: true, unavailableReason: null, conversationId, armId,
+      armActive: true, working: latest?.state === 'working', completion: null,
+      lastState: latest?.state ?? null, lastObservedAt: latest?.observedAt ?? null,
+      recoveryRequired: false, recoveryReason: null,
+    };
+  }
+
+  /** Release protected in-memory completion evidence only after RelayX commits it durably. */
+  async acknowledgeBootstrapArm(armId: string): Promise<void> {
+    const result = await this.request<{ ok: boolean }>('POST', '/consume-arm', { armId });
+    if (!result.ok) throw new Error('observer bridge refused bootstrap acknowledgement');
+  }
+
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
 
@@ -124,7 +263,7 @@ export class PlannerObserverClient {
   }
 
   private async armLedger(conversationId: string): Promise<
-    Array<{ armId: string; deliveryId: string | null; completed: boolean; issuedAt: string | null }>
+    Array<{ armId: string; deliveryId: string | null; completed: boolean; issuedAt: string | null; observerInstanceId: string | null }>
   > {
     const health = await this.request<{
       allArms?: Array<{
@@ -133,8 +272,9 @@ export class PlannerObserverClient {
         deliveryId: string | null;
         completed?: boolean;
         issuedAt?: string;
+        observerInstanceId?: string | null;
       }>;
-      arms?: Array<{ armId: string; conversationId: string; deliveryId?: string | null; completed?: boolean }>;
+      arms?: Array<{ armId: string; conversationId: string; deliveryId?: string | null; completed?: boolean; observerInstanceId?: string | null; issuedAt?: string }>;
     }>('GET', '/health');
     const rows = health.allArms ?? health.arms ?? [];
     return rows
@@ -144,6 +284,7 @@ export class PlannerObserverClient {
         deliveryId: a.deliveryId ?? null,
         completed: a.completed === true,
         issuedAt: (a as { issuedAt?: string }).issuedAt ?? null,
+        observerInstanceId: typeof a.observerInstanceId === 'string' ? a.observerInstanceId.trim() || null : null,
       }));
   }
 
@@ -199,6 +340,8 @@ export class PlannerObserverClient {
       completion: null,
       lastState: null,
       lastObservedAt: null,
+      recoveryRequired: false,
+      recoveryReason: null,
     };
     let observations: RawObservation[];
     let arm: { armId: string; completed: boolean } | null;
@@ -207,6 +350,7 @@ export class PlannerObserverClient {
       deliveryId: string | null;
       completed: boolean;
       issuedAt: string | null;
+      observerInstanceId?: string | null;
     }>;
     try {
       const all = await this.request<{ observations: RawObservation[] }>(
@@ -220,6 +364,20 @@ export class PlannerObserverClient {
       return { ...unavailable, unavailableReason: (err as Error).message };
     }
 
+    // Check /health for recoveryRequired (consumed-but-uncompleted arm after restart).
+    // This is a READ-ONLY endpoint — it does not mutate arm state or deliver arms.
+    // Only applies to bootstrap arms where deliveryId is the ingressId.
+    const health = await this.request<{ arms?: Array<{ armId: string; conversationId: string; consumed: boolean; completed: boolean; recoveryRequired?: boolean; recoveryReason?: string; observerInstanceId?: string | null }>; allArms?: Array<{ armId: string; conversationId: string; observerInstanceId?: string | null }> }>('GET', '/health');
+    const armInfo = health.arms?.find(a => a.conversationId === conversationId && a.recoveryRequired);
+    if (armInfo?.recoveryRequired) {
+      return {
+        available: true, unavailableReason: null, conversationId, armId: armInfo.armId,
+        armActive: false, working: false, completion: null,
+        lastState: 'recovery_required', lastObservedAt: new Date().toISOString(),
+        recoveryRequired: true, recoveryReason: armInfo.recoveryReason ?? 'bootstrap arm consumed but never completed',
+      };
+    }
+
     const latest = observations[observations.length - 1] ?? null;
     // Only a completion produced by an arm THIS Delivery created counts, whether or not that arm
     // is still current. The observer finishing retires its arm in the same instant, and the
@@ -229,24 +387,39 @@ export class PlannerObserverClient {
     const armIdsForThisDelivery = new Set(
       ledger.filter((a) => a.deliveryId === deliveryId).map((a) => a.armId),
     );
+    const armIdentityById = new Map(
+      [...(health.allArms ?? []), ...(health.arms ?? [])]
+        .filter((a) => typeof a.armId === 'string')
+        .map((a) => [a.armId, (a as { observerInstanceId?: string | null }).observerInstanceId ?? null]),
+    );
     const attributed = observations
-      .filter((o) => o.state === 'finished' && o.armId && armIdsForThisDelivery.has(String(o.armId)))
+      .filter((o) => {
+        if (o.state !== 'finished' || !o.armId || !armIdsForThisDelivery.has(String(o.armId))) return false;
+        const armInstance = armIdentityById.get(String(o.armId));
+        if (!armInstance) return false;
+        const observedInstance = typeof o.observerInstanceId === 'string' ? o.observerInstanceId.trim() : '';
+        if (!observedInstance) return false;
+        return observedInstance === armInstance;
+      })
       .pop();
 
     // A completion whose arm the ledger cannot resolve happens when the observer was armed
     // against an EARLIER bridge process and outlived it. The turn really did complete, so it is
-    // adopted — but only if it was observed AFTER this Delivery's arm was issued. That bound is
-    // what makes adoption safe: a stale completion necessarily predates any later arm, so it can
-    // never be stolen by the NEXT baton.
+    // adopted — but only if it was observed AFTER this Delivery's arm was issued and from the
+    // same authoritative observer instance that was delivered the arm. If the arm never bound an
+    // observer identity, no completion is trusted from that boundary.
     const currentArm = ledger.filter((a) => a.deliveryId === deliveryId).pop() ?? null;
+    const currentArmInstance = currentArm?.observerInstanceId ?? armIdentityById.get(currentArm?.armId ?? '') ?? null;
     const issuedAtMs = currentArm?.issuedAt ? Date.parse(currentArm.issuedAt) : Number.NaN;
     const unattributed =
-      attributed || !Number.isFinite(issuedAtMs)
+      attributed || !Number.isFinite(issuedAtMs) || !currentArmInstance
         ? null
         : (observations
             .filter((o) => {
               if (o.state !== 'finished' || !o.armId) return false;
               if (armIdsForThisDelivery.has(String(o.armId))) return false;
+              const thisInstance = typeof o.observerInstanceId === 'string' ? o.observerInstanceId.trim() : '';
+              if (!thisInstance || thisInstance !== currentArmInstance) return false;
               const at = Date.parse(String(o.observedAt ?? ''));
               return Number.isFinite(at) && at > issuedAtMs;
             })
@@ -278,6 +451,8 @@ export class PlannerObserverClient {
         : null,
       lastState: latest?.state ?? null,
       lastObservedAt: latest?.observedAt ?? null,
+      recoveryRequired: false,
+      recoveryReason: null,
     };
   }
 }

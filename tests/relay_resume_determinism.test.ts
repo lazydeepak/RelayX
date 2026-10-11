@@ -89,6 +89,48 @@ function openProcess(
   workerProvider.adoptTranscript(carry?.worker ?? []);
   engine.registerProvider(plannerProvider);
   engine.registerProvider(workerProvider);
+
+  // Provide a stub planner observer so Start Pair can establish its bootstrap arm
+  // and so baton evaluation can observe the Planner via the observer path.
+  const stubObserver = {
+    armedArmId: null as string | null,
+    async ensureBootstrapArmed(conversationId: string) {
+      if (!this.armedArmId) this.armedArmId = `arm_${Date.now()}`;
+      return { armId: this.armedArmId, conversationId, reused: false };
+    },
+    async bootstrapStatus() {
+      return {
+        available: true, unavailableReason: null, conversationId: '', armId: this.armedArmId,
+        armActive: false, working: false, completion: null, lastState: null, lastObservedAt: null
+      };
+    },
+    async acknowledgeBootstrapArm() {},
+    // Methods for observePlannerWithObserver (used during baton evaluation)
+    async ensureArmed(conversationId: string, note: string, deliveryId: string) {
+      if (!this.armedArmId) this.armedArmId = `arm_${Date.now()}`;
+      return { armId: this.armedArmId, conversationId, reused: false };
+    },
+    async status(conversationId: string, deliveryId: string) {
+      return {
+        available: true, unavailableReason: null, conversationId,
+        armId: this.armedArmId, armActive: false, working: this.isWorking ?? false,
+        completion: this.isComplete ? {
+          armId: this.armedArmId, conversationId,
+          responseText: this.responseSummary ?? 'Task completed.',
+          responseHash: 'sha256_mock', responseLength: (this.responseSummary ?? '').length,
+          completedTurnKey: 'mock-turn-key', observedAt: new Date().toISOString(),
+          adoptedFromUnresolvableArm: false
+        } : null,
+        lastState: this.isWorking ? 'working' : (this.isComplete ? 'finished' : 'identity'),
+        lastObservedAt: new Date().toISOString(),
+      };
+    },
+    isWorking: false,
+    isComplete: false,
+    responseSummary: 'Task completed successfully.',
+  };
+  engine['plannerObserver'] = stubObserver as any;
+
   return { db, engine, plannerProvider, workerProvider };
 }
 
@@ -108,6 +150,10 @@ async function bootstrapPair(f: { db: SqliteRelayDatabase; engine: RelayEngine }
 
   assert.equal((await f.engine.loadAndActivate(pair.id)).outcome, 'activated');
   await f.engine.startPair(pair.id);
+  // Remove the planner observer after Start Pair so baton evaluation uses the
+  // transcript read path (which these tests were written for) rather than the
+  // observer path which assumes "armed but no completion = in flight".
+  f.engine['plannerObserver'] = null;
   return pair.id;
 }
 
@@ -127,13 +173,17 @@ function haltProcess(f: Fixture): void {
 
 /** Re-open the SAME durable state in a new process. */
 function resumeProcess(f: Fixture): Fixture {
-  return {
+  const resumed = {
     ...f,
     ...openProcess(f.dbPath, {
       planner: f.plannerProvider.messages,
       worker: f.workerProvider.messages,
     }),
   };
+  // The resumed process doesn't need the planner observer (no Start Pair called).
+  // Remove it so baton evaluation uses the transcript read path.
+  resumed.engine['plannerObserver'] = null;
+  return resumed;
 }
 
 /** Confirmed deliveries recorded for one Assignment, oldest first. */

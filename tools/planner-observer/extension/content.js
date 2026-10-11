@@ -44,6 +44,16 @@
   if (window.__relayxPlannerObserverV1) return;
   window.__relayxPlannerObserverV1 = true;
 
+  // Verifiable observer-instance identity: each content-script lifecycle gets
+  // its own identity. A tab reload or extension reload creates a new instance,
+  // and the bridge can distinguish historical observations from the current one.
+  const observerInstanceId = (function () {
+    const bytes = new Uint8Array(12);
+    if (typeof crypto !== 'undefined' && crypto.getRandomValues) crypto.getRandomValues(bytes);
+    else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  })();
+
   const WORKER_TARGET = 'relayx-planner-observer';
 
   // ---------------------------------------------------------------- selectors
@@ -86,6 +96,7 @@
     observer: null,
     pollTimer: null,
     flushTimer: null,
+    heartbeatTimer: null,
     unreadableStreak: 0,
   };
 
@@ -319,6 +330,7 @@
       pageUrl: S.pageUrl,
       observedAt: new Date().toISOString(),
       observer: 'relayx-planner-observer/0.2.0-keyed-turns',
+      observerInstanceId,
       armId: S.armId,
       // Proof that monitoring needs no UI: nothing here reads a window or tab state, and the
       // document was never focused by the observer.
@@ -374,7 +386,10 @@
       // running with whatever identity it derived at load time. Re-derive whenever the page's
       // OWN url changes. This is what keeps identity from silently going stale.
       if (location.href !== S.pageUrl) refreshIdentity();
-      const cmd = await sendToWorker('next-command', { conversationId: S.conversationId });
+      const cmd = await sendToWorker('next-command', {
+        conversationId: S.conversationId,
+        observerInstanceId: observerInstanceId,
+      });
       if (cmd && cmd.ok && cmd.armed && cmd.armId && cmd.armId !== S.armId) {
         arm(cmd);
       }
@@ -386,6 +401,52 @@
   function stopPoll() {
     if (S.pollTimer) clearInterval(S.pollTimer);
     S.pollTimer = null;
+  }
+
+  function stopHeartbeat() {
+    if (S.heartbeatTimer) clearInterval(S.heartbeatTimer);
+    S.heartbeatTimer = null;
+  }
+
+  function maybeStartHeartbeat() {
+    if (S.heartbeatTimer || !S.armed || !S.armId) return;
+    S.heartbeatTimer = setInterval(() => {
+      if (!S.armed || !S.armId) return stopHeartbeat();
+      const gen = readGenerating();
+      const conv = readConversation();
+
+      // The arm is the real liveness lease. If the model is idle, we still need to tell the
+      // bridge we are alive and still bound to this exact observer instance; otherwise a long
+      // wait between DOM changes is mistaken for a restart gap.
+      if (gen.unreadable || !gen.generating) {
+        void report('armed', {
+          heartbeat: true,
+          generatingSignal: gen.signal,
+          generatingControlLabel: gen.controlLabel,
+          generatingControlCount: gen.controlCount,
+          observedConversationOk: conv.ok,
+          observedConversationTurns: conv.ok ? conv.turns.length : 0,
+          trackedTurnKey: S.trackedKey,
+          note: 'armed but idle heartbeat; no generation signal yet',
+        });
+        return;
+      }
+      if (!conv.ok || !conv.turns) return;
+      const newAssistantTurns = conv.turns.filter(
+        (t) => t.role === 'assistant' && t.turnKey !== null && !S.baselineKeys.has(t.turnKey),
+      );
+      void report('working', {
+        generatingSignal: gen.signal,
+        generatingControlLabel: gen.controlLabel,
+        generatingControlCount: gen.controlCount,
+        newAssistantTurnCount: newAssistantTurns.length,
+        trackedTurnKey: S.trackedKey,
+        streamedCharsSoFar: newAssistantTurns.length
+          ? newAssistantTurns[newAssistantTurns.length - 1].text.length
+          : 0,
+        heartbeat: true,
+      });
+    }, 7000);
   }
 
   // ----------------------------------------------------------------------- arming
@@ -429,6 +490,8 @@
 
     stopPoll();
     startObserver();
+    stopHeartbeat();
+    maybeStartHeartbeat();
 
     void report('armed', {
       requestedConversationId: cmd.requestedConversationId,
@@ -451,6 +514,7 @@
     S.trackedKey = null;
     S.sawGenerating = false;
     S.reportedWorking = false;
+    stopHeartbeat();
     stopObserver();
     startPoll();
     void report('disarmed', { reason: reason ?? 'completion reported' });
@@ -551,11 +615,13 @@
             : 0,
         });
       }
+      maybeStartHeartbeat();
       return;
     }
 
-    // Not generating. Only a stop AFTER we actually saw it generating produces a completion;
-    // otherwise this is an idle tick and says nothing about any delivery.
+    // Not generating. Ordinary idle DOM churn is not a completion signal, and it must not
+    // cancel the active heartbeat while the arm remains valid. A heartbeat only stops on an
+    // actual completion, disarm, or authoritative observer-state loss.
     if (S.sawGenerating && S.reportedWorking) {
       if (!newAssistantTurns.length) {
         void report('unreadable', {

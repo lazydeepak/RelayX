@@ -405,6 +405,12 @@ CREATE TABLE IF NOT EXISTS handoffs (
     addColumnIfNeeded(this.db, 'pairs', 'relay_state', "TEXT NOT NULL DEFAULT 'STOPPED'");
     addColumnIfNeeded(this.db, 'pairs', 'stable_pair_id', 'TEXT');
 
+    // Repair files already stamped v6 by the former Plan-First migration,
+    // which skipped the v4 backfill. Fill only missing anchors; preserve
+    // existing identities and operational permissions on every reopen.
+    this.db.exec(`UPDATE pairs SET stable_pair_id = id
+      WHERE stable_pair_id IS NULL OR stable_pair_id = '';`);
+
     addColumnIfNeeded(this.db, 'assignments', 'current_attempt_id', 'TEXT');
     addColumnIfNeeded(this.db, 'assignments', 'active_delivery_id', 'TEXT');
     addColumnIfNeeded(this.db, 'assignments', 'active_handoff_id', 'TEXT');
@@ -566,6 +572,7 @@ CREATE TABLE IF NOT EXISTS handoffs (
     this.migrateSideObservationSchema();
     this.migrateSideCheckpointSchema();
     this.migrateProviderSettingsSchema();
+    this.ensureRelayIngressSchema();
 
     // Phase 1 health domain tables (additive only)
     this.db.exec(`
@@ -973,7 +980,13 @@ CREATE TABLE IF NOT EXISTS handoffs (
         ON verification_results(attempt_id)`);
     }
 
-    // --- relay_ingress: durable bootstrap root (schema v5) ---
+    // relay_ingress is repaired unconditionally after all version-gated migrations.
+    // Keeping creation here would skip databases already stamped v3 or later.
+
+    this.db.exec('PRAGMA user_version = 3;');
+  }
+
+  private ensureRelayIngressSchema(): void {
     this.db.exec(`CREATE TABLE IF NOT EXISTS relay_ingress (
       ingress_id TEXT PRIMARY KEY,
       stable_pair_id TEXT NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,
@@ -992,8 +1005,6 @@ CREATE TABLE IF NOT EXISTS handoffs (
       UNIQUE (stable_pair_id, source_side, external_session_id, provider_turn_identity)
     );`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_relay_ingress_pair_state ON relay_ingress(stable_pair_id, state)`);
-
-    this.db.exec('PRAGMA user_version = 5;');
   }
 
   public async runInTransaction<T>(work: () => Promise<T>): Promise<T> {

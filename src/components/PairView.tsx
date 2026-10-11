@@ -617,9 +617,7 @@ export const PairView: React.FC<PairViewProps> = ({
                               plannerUrl ? (
                                 <button
                                   type="button"
-                                  onClick={() => {
-                                    if (plannerUrl) window.open(plannerUrl, '_blank', 'noopener,noreferrer');
-                                  }}
+                                  onClick={() => onOpenPlannerSession(pair.plannerSessionId!)}
                                   disabled={!plannerUrl}
                                   className="px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-[10px] font-semibold flex items-center gap-1 transition-colors"
                                   title={`Open the exact attached ChatGPT conversation in your browser: ${plannerUrl || 'none'}`}

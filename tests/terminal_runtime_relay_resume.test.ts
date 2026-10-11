@@ -69,6 +69,23 @@ async function fixture(): Promise<Fx> {
   engine.registerProvider(planner);
   engine.registerProvider(worker);
 
+  // Provide a stub planner observer so Start Pair can establish its bootstrap arm
+  const stubObserver = {
+    armedArmId: null as string | null,
+    async ensureBootstrapArmed(conversationId: string) {
+      if (!this.armedArmId) this.armedArmId = `arm_${Date.now()}`;
+      return { armId: this.armedArmId, conversationId, reused: false };
+    },
+    async bootstrapStatus() {
+      return {
+        available: true, unavailableReason: null, conversationId: '', armId: this.armedArmId,
+        armActive: false, working: false, completion: null, lastState: null, lastObservedAt: null
+      };
+    },
+    async acknowledgeBootstrapArm() {},
+  };
+  engine['plannerObserver'] = stubObserver as any;
+
   const project = await engine.createProject('Terminal Runtime Project');
   const plannerRuntime = await engine.registerRuntimeSession('chatgpt', 'Planner');
   const workerRuntime = await engine.registerRuntimeSession('opencode', 'Worker');
@@ -79,6 +96,10 @@ async function fixture(): Promise<Fx> {
   await db.runtimes.save(workerRuntime);
   await engine.loadAndActivate(pair.id);
   await engine.startPair(pair.id);
+  // Remove the planner observer after Start Pair so baton evaluation uses the
+  // transcript read path (which these tests were written for) rather than the
+  // observer path which assumes "armed but no completion = in flight".
+  engine['plannerObserver'] = null;
 
   return {
     db,

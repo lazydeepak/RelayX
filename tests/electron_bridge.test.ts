@@ -49,7 +49,8 @@ describe('Electron IPC & RelayApiService Integration Tests', () => {
     const vscode = new VSCodeProvider();
 
     assert.equal(chatgpt.integrationStatus, 'partial');
-    assert.equal(opencode.integrationStatus, 'partial');
+    const openCodeStatus = process.platform === 'darwin' ? 'partial' : 'unsupported';
+    assert.equal(opencode.integrationStatus, openCodeStatus);
     assert.equal(vscode.integrationStatus, 'partial');
 
     engine.registerProvider(chatgpt);
@@ -62,7 +63,7 @@ describe('Electron IPC & RelayApiService Integration Tests', () => {
     assert.equal(r1.integrationStatus, 'partial');
 
     const r2 = await api.registerRuntimeSession('opencode', 'OpenCode CLI');
-    assert.equal(r2.integrationStatus, 'partial');
+    assert.equal(r2.integrationStatus, openCodeStatus);
 
     const list = await api.listRuntimeSessions();
     assert.equal(list.length, 2);

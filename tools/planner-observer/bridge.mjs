@@ -66,9 +66,165 @@ const arms = new Map();
  * finished response would lose its Delivery attribution and be discarded as if it never existed.
  */
 const allArms = [];
+const armsById = new Map();
 /** Every observation, in arrival order. */
 const observations = [];
 const MAX_OBSERVATIONS = 5000;
+let nextObservationSeq = 1;
+/** Durable observer-process epoch: distinguishes observations from this bridge process
+ * from historical/stale observations replayed after a restart. Used by both the
+ * replay cap and the restart-gap detection (Batch C + Batch D). */
+const observerEpoch = process.env.RELAYX_PLANNER_OBSERVER_EPOCH
+  ? String(process.env.RELAYX_PLANNER_OBSERVER_EPOCH)
+  : `${Date.now().toString(36)}_${process.pid}_${crypto.randomBytes(2).toString('hex')}`;
+
+/** Per-delivered-arm heartbeat timeout: bounded liveness detection. */
+const OBSERVER_HEARTBEAT_MS = Number(process.env.RELAYX_PLANNER_OBSERVER_HEARTBEAT_MS ?? '30000');
+const heartbeatTimers = new Map();
+
+function isArmCompletion(record) {
+  const arm = record.armId ? findArm(record.armId) : null;
+  if (!(record.state === 'finished' && arm?.ingressId && !arm.recoveryConsumed)) return false;
+  const armInstance = typeof arm.observerInstanceId === 'string' ? arm.observerInstanceId.trim() || null : null;
+  const finishingInstance = typeof record.observerInstanceId === 'string' ? record.observerInstanceId.trim() || null : null;
+  if (!armInstance) return false;
+  if (!finishingInstance) return false;
+  return finishingInstance === armInstance;
+}
+
+function rejectUnauthorizedFinishedObservation(record) {
+  if (record.state !== 'finished' || !record.armId) return null;
+  const arm = findArm(record.armId);
+  if (!arm) return 'unknown arm';
+  const armInstance = typeof arm.observerInstanceId === 'string'
+    ? arm.observerInstanceId.trim() || null
+    : null;
+  if (!armInstance) return 'missing authoritative observerInstanceId';
+  const finishingInstance = typeof record.observerInstanceId === 'string'
+    ? record.observerInstanceId.trim() || null
+    : null;
+  if (!finishingInstance) return 'missing observerInstanceId';
+  if (finishingInstance !== armInstance) return 'observer instance mismatch';
+  return null;
+}
+
+function bindArmIdentity(arm, observerInstanceId, reason) {
+  if (!arm || !observerInstanceId) return false;
+  const normalized = String(observerInstanceId).trim();
+  if (!normalized) return false;
+  const previousInstance = arm.observerInstanceId ?? null;
+  if (previousInstance && previousInstance !== normalized) {
+    arm.observerInstanceRestarted = true;
+    appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+      changes: { observerInstanceId: previousInstance, observerInstanceRestarted: true } });
+    console.log(`[bridge] ${reason} for arm ${arm.armId}: ${previousInstance} -> ${normalized}`);
+    return false;
+  }
+  if (!previousInstance) {
+    arm.observerInstanceId = normalized;
+    appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+      changes: { observerInstanceId: normalized } });
+    console.log(`[bridge] arm ${arm.armId} bound to observer instance ${normalized}`);
+  }
+  return true;
+}
+
+/** Keep the rolling diagnostic window bounded without evicting the terminal evidence
+ * needed to finish any arm that is itself retained in the ledger. */
+function retainObservation(record) {
+  observations.push(record);
+  while (observations.length > MAX_OBSERVATIONS) {
+    const evictableIndex = observations.findIndex((observation) => !isArmCompletion(observation));
+    if (evictableIndex === -1) break;
+    observations.splice(evictableIndex, 1);
+  }
+}
+
+function appendLedger(record) {
+  fs.appendFileSync(LOG_PATH, `${JSON.stringify(record)}\n`);
+}
+
+function findArm(armId) {
+  return armsById.get(armId);
+}
+
+/** Recover the observer boundary before accepting requests. Malformed/truncated
+ * trailing records are ignored; a valid earlier arm is never discarded. */
+function hydrateLedger() {
+  if (!fs.existsSync(LOG_PATH)) return;
+  const contents = fs.readFileSync(LOG_PATH, 'utf8');
+  for (const line of contents.split('\n')) {
+    if (!line.trim()) continue;
+    let record;
+    try { record = JSON.parse(line); } catch { continue; }
+    if (record.ledgerType === 'arm' && record.arm?.armId && record.arm?.conversationId) {
+      const arm = { ...record.arm };
+      allArms.push(arm);
+      armsById.set(arm.armId, arm);
+      arms.set(arm.conversationId, arm);
+    } else if (record.ledgerType === 'arm_state' && record.armId) {
+      const arm = findArm(record.armId);
+      if (arm) {
+        const changes = { ...record.changes ?? {} };
+        // The observer epoch is bridge-process-specific. After a bridge restart,
+        // replaying the old epoch would falsely match historical observations from
+        // the previous bridge process. Remove it so historical evidence is treated
+        // as audit-only, not current liveness proof.
+        delete changes.observerEpoch;
+        Object.assign(arm, changes);
+      }
+    } else if (!record.ledgerType && record.state) {
+      retainObservation(record);
+      // A `finished` observation is the durable fact. If the process died before the
+      // following arm_state append, recover the derived state from that fact rather
+      // than handing the same arm to the browser again.
+      if (isArmCompletion(record)) {
+        const arm = findArm(record.armId);
+        arm.completed = true;
+        arm.completedAt = arm.completedAt ?? record.receivedAt ?? null;
+      }
+      if (Number.isSafeInteger(record.seq)) nextObservationSeq = Math.max(nextObservationSeq, record.seq + 1);
+    }
+  }
+  // After all ledger records are hydrated (arms, arm_state, observations), reapply the
+  // rolling observation cap so replay of a large journal does not leave an unbounded
+  // array. The cap uses `isArmCompletion()` which relies on replayed `arm_state`
+  // (including `recoveryConsumed`) so protected terminal evidence survives.
+  while (observations.length > MAX_OBSERVATIONS) {
+    const evictableIndex = observations.findIndex((observation) => !isArmCompletion(observation));
+    if (evictableIndex === -1) break;
+    observations.splice(evictableIndex, 1);
+  }
+
+  // A killed append can leave an invalid fragment without its newline. Always close
+  // the final physical record before accepting new writes so the next valid arm is
+  // independently parseable on another restart.
+  if (contents.length > 0 && !contents.endsWith('\n')) fs.appendFileSync(LOG_PATH, '\n');
+}
+
+hydrateLedger();
+
+function resetHeartbeatTimer(armId) {
+  if (heartbeatTimers.has(armId)) {
+    clearTimeout(heartbeatTimers.get(armId));
+    heartbeatTimers.delete(armId);
+  }
+  const arm = findArm(armId);
+  if (!arm || arm.completed || arm.recoveryConsumed) return;
+  const timer = setTimeout(() => {
+    heartbeatTimers.delete(armId);
+    if (!arm.completed && !arm.recoveryConsumed) {
+      // Durable bounded liveness: when no observation arrives within the timeout,
+      // record a durable unconfirmed state (not a mutation to the control plane).
+      appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+        changes: { observerUnconfirmedAt: new Date().toISOString(), observerUnconfirmedReason: 'heartbeat_expired' } });
+      arm.observerUnconfirmedAt = new Date().toISOString();
+      arm.observerUnconfirmedReason = 'heartbeat_expired';
+      console.log(`[bridge] heartbeat expired for arm ${arm.armId}; durable observer_unconfirmed recorded`);
+    }
+  }, OBSERVER_HEARTBEAT_MS);
+  heartbeatTimers.set(armId, timer);
+}
 
 function json(res, code, body) {
   const payload = JSON.stringify(body, null, 2);
@@ -125,20 +281,24 @@ const server = http.createServer(async (req, res) => {
         const conversationId = String(body.conversationId ?? '').trim();
         if (!conversationId) return json(res, 400, { ok: false, reason: 'conversationId required' });
         const armId = `arm_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`;
-        arms.set(conversationId, {
+        const arm = {
           armId,
           conversationId,
           // Which Delivery this arm was created for. Scoping completions to it is what stops a
           // finished response being attributed to the NEXT baton: after the baton moves on, an
           // old arm's completion must never be picked up as the new owner's reply.
           deliveryId: String(body.deliveryId ?? '').trim() || null,
+          ingressId: String(body.ingressId ?? '').trim() || null,
           issuedAt: new Date().toISOString(),
           note: body.note ?? null,
           deliveredAt: null,
           consumed: false,
           completed: false,
-        });
-        allArms.push(arms.get(conversationId));
+        };
+        appendLedger({ ledgerType: 'arm', arm });
+        arms.set(conversationId, arm);
+        allArms.push(arm);
+        armsById.set(arm.armId, arm);
         console.log(
           `[bridge] ARM ${armId} -> conversation ${conversationId}` +
             (body.note ? ` (${body.note})` : ''),
@@ -148,6 +308,7 @@ const server = http.createServer(async (req, res) => {
 
       case 'GET /next': {
         const conversationId = String(url.searchParams.get('conversationId') ?? '').trim();
+        const incomingInstanceId = String(url.searchParams.get('observerInstanceId') ?? '').trim() || null;
         const arm = arms.get(conversationId);
         if (!arm) return json(res, 200, { ok: true, armed: false, reason: 'no arm for this conversation' });
         // One delivery -> one arm -> one completion. Once an arm has produced its completion it
@@ -161,9 +322,48 @@ const server = http.createServer(async (req, res) => {
             reason: 'this arm already produced its completion; awaiting the next delivery',
           });
         }
+        // An arm that was delivered (consumed) but never completed indicates a recovery gap:
+        // the bridge/extension restarted before the observer could report `finished`. We must
+        // NOT re-arm against it — doing so would rebaseline over a potentially completed Planner
+        // response and leave the ingress waiting forever for a completion that will never match.
+        // Return a fail-closed recovery state instead.
+        if (arm.consumed) {
+          const armInstance = arm.observerInstanceId ?? null;
+          const observerReplaced = armInstance && incomingInstanceId && incomingInstanceId !== armInstance;
+          return json(res, 200, {
+            ok: true,
+            armed: false,
+            armId: arm.armId,
+            recoveryRequired: true,
+            observerInstanceId: incomingInstanceId,
+            reason: observerReplaced
+              ? 'bootstrap arm was consumed but the observer instance has changed (content-script restart detected) — manual reconciliation required; the new instance must not continue the previous arm'
+              : 'bootstrap arm was consumed but never completed; bridge restart detected before observer finished — manual reconciliation required',
+          });
+        }
         if (!arm.consumed) {
           arm.consumed = true;
           arm.deliveredAt = new Date().toISOString();
+          arm.observerEpoch = observerEpoch;
+          if (incomingInstanceId) {
+            const previousInstance = arm.observerInstanceId ?? null;
+            if (previousInstance && previousInstance !== incomingInstanceId) {
+              arm.observerInstanceRestarted = true;
+              appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+                changes: { observerInstanceId: previousInstance, observerInstanceRestarted: true, consumed: true, deliveredAt: arm.deliveredAt, observerEpoch: observerEpoch } });
+            } else if (!previousInstance) {
+              arm.observerInstanceId = incomingInstanceId;
+              appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+                changes: { observerInstanceId: incomingInstanceId, consumed: true, deliveredAt: arm.deliveredAt, observerEpoch: observerEpoch } });
+            } else {
+              appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+                changes: { consumed: true, deliveredAt: arm.deliveredAt, observerEpoch: observerEpoch } });
+            }
+          } else {
+            appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+              changes: { consumed: true, deliveredAt: arm.deliveredAt, observerEpoch: observerEpoch } });
+          }
+          resetHeartbeatTimer(arm.armId);
           console.log(`[bridge] arm ${arm.armId} delivered to the observer`);
         }
         return json(res, 200, {
@@ -178,17 +378,72 @@ const server = http.createServer(async (req, res) => {
 
       case 'POST /observation': {
         const body = await readBody(req);
-        const record = { seq: observations.length + 1, receivedAt: new Date().toISOString(), ...body };
-        observations.push(record);
-        if (observations.length > MAX_OBSERVATIONS) observations.shift();
-        fs.appendFileSync(LOG_PATH, `${JSON.stringify(record)}\n`);
+        const record = { ...body, seq: nextObservationSeq++, receivedAt: new Date().toISOString(), observerEpoch: observerEpoch };
+
+        // Authoritative completion admission is fail-closed: a finished observation must
+        // come from the same observer instance that was delivered the arm. A different or
+        // missing instance is invalid evidence and must be rejected before it is added to
+        // the accepted observation ledger.
+        const rejectedReason = rejectUnauthorizedFinishedObservation(record);
+        if (rejectedReason) {
+          const rejection = {
+            ...record,
+            rejected: true,
+            rejectionReason: rejectedReason,
+            rejectedAt: new Date().toISOString(),
+          };
+          appendLedger({ ledgerType: 'rejected_observation', record: rejection });
+          console.log(`[bridge] reject finished observation for arm ${record.armId ?? 'unknown'}: ${rejectedReason}`);
+          return json(res, 200, { ok: true, seq: record.seq, rejected: true, reason: rejectedReason });
+        }
+
+        appendLedger(record);
+        retainObservation(record);
+
+        // Capture the observer-instance identity from the content script when it
+        // reports observations tied to this arm. This identity is what lets the
+        // bridge distinguish a current active observer from historical evidence after
+        // either a bridge restart (new epoch) or an independent content-script restart
+        // (new instance identity).
+        if (record.armId && record.observerInstanceId) {
+          const arm = findArm(record.armId);
+          if (arm) {
+            const previousInstance = arm.observerInstanceId ?? null;
+            if (previousInstance && previousInstance !== record.observerInstanceId) {
+              console.log(`[bridge] observer instance changed for arm ${arm.armId}: ${previousInstance} -> ${record.observerInstanceId}`);
+            }
+            if (!arm.observerInstanceId) {
+              arm.observerInstanceId = record.observerInstanceId;
+              appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+                changes: { observerInstanceId: record.observerInstanceId } });
+            } else if (arm.observerInstanceId !== record.observerInstanceId) {
+              console.log(`[bridge] observer instance changed for arm ${arm.armId}: ${arm.observerInstanceId} -> ${record.observerInstanceId}`);
+              arm.observerInstanceRestarted = true;
+              appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+                changes: { observerInstanceRestarted: true } });
+            }
+          }
+          if (arm && arm.observerInstanceId && arm.observerInstanceId === record.observerInstanceId && (record.state === 'armed' || record.state === 'working')) {
+            resetHeartbeatTimer(arm.armId);
+          }
+        }
 
         // Retire the arm that just produced its completion, so it is never re-delivered.
+        // Only retire when the finishing observation comes from the same observer instance
+        // that was delivered the arm; a new instance's finished record must not retire
+        // a previous instance's arm.
         if (record.state === 'finished' && record.armId) {
-          for (const arm of arms.values()) {
-            if (arm.armId === record.armId) {
+          const arm = findArm(record.armId);
+          if (arm) {
+            const finishingInstance = record.observerInstanceId ?? null;
+            const armInstance = arm.observerInstanceId ?? null;
+            if (finishingInstance && armInstance && finishingInstance !== armInstance) {
+              console.log(`[bridge] IGNORE finished for arm ${arm.armId} from different observer instance: finishing=${finishingInstance} arm=${armInstance}`);
+            } else {
               arm.completed = true;
               arm.completedAt = record.receivedAt;
+              appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+                changes: { completed: true, completedAt: arm.completedAt } });
               console.log(`[bridge] arm ${arm.armId} completed and retired`);
             }
           }
@@ -201,6 +456,21 @@ const server = http.createServer(async (req, res) => {
           (record.reason ? ` reason="${String(record.reason).slice(0, 90)}"` : '');
         console.log(`[bridge] #${record.seq} ${brief}`);
         return json(res, 200, { ok: true, seq: record.seq });
+      }
+
+      case 'POST /consume-arm': {
+        const body = await readBody(req);
+        const arm = findArm(String(body.armId ?? '').trim());
+        if (!arm?.ingressId) return json(res, 404, { ok: false, reason: 'bootstrap arm not found' });
+        arm.recoveryConsumed = true;
+        appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+          changes: { recoveryConsumed: true } });
+        while (observations.length > MAX_OBSERVATIONS) {
+          const evictableIndex = observations.findIndex((observation) => !isArmCompletion(observation));
+          if (evictableIndex === -1) break;
+          observations.splice(evictableIndex, 1);
+        }
+        return json(res, 200, { ok: true, armId: arm.armId });
       }
 
       case 'GET /latest': {
@@ -230,13 +500,66 @@ const server = http.createServer(async (req, res) => {
             armId: a.armId,
             conversationId: a.conversationId,
             deliveryId: a.deliveryId ?? null,
+            ingressId: a.ingressId ?? null,
             consumed: a.consumed,
             completed: a.completed === true,
+            // Read-only recovery signal: only true when the engine has NOT acknowledged
+            // this arm (`recoveryConsumed: false`) but the arm IS delivered (`consumed: true`)
+            // and the turn never finished (`completed !== true`). A healthy acknowledged
+            // turn (`recoveryConsumed: true`, `consumed: true`, `completed: false`) is NOT a
+            // recovery gap — it is an in-progress turn. Only a delivered-but-unacknowledged
+            // arm with no working observation evidence indicates a genuine restart gap.
+            observerInstanceRestarted: a.observerInstanceRestarted === true,
+            observerInstanceId: a.observerInstanceId ?? null,
+            observerUnconfirmedAt: a.observerUnconfirmedAt ?? null,
+            observerUnconfirmedReason: a.observerUnconfirmedReason ?? null,
+            recoveryRequired: (function checkRecovery(a) {
+              if (!a.consumed || a.completed === true) return false;
+              // A healthy acknowledged turn: engine has called /consume-arm setting
+              // recoveryConsumed. Not a gap — the observer just hasn't finished yet.
+              if (a.recoveryConsumed === true) return false;
+              // A delivered-but-unacknowledged arm with no working observation evidence:
+              // the bridge/extension may have restarted before the observer could report
+              // `working`. This is a genuine restart gap that needs operator attention.
+              // Only working observations that occurred AFTER this arm was delivered count
+              // as current active-observer evidence. A stale `working` record from before
+              // delivery (or from a previous observer process) must NOT mask a restart gap.
+              const deliveredEpoch = a.observerEpoch ?? null;
+              const deliveredAtMs = a.deliveredAt ? new Date(a.deliveredAt).getTime() : 0;
+              const armObserverInstance = a.observerInstanceId ?? null;
+              const hasRestartedObserver = a.observerInstanceRestarted === true;
+              const observerUnconfirmedMs = a.observerUnconfirmedAt ? new Date(a.observerUnconfirmedAt).getTime() : 0;
+              const hasCurrentWorkingForArm = !hasRestartedObserver && observations.some(
+                (o) => {
+                  const obsEpoch = o.observerEpoch ?? null;
+                  const obsInstance = o.observerInstanceId ?? null;
+                  const obsTime = o.receivedAt ? new Date(o.receivedAt).getTime() : 0;
+                  // A current active-observer liveness observation must:
+                  // 1) share the same observer epoch as the delivered arm (same bridge lifecycle),
+                  // 2) share the same observer instance identity (same content-script lifecycle),
+                  // 3) occur at or after delivery.
+                  // Historical armed/working observations from a previous observer instance or a previous
+                  // bridge process must NOT mask a genuine restart gap. The same-timestamp case is still
+                  // current: the observation and the delivery can be recorded within the same millisecond.
+                  const validState = o.state === 'armed' || o.state === 'working';
+                  return o.armId === a.armId && validState
+                    && obsEpoch === deliveredEpoch
+                    && obsInstance === armObserverInstance
+                    && obsTime >= deliveredAtMs
+                    && (observerUnconfirmedMs === 0 || obsTime >= observerUnconfirmedMs);
+                }
+              );
+              return !hasCurrentWorkingForArm;
+            })(a),
+            recoveryReason: a.consumed === true && a.completed !== true
+              ? (a.observerUnconfirmedReason ? `bootstrap arm consumed but observer is unconfirmed (${a.observerUnconfirmedReason}) — manual reconciliation required` : 'bootstrap arm consumed but never completed; bridge restart detected before observer finished — manual reconciliation required')
+              : null,
           })),
           allArms: allArms.map((a) => ({
             armId: a.armId,
             conversationId: a.conversationId,
             deliveryId: a.deliveryId ?? null,
+            ingressId: a.ingressId ?? null,
             completed: a.completed === true,
             issuedAt: a.issuedAt,
           })),
