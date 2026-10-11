@@ -96,6 +96,7 @@
     observer: null,
     pollTimer: null,
     flushTimer: null,
+    heartbeatTimer: null,
     unreadableStreak: 0,
   };
 
@@ -402,6 +403,36 @@
     S.pollTimer = null;
   }
 
+  function stopHeartbeat() {
+    if (S.heartbeatTimer) clearInterval(S.heartbeatTimer);
+    S.heartbeatTimer = null;
+  }
+
+  function maybeStartHeartbeat() {
+    if (S.heartbeatTimer || !S.armed || !S.armId) return;
+    S.heartbeatTimer = setInterval(() => {
+      if (!S.armed || !S.armId) return stopHeartbeat();
+      const gen = readGenerating();
+      if (gen.unreadable || !gen.generating) return;
+      const conv = readConversation();
+      if (!conv.ok || !conv.turns) return;
+      const newAssistantTurns = conv.turns.filter(
+        (t) => t.role === 'assistant' && t.turnKey !== null && !S.baselineKeys.has(t.turnKey),
+      );
+      void report('working', {
+        generatingSignal: gen.signal,
+        generatingControlLabel: gen.controlLabel,
+        generatingControlCount: gen.controlCount,
+        newAssistantTurnCount: newAssistantTurns.length,
+        trackedTurnKey: S.trackedKey,
+        streamedCharsSoFar: newAssistantTurns.length
+          ? newAssistantTurns[newAssistantTurns.length - 1].text.length
+          : 0,
+        heartbeat: true,
+      });
+    }, 7000);
+  }
+
   // ----------------------------------------------------------------------- arming
   function arm(cmd) {
     // Identity gate: we arm ONLY IF the conversation this tab is actually showing is the one
@@ -443,6 +474,8 @@
 
     stopPoll();
     startObserver();
+    stopHeartbeat();
+    maybeStartHeartbeat();
 
     void report('armed', {
       requestedConversationId: cmd.requestedConversationId,
@@ -465,6 +498,7 @@
     S.trackedKey = null;
     S.sawGenerating = false;
     S.reportedWorking = false;
+    stopHeartbeat();
     stopObserver();
     startPoll();
     void report('disarmed', { reason: reason ?? 'completion reported' });
@@ -565,11 +599,13 @@
             : 0,
         });
       }
+      maybeStartHeartbeat();
       return;
     }
 
     // Not generating. Only a stop AFTER we actually saw it generating produces a completion;
     // otherwise this is an idle tick and says nothing about any delivery.
+    stopHeartbeat();
     if (S.sawGenerating && S.reportedWorking) {
       if (!newAssistantTurns.length) {
         void report('unreadable', {

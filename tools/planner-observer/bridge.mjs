@@ -108,6 +108,27 @@ function rejectUnauthorizedFinishedObservation(record) {
   return null;
 }
 
+function bindArmIdentity(arm, observerInstanceId, reason) {
+  if (!arm || !observerInstanceId) return false;
+  const normalized = String(observerInstanceId).trim();
+  if (!normalized) return false;
+  const previousInstance = arm.observerInstanceId ?? null;
+  if (previousInstance && previousInstance !== normalized) {
+    arm.observerInstanceRestarted = true;
+    appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+      changes: { observerInstanceId: previousInstance, observerInstanceRestarted: true } });
+    console.log(`[bridge] ${reason} for arm ${arm.armId}: ${previousInstance} -> ${normalized}`);
+    return false;
+  }
+  if (!previousInstance) {
+    arm.observerInstanceId = normalized;
+    appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+      changes: { observerInstanceId: normalized } });
+    console.log(`[bridge] arm ${arm.armId} bound to observer instance ${normalized}`);
+  }
+  return true;
+}
+
 /** Keep the rolling diagnostic window bounded without evicting the terminal evidence
  * needed to finish any arm that is itself retained in the ledger. */
 function retainObservation(record) {
@@ -324,8 +345,24 @@ const server = http.createServer(async (req, res) => {
           arm.consumed = true;
           arm.deliveredAt = new Date().toISOString();
           arm.observerEpoch = observerEpoch;
-          appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
-            changes: { consumed: true, deliveredAt: arm.deliveredAt, observerEpoch: observerEpoch } });
+          if (incomingInstanceId) {
+            const previousInstance = arm.observerInstanceId ?? null;
+            if (previousInstance && previousInstance !== incomingInstanceId) {
+              arm.observerInstanceRestarted = true;
+              appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+                changes: { observerInstanceId: previousInstance, observerInstanceRestarted: true, consumed: true, deliveredAt: arm.deliveredAt, observerEpoch: observerEpoch } });
+            } else if (!previousInstance) {
+              arm.observerInstanceId = incomingInstanceId;
+              appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+                changes: { observerInstanceId: incomingInstanceId, consumed: true, deliveredAt: arm.deliveredAt, observerEpoch: observerEpoch } });
+            } else {
+              appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+                changes: { consumed: true, deliveredAt: arm.deliveredAt, observerEpoch: observerEpoch } });
+            }
+          } else {
+            appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+              changes: { consumed: true, deliveredAt: arm.deliveredAt, observerEpoch: observerEpoch } });
+          }
           resetHeartbeatTimer(arm.armId);
           console.log(`[bridge] arm ${arm.armId} delivered to the observer`);
         }
@@ -386,7 +423,7 @@ const server = http.createServer(async (req, res) => {
                 changes: { observerInstanceRestarted: true } });
             }
           }
-          if (arm && arm.observerInstanceId && arm.observerInstanceId === record.observerInstanceId) {
+          if (arm && arm.observerInstanceId && arm.observerInstanceId === record.observerInstanceId && (record.state === 'armed' || record.state === 'working')) {
             resetHeartbeatTimer(arm.armId);
           }
         }
@@ -497,14 +534,14 @@ const server = http.createServer(async (req, res) => {
                   const obsEpoch = o.observerEpoch ?? null;
                   const obsInstance = o.observerInstanceId ?? null;
                   const obsTime = o.receivedAt ? new Date(o.receivedAt).getTime() : 0;
-                  // A current active-observer working observation must:
+                  // A current active-observer liveness observation must:
                   // 1) share the same observer epoch as the delivered arm (same bridge lifecycle),
                   // 2) share the same observer instance identity (same content-script lifecycle),
                   // 3) occur after delivery.
-                  // Historical working observations from a previous observer instance (different
-                  // observerInstanceId) or a previous bridge process (different epoch) must NOT
-                  // mask a genuine restart gap.
-                  return o.armId === a.armId && o.state === 'working'
+                  // Historical armed/working observations from a previous observer instance or a previous
+                  // bridge process must NOT mask a genuine restart gap.
+                  const validState = o.state === 'armed' || o.state === 'working';
+                  return o.armId === a.armId && validState
                     && obsEpoch === deliveredEpoch
                     && obsInstance === armObserverInstance
                     && obsTime > deliveredAtMs
