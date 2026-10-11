@@ -44,6 +44,16 @@
   if (window.__relayxPlannerObserverV1) return;
   window.__relayxPlannerObserverV1 = true;
 
+  // Verifiable observer-instance identity: each content-script lifecycle gets
+  // its own identity. A tab reload or extension reload creates a new instance,
+  // and the bridge can distinguish historical observations from the current one.
+  const observerInstanceId = (function () {
+    const bytes = new Uint8Array(12);
+    if (typeof crypto !== 'undefined' && crypto.getRandomValues) crypto.getRandomValues(bytes);
+    else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  })();
+
   const WORKER_TARGET = 'relayx-planner-observer';
 
   // ---------------------------------------------------------------- selectors
@@ -319,6 +329,7 @@
       pageUrl: S.pageUrl,
       observedAt: new Date().toISOString(),
       observer: 'relayx-planner-observer/0.2.0-keyed-turns',
+      observerInstanceId,
       armId: S.armId,
       // Proof that monitoring needs no UI: nothing here reads a window or tab state, and the
       // document was never focused by the observer.

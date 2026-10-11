@@ -118,7 +118,15 @@ function hydrateLedger() {
       arms.set(arm.conversationId, arm);
     } else if (record.ledgerType === 'arm_state' && record.armId) {
       const arm = findArm(record.armId);
-      if (arm) Object.assign(arm, record.changes ?? {});
+      if (arm) {
+        const changes = { ...record.changes ?? {} };
+        // The observer epoch is bridge-process-specific. After a bridge restart,
+        // replaying the old epoch would falsely match historical observations from
+        // the previous bridge process. Remove it so historical evidence is treated
+        // as audit-only, not current liveness proof.
+        delete changes.observerEpoch;
+        Object.assign(arm, changes);
+      }
     } else if (!record.ledgerType && record.state) {
       retainObservation(record);
       // A `finished` observation is the durable fact. If the process died before the
@@ -283,15 +291,59 @@ const server = http.createServer(async (req, res) => {
         appendLedger(record);
         retainObservation(record);
 
+        // Capture the observer-instance identity from the content script when it
+        // reports observations tied to this arm. This identity is what lets the
+        // bridge distinguish a current active observer from historical evidence after
+        // either a bridge restart (new epoch) or an independent content-script restart
+        // (new instance identity).
+        if (record.armId && record.observerInstanceId) {
+          const arm = findArm(record.armId);
+          if (arm) {
+            const previousInstance = arm.observerInstanceId ?? null;
+            if (previousInstance && previousInstance !== record.observerInstanceId) {
+              // Independent content-script restart detected: the observer instance has
+              // changed, so historical working observations from the previous instance
+              // must not count as current liveness proof.
+              console.log(`[bridge] observer instance changed for arm ${arm.armId}: ${previousInstance} -> ${record.observerInstanceId}`);
+            }
+            // The observer instance identity is set once when the first observation
+            // arrives for this arm. If a different instance later reports, we do NOT
+            // update the identity — historical evidence from the previous instance must
+            // not be overwritten by a new instance's observations.
+            if (!arm.observerInstanceId) {
+              arm.observerInstanceId = record.observerInstanceId;
+              appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+                changes: { observerInstanceId: record.observerInstanceId } });
+            } else if (arm.observerInstanceId !== record.observerInstanceId) {
+              // Independent content-script restart detected. Once a different observer
+              // instance has reported for this arm, the previous instance's evidence
+              // must no longer count as current liveness proof.
+              console.log(`[bridge] observer instance changed for arm ${arm.armId}: ${arm.observerInstanceId} -> ${record.observerInstanceId}`);
+              arm.observerInstanceRestarted = true;
+              appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+                changes: { observerInstanceRestarted: true } });
+            }
+          }
+        }
+
         // Retire the arm that just produced its completion, so it is never re-delivered.
+        // Only retire when the finishing observation comes from the same observer instance
+        // that was delivered the arm; a new instance's finished record must not retire
+        // a previous instance's arm.
         if (record.state === 'finished' && record.armId) {
           const arm = findArm(record.armId);
           if (arm) {
-            arm.completed = true;
-            arm.completedAt = record.receivedAt;
-            appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
-              changes: { completed: true, completedAt: arm.completedAt } });
-            console.log(`[bridge] arm ${arm.armId} completed and retired`);
+            const finishingInstance = record.observerInstanceId ?? null;
+            const armInstance = arm.observerInstanceId ?? null;
+            if (finishingInstance && armInstance && finishingInstance !== armInstance) {
+              console.log(`[bridge] IGNORE finished for arm ${arm.armId} from different observer instance: finishing=${finishingInstance} arm=${armInstance}`);
+            } else {
+              arm.completed = true;
+              arm.completedAt = record.receivedAt;
+              appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+                changes: { completed: true, completedAt: arm.completedAt } });
+              console.log(`[bridge] arm ${arm.armId} completed and retired`);
+            }
           }
         }
 
@@ -355,6 +407,8 @@ const server = http.createServer(async (req, res) => {
             // turn (`recoveryConsumed: true`, `consumed: true`, `completed: false`) is NOT a
             // recovery gap — it is an in-progress turn. Only a delivered-but-unacknowledged
             // arm with no working observation evidence indicates a genuine restart gap.
+            observerInstanceRestarted: a.observerInstanceRestarted === true,
+            observerInstanceId: a.observerInstanceId ?? null,
             recoveryRequired: (function checkRecovery(a) {
               if (!a.consumed || a.completed === true) return false;
               // A healthy acknowledged turn: engine has called /consume-arm setting
@@ -368,16 +422,23 @@ const server = http.createServer(async (req, res) => {
               // delivery (or from a previous observer process) must NOT mask a restart gap.
               const deliveredEpoch = a.observerEpoch ?? null;
               const deliveredAtMs = a.deliveredAt ? new Date(a.deliveredAt).getTime() : 0;
-              const hasCurrentWorkingForArm = observations.some(
+              const armObserverInstance = a.observerInstanceId ?? null;
+              const hasRestartedObserver = a.observerInstanceRestarted === true;
+              const hasCurrentWorkingForArm = !hasRestartedObserver && observations.some(
                 (o) => {
                   const obsEpoch = o.observerEpoch ?? null;
+                  const obsInstance = o.observerInstanceId ?? null;
                   const obsTime = o.receivedAt ? new Date(o.receivedAt).getTime() : 0;
-                  // A current active-observer working observation must share the same
-                  // observer epoch as the delivered arm (current lifecycle) and occur after
-                  // delivery. A stale working record from a previous process (different epoch)
-                  // or before delivery (older time) must NOT mask a genuine restart gap.
+                  // A current active-observer working observation must:
+                  // 1) share the same observer epoch as the delivered arm (same bridge lifecycle),
+                  // 2) share the same observer instance identity (same content-script lifecycle),
+                  // 3) occur after delivery.
+                  // Historical working observations from a previous observer instance (different
+                  // observerInstanceId) or a previous bridge process (different epoch) must NOT
+                  // mask a genuine restart gap.
                   return o.armId === a.armId && o.state === 'working'
                     && obsEpoch === deliveredEpoch
+                    && obsInstance === armObserverInstance
                     && obsTime > deliveredAtMs;
                 }
               );
