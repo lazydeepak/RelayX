@@ -332,9 +332,25 @@ const server = http.createServer(async (req, res) => {
             ingressId: a.ingressId ?? null,
             consumed: a.consumed,
             completed: a.completed === true,
-            // Read-only recovery signal: true when arm was consumed but never completed,
-            // indicating a bridge/extension restart gap. Does NOT mutate arm state.
-            recoveryRequired: a.consumed === true && a.completed !== true,
+            // Read-only recovery signal: only true when the engine has NOT acknowledged
+            // this arm (`recoveryConsumed: false`) but the arm IS delivered (`consumed: true`)
+            // and the turn never finished (`completed !== true`). A healthy acknowledged
+            // turn (`recoveryConsumed: true`, `consumed: true`, `completed: false`) is NOT a
+            // recovery gap — it is an in-progress turn. Only a delivered-but-unacknowledged
+            // arm with no working observation evidence indicates a genuine restart gap.
+            recoveryRequired: (function checkRecovery(a) {
+              if (!a.consumed || a.completed === true) return false;
+              // A healthy acknowledged turn: engine has called /consume-arm setting
+              // recoveryConsumed. Not a gap — the observer just hasn't finished yet.
+              if (a.recoveryConsumed === true) return false;
+              // A delivered-but-unacknowledged arm with no working observation evidence:
+              // the bridge/extension may have restarted before the observer could report
+              // `working`. This is a genuine restart gap that needs operator attention.
+              const hasWorkingForArm = observations.some(
+                (o) => o.armId === a.armId && o.state === 'working'
+              );
+              return !hasWorkingForArm;
+            })(a),
             recoveryReason: a.consumed === true && a.completed !== true
               ? 'bootstrap arm consumed but never completed; bridge restart detected before observer finished — manual reconciliation required'
               : null,
