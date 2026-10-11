@@ -7735,7 +7735,13 @@ private isRuntimeSuspensionItemFor(
       await raise(true);
       return result('Delivery outcome is unestablished; no resend.');
     }
-    if (!latest || deliveries.some(d => d.status === 'delivered')) return result('No failed Planner handoff to retry.');
+    if (!latest || deliveries.some(d => d.status === 'delivered')) {
+      for (const item of blocked) {
+        item.resolve();
+        await this.repos.attention.save(item);
+      }
+      return result('No failed Planner handoff to retry.');
+    }
     if (latest.status !== 'failed') return result('Planner delivery is not conclusively failed.');
     const frozen = attempts.find(attempt => attempt.id === latest.attemptId);
     const pair = await this.repos.pairs.findById(assignment.pairId);

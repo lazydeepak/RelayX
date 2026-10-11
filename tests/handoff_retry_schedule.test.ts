@@ -40,7 +40,7 @@ import { SqliteRelayDatabase } from '../src/relay/persistence/sqlite/SqliteDatab
 import { RelayEngine } from '../src/relay/application/RelayEngine.ts';
 import { MockProvider } from './MockProvider.ts';
 import type { AssignmentId, PairId, RuntimeSessionId } from '../src/relay/domain/types.ts';
-import type { Assignment, Delivery } from '../src/relay/domain/entities.ts';
+import { AttentionItem, type Assignment, type Delivery } from '../src/relay/domain/entities.ts';
 
 const SECOND = 1_000;
 const MINUTE = 60 * SECOND;
@@ -758,6 +758,26 @@ describe('Only definitely-failed Deliveries are retried', () => {
     // Verify the specific items were resolved (not deleted — history preserved).
     // We can't directly query resolved items without a repo method, but the open query
     // returning zero for this Assignment confirms they are no longer open.
+  });
+
+  it('delivered retry cleanup resolves matching handoff_transfer_blocked attention before returning', async () => {
+    const derivedId = await stageFirstFailedHandover(f);
+    const derived = (await f.db.assignments.findById(derivedId))!;
+    const firstDelivery = (await f.db.deliveries.findByAssignmentId(derived.id))[0]!;
+    firstDelivery.status = 'delivered';
+    firstDelivery.updatedAt = Date.now();
+    await f.db.deliveries.save(firstDelivery);
+
+    const blocked = AttentionItem.create('critical', 'handoff_transfer_blocked', 'blocked', 'should resolve', {
+      pairId: f.pairId,
+      assignmentId: derived.id,
+    });
+    await f.db.attention.save(blocked);
+
+    const result = await f.engine['retryPlannerHandoff'](derived);
+    assert.equal(result.transition, 'awaiting_evidence', 'delivery already delivered is treated as no retry');
+    const remainingOpen = (await f.db.attention.findOpen()).filter((item) => item.assignmentId === derived.id && item.type === 'handoff_transfer_blocked');
+    assert.equal(remainingOpen.length, 0, 'matching blocked attention resolves before the delivered-Delivery early return');
   });
 
   it('resolveAmbiguousDelivery does NOT resolve unrelated handoff_transfer_blocked items', async () => {
