@@ -1,14 +1,38 @@
 import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { appendFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { PlannerObserverClient } from '../src/relay/providers/plannerObserverClient.ts';
 
 describe('Planner observer bridge restart durability', () => {
   const children: ChildProcess[] = []; const directories: string[] = [];
-  afterEach(() => { for (const child of children.splice(0)) child.kill('SIGTERM'); for (const directory of directories.splice(0)) rmSync(directory,{recursive:true,force:true}); });
+
+  async function shutdown(child: ChildProcess): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    await new Promise<void>((resolveExit) => {
+      const onExit = () => {
+        child.removeListener('exit', onExit);
+        resolveExit();
+      };
+      child.once('exit', onExit);
+      if (child.exitCode !== null || child.signalCode !== null) {
+        child.removeListener('exit', onExit);
+        resolveExit();
+        return;
+      }
+      child.kill('SIGTERM');
+    });
+  }
+
+  afterEach(async () => {
+    for (const child of children.splice(0)) {
+      await shutdown(child);
+    }
+    for (const directory of directories.splice(0)) rmSync(directory,{recursive:true,force:true});
+  });
+
   async function start(port:number,log:string):Promise<ChildProcess> {
     const child=spawn(process.execPath,[resolve('tools/planner-observer/bridge.mjs')],{
       env:{...process.env,PLANNER_OBSERVER_PORT:String(port),RELAYX_PLANNER_OBSERVER_LOG:log},stdio:'ignore'});
@@ -20,8 +44,9 @@ describe('Planner observer bridge restart durability', () => {
     throw new Error('bridge did not start');
   }
   async function stop(child:ChildProcess):Promise<void> {
-    if (child.exitCode === null) { child.kill('SIGTERM'); await new Promise<void>(resolveExit=>child.once('exit',()=>resolveExit())); }
-    children.splice(children.indexOf(child),1);
+    await shutdown(child);
+    const index = children.indexOf(child);
+    if (index !== -1) children.splice(index,1);
   }
   it('reloads exact arm and completion evidence from its append-only ledger', async () => {
     const directory=mkdtempSync(join(tmpdir(),'relayx-observer-')); directories.push(directory);
@@ -131,6 +156,49 @@ describe('Planner observer bridge restart durability', () => {
     assert.equal(armInfo.consumed,true,'arm must remain consumed');
     assert.equal(armInfo.completed,false,'arm must not be marked completed');
   });
+
+  it('hydrates nextObservationSeq past rejected observations so a restarted bridge cannot reuse a sequence number', async () => {
+    const directory=mkdtempSync(join(tmpdir(),'relayx-observer-')); directories.push(directory);
+    const log=join(directory,'observations.jsonl'); const port=18010+(process.pid%10000);
+    const bridge=await start(port,log);
+
+    try {
+      const armed=await fetch(`http://127.0.0.1:${port}/arm`,{method:'POST',headers:{'content-type':'application/json'},
+        body:JSON.stringify({conversationId:'conversation',ingressId:'ingress',note:'sequence guard'})}).then(response=>response.json()) as {armId:string};
+
+      await fetch(`http://127.0.0.1:${port}/observation`,{method:'POST',headers:{'content-type':'application/json'},
+        body:JSON.stringify({state:'finished',conversationId:'conversation',armId:armed.armId,
+          latestCompletedResponse:'rejected',observerInstanceId:'observer-1'})});
+
+      const rejectedLines = readFileSync(log,'utf8').trim().split('\n').filter(Boolean);
+      const rejected = rejectedLines.find((line) => line.includes('"ledgerType":"rejected_observation"'));
+      assert.ok(rejected, 'a rejected observation must be durably persisted');
+      const rejectedSeq = Number(JSON.parse(rejected).record.seq);
+      assert.equal(rejectedSeq, 1, 'the first rejected observation reserves sequence 1');
+
+      await stop(bridge);
+      const restarted=await start(port,log);
+      try {
+        const accepted = await fetch(`http://127.0.0.1:${port}/next?conversationId=conversation&observerInstanceId=observer-2`)
+          .then(response=>response.json()) as {armed:boolean;armId:string};
+        assert.equal(accepted.armed,true,'the arm is re-delivered to the active instance after restart');
+        const next = await fetch(`http://127.0.0.1:${port}/observation`,{method:'POST',headers:{'content-type':'application/json'},
+          body:JSON.stringify({state:'working',conversationId:'conversation',armId:armed.armId,
+            observerInstanceId:'observer-2'})}).then(response=>response.json()) as {seq:number};
+        assert.equal(next.seq, 2, 'hydration must advance past the rejected sequence before accepting the next observation');
+
+        const all = await fetch(`http://127.0.0.1:${port}/all?conversationId=conversation`).then(response=>response.json()) as {observations:Array<{state:string;seq:number;armId:string;observerInstanceId:string}>};
+        assert.equal(all.observations.some((o) => o.state === 'finished' && o.armId === armed.armId), false,
+          'rejected evidence is excluded from accepted completion recovery');
+        assert.equal(all.observations.some((o) => o.state === 'working' && o.observerInstanceId === 'observer-2'), true,
+          'new accepted evidence is durably recorded under the next sequence');
+      } finally {
+        await stop(restarted);
+      }
+    } finally {
+      await stop(bridge);
+    }
+  });
 });
 
 /**
@@ -144,7 +212,28 @@ describe('Planner observer bridge restart durability', () => {
  */
 describe('Planner observer status inspection never mutates the arm control plane', () => {
   const children: ChildProcess[] = []; const directories: string[] = [];
-  afterEach(() => { for (const child of children.splice(0)) child.kill('SIGTERM'); for (const directory of directories.splice(0)) rmSync(directory,{recursive:true,force:true}); });
+  async function shutdown(child: ChildProcess): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    await new Promise<void>((resolveExit) => {
+      const onExit = () => {
+        child.removeListener('exit', onExit);
+        resolveExit();
+      };
+      child.once('exit', onExit);
+      if (child.exitCode !== null || child.signalCode !== null) {
+        child.removeListener('exit', onExit);
+        resolveExit();
+        return;
+      }
+      child.kill('SIGTERM');
+    });
+  }
+  afterEach(async () => {
+    for (const child of children.splice(0)) {
+      await shutdown(child);
+    }
+    for (const directory of directories.splice(0)) rmSync(directory,{recursive:true,force:true});
+  });
 
   /** One bridge per test, on its own port, so no test can observe another's arm state. */
   let nextPort = 19100;
@@ -166,8 +255,9 @@ describe('Planner observer status inspection never mutates the arm control plane
     throw new Error('bridge did not start');
   }
   async function stop(child:ChildProcess):Promise<void> {
-    if (child.exitCode === null) { child.kill('SIGTERM'); await new Promise<void>(resolveExit=>child.once('exit',()=>resolveExit())); }
-    children.splice(children.indexOf(child),1);
+    await shutdown(child);
+    const index = children.indexOf(child);
+    if (index !== -1) children.splice(index,1);
   }
 
   /** Arm the observer exactly the way the engine does, and return the real client. */
@@ -302,7 +392,28 @@ describe('Planner observer status inspection never mutates the arm control plane
  */
 describe('A persisted bootstrap arm missing from a reachable ledger is surfaced, not awaited', () => {
   const children: ChildProcess[] = []; const directories: string[] = [];
-  afterEach(() => { for (const child of children.splice(0)) child.kill('SIGTERM'); for (const directory of directories.splice(0)) rmSync(directory,{recursive:true,force:true}); });
+  async function shutdown(child: ChildProcess): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    await new Promise<void>((resolveExit) => {
+      const onExit = () => {
+        child.removeListener('exit', onExit);
+        resolveExit();
+      };
+      child.once('exit', onExit);
+      if (child.exitCode !== null || child.signalCode !== null) {
+        child.removeListener('exit', onExit);
+        resolveExit();
+        return;
+      }
+      child.kill('SIGTERM');
+    });
+  }
+  afterEach(async () => {
+    for (const child of children.splice(0)) {
+      await shutdown(child);
+    }
+    for (const directory of directories.splice(0)) rmSync(directory,{recursive:true,force:true});
+  });
   let nextPort = 19400;
   async function start(port:number,log:string):Promise<ChildProcess> {
     const child=spawn(process.execPath,[resolve('tools/planner-observer/bridge.mjs')],{
@@ -315,8 +426,9 @@ describe('A persisted bootstrap arm missing from a reachable ledger is surfaced,
     throw new Error('bridge did not start');
   }
   async function stop(child:ChildProcess):Promise<void> {
-    if (child.exitCode === null) { child.kill('SIGTERM'); await new Promise<void>(resolveExit=>child.once('exit',()=>resolveExit())); }
-    children.splice(children.indexOf(child),1);
+    await shutdown(child);
+    const index = children.indexOf(child);
+    if (index !== -1) children.splice(index,1);
   }
   const clientFor = (port:number) => new PlannerObserverClient({ baseUrl: `http://127.0.0.1:${port}` });
   const ledgerSize = async (port:number) => {
