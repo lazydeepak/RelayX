@@ -173,6 +173,11 @@ function hydrateLedger() {
         delete changes.observerEpoch;
         Object.assign(arm, changes);
       }
+    } else if (record.ledgerType === 'rejected_observation' && record.record && Number.isSafeInteger(record.record.seq)) {
+      // Rejected observations still consume sequence numbers and must be treated as
+      // allocated in the durable ledger; otherwise a restarted bridge can reuse a
+      // number that was already written and then rejected.
+      nextObservationSeq = Math.max(nextObservationSeq, record.record.seq + 1);
     } else if (!record.ledgerType && record.state) {
       retainObservation(record);
       // A `finished` observation is the durable fact. If the process died before the
