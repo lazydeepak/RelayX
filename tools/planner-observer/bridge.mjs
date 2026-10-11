@@ -78,6 +78,10 @@ const observerEpoch = process.env.RELAYX_PLANNER_OBSERVER_EPOCH
   ? String(process.env.RELAYX_PLANNER_OBSERVER_EPOCH)
   : `${Date.now().toString(36)}_${process.pid}_${crypto.randomBytes(2).toString('hex')}`;
 
+/** Per-delivered-arm heartbeat timeout: bounded liveness detection. */
+const OBSERVER_HEARTBEAT_MS = Number(process.env.RELAYX_PLANNER_OBSERVER_HEARTBEAT_MS ?? '30000');
+const heartbeatTimers = new Map();
+
 function isArmCompletion(record) {
   const arm = record.armId ? findArm(record.armId) : null;
   return Boolean(record.state === 'finished' && arm?.ingressId && !arm.recoveryConsumed);
@@ -157,6 +161,28 @@ function hydrateLedger() {
 }
 
 hydrateLedger();
+
+function resetHeartbeatTimer(armId) {
+  if (heartbeatTimers.has(armId)) {
+    clearTimeout(heartbeatTimers.get(armId));
+    heartbeatTimers.delete(armId);
+  }
+  const arm = findArm(armId);
+  if (!arm || arm.completed || arm.recoveryConsumed) return;
+  const timer = setTimeout(() => {
+    heartbeatTimers.delete(armId);
+    if (!arm.completed && !arm.recoveryConsumed) {
+      // Durable bounded liveness: when no observation arrives within the timeout,
+      // record a durable unconfirmed state (not a mutation to the control plane).
+      appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
+        changes: { observerUnconfirmedAt: new Date().toISOString(), observerUnconfirmedReason: 'heartbeat_expired' } });
+      arm.observerUnconfirmedAt = new Date().toISOString();
+      arm.observerUnconfirmedReason = 'heartbeat_expired';
+      console.log(`[bridge] heartbeat expired for arm ${arm.armId}; durable observer_unconfirmed recorded`);
+    }
+  }, OBSERVER_HEARTBEAT_MS);
+  heartbeatTimers.set(armId, timer);
+}
 
 function json(res, code, body) {
   const payload = JSON.stringify(body, null, 2);
@@ -240,6 +266,7 @@ const server = http.createServer(async (req, res) => {
 
       case 'GET /next': {
         const conversationId = String(url.searchParams.get('conversationId') ?? '').trim();
+        const incomingInstanceId = String(url.searchParams.get('observerInstanceId') ?? '').trim() || null;
         const arm = arms.get(conversationId);
         if (!arm) return json(res, 200, { ok: true, armed: false, reason: 'no arm for this conversation' });
         // One delivery -> one arm -> one completion. Once an arm has produced its completion it
@@ -259,12 +286,17 @@ const server = http.createServer(async (req, res) => {
         // response and leave the ingress waiting forever for a completion that will never match.
         // Return a fail-closed recovery state instead.
         if (arm.consumed) {
+          const armInstance = arm.observerInstanceId ?? null;
+          const observerReplaced = armInstance && incomingInstanceId && incomingInstanceId !== armInstance;
           return json(res, 200, {
             ok: true,
             armed: false,
             armId: arm.armId,
             recoveryRequired: true,
-            reason: 'bootstrap arm was consumed but never completed; bridge restart detected before observer finished — manual reconciliation required',
+            observerInstanceId: incomingInstanceId,
+            reason: observerReplaced
+              ? 'bootstrap arm was consumed but the observer instance has changed (content-script restart detected) — manual reconciliation required; the new instance must not continue the previous arm'
+              : 'bootstrap arm was consumed but never completed; bridge restart detected before observer finished — manual reconciliation required',
           });
         }
         if (!arm.consumed) {
@@ -273,6 +305,7 @@ const server = http.createServer(async (req, res) => {
           arm.observerEpoch = observerEpoch;
           appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
             changes: { consumed: true, deliveredAt: arm.deliveredAt, observerEpoch: observerEpoch } });
+          resetHeartbeatTimer(arm.armId);
           console.log(`[bridge] arm ${arm.armId} delivered to the observer`);
         }
         return json(res, 200, {
@@ -323,6 +356,10 @@ const server = http.createServer(async (req, res) => {
               appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
                 changes: { observerInstanceRestarted: true } });
             }
+          }
+          // Reset bounded heartbeat timer for observations from the current observer instance.
+          if (arm && arm.observerInstanceId && arm.observerInstanceId === record.observerInstanceId) {
+            resetHeartbeatTimer(arm.armId);
           }
         }
 
@@ -409,6 +446,8 @@ const server = http.createServer(async (req, res) => {
             // arm with no working observation evidence indicates a genuine restart gap.
             observerInstanceRestarted: a.observerInstanceRestarted === true,
             observerInstanceId: a.observerInstanceId ?? null,
+            observerUnconfirmedAt: a.observerUnconfirmedAt ?? null,
+            observerUnconfirmedReason: a.observerUnconfirmedReason ?? null,
             recoveryRequired: (function checkRecovery(a) {
               if (!a.consumed || a.completed === true) return false;
               // A healthy acknowledged turn: engine has called /consume-arm setting
@@ -424,6 +463,7 @@ const server = http.createServer(async (req, res) => {
               const deliveredAtMs = a.deliveredAt ? new Date(a.deliveredAt).getTime() : 0;
               const armObserverInstance = a.observerInstanceId ?? null;
               const hasRestartedObserver = a.observerInstanceRestarted === true;
+              const observerUnconfirmedMs = a.observerUnconfirmedAt ? new Date(a.observerUnconfirmedAt).getTime() : 0;
               const hasCurrentWorkingForArm = !hasRestartedObserver && observations.some(
                 (o) => {
                   const obsEpoch = o.observerEpoch ?? null;
@@ -439,13 +479,14 @@ const server = http.createServer(async (req, res) => {
                   return o.armId === a.armId && o.state === 'working'
                     && obsEpoch === deliveredEpoch
                     && obsInstance === armObserverInstance
-                    && obsTime > deliveredAtMs;
+                    && obsTime > deliveredAtMs
+                    && (observerUnconfirmedMs === 0 || obsTime > observerUnconfirmedMs);
                 }
               );
               return !hasCurrentWorkingForArm;
             })(a),
             recoveryReason: a.consumed === true && a.completed !== true
-              ? 'bootstrap arm consumed but never completed; bridge restart detected before observer finished — manual reconciliation required'
+              ? (a.observerUnconfirmedReason ? `bootstrap arm consumed but observer is unconfirmed (${a.observerUnconfirmedReason}) — manual reconciliation required` : 'bootstrap arm consumed but never completed; bridge restart detected before observer finished — manual reconciliation required')
               : null,
           })),
           allArms: allArms.map((a) => ({

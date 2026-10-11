@@ -385,7 +385,10 @@
       // running with whatever identity it derived at load time. Re-derive whenever the page's
       // OWN url changes. This is what keeps identity from silently going stale.
       if (location.href !== S.pageUrl) refreshIdentity();
-      const cmd = await sendToWorker('next-command', { conversationId: S.conversationId });
+      const cmd = await sendToWorker('next-command', {
+        conversationId: S.conversationId,
+        observerInstanceId: observerInstanceId,
+      });
       if (cmd && cmd.ok && cmd.armed && cmd.armId && cmd.armId !== S.armId) {
         arm(cmd);
       }

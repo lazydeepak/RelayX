@@ -137,8 +137,12 @@ export class PlannerObserverClient {
       'GET', `/all?conversationId=${encodeURIComponent(conversationId)}`,
     );
     const matching = (observations ?? []).filter(o => o.conversationId === conversationId && o.armId === armId);
+    // A finished observation must come from the same observer instance that was
+    // delivered the arm. A different instance's finished record is rejected evidence
+    // and must not count as a valid completion (fix #4240058688).
+    const armInstance = (ledger.arms ?? health.arms ?? []).find(a => a.armId === armId)?.observerInstanceId ?? null;
+    const finished = matching.filter(o => o.state === 'finished' && (!o.observerInstanceId || !armInstance || o.observerInstanceId === armInstance)).pop();
     const latest = matching[matching.length - 1];
-    const finished = matching.filter(o => o.state === 'finished').pop();
     if (finished) {
       return {
         available: true, unavailableReason: null, conversationId, armId,

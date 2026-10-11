@@ -65,8 +65,9 @@ async function postObservation(payload) {
   return res.ok;
 }
 
-async function getNextCommand(conversationId) {
-  const url = `${BRIDGE_ORIGIN}/next?conversationId=${encodeURIComponent(conversationId ?? '')}`;
+async function getNextCommand(conversationId, observerInstanceId?: string) {
+  let url = `${BRIDGE_ORIGIN}/next?conversationId=${encodeURIComponent(conversationId ?? '')}`;
+  if (observerInstanceId) url += `&observerInstanceId=${encodeURIComponent(observerInstanceId)}`;
   const res = await fetch(url, { headers: { accept: 'application/json' } });
   if (!res.ok) return { ok: false, reason: `bridge HTTP ${res.status}` };
   return await res.json();
@@ -90,7 +91,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
 
       case 'next-command': {
-        const cmd = await getNextCommand(msg.conversationId);
+        const cmd = await getNextCommand(msg.conversationId, msg.observerInstanceId);
         sendResponse(cmd);
         return;
       }
