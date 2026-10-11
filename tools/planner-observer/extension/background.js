@@ -65,7 +65,7 @@ async function postObservation(payload) {
   return res.ok;
 }
 
-async function getNextCommand(conversationId, observerInstanceId?: string) {
+async function getNextCommand(conversationId, observerInstanceId) {
   let url = `${BRIDGE_ORIGIN}/next?conversationId=${encodeURIComponent(conversationId ?? '')}`;
   if (observerInstanceId) url += `&observerInstanceId=${encodeURIComponent(observerInstanceId)}`;
   const res = await fetch(url, { headers: { accept: 'application/json' } });
