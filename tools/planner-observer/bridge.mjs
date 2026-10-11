@@ -126,6 +126,16 @@ function hydrateLedger() {
       if (Number.isSafeInteger(record.seq)) nextObservationSeq = Math.max(nextObservationSeq, record.seq + 1);
     }
   }
+  // After all ledger records are hydrated (arms, arm_state, observations), reapply the
+  // rolling observation cap so replay of a large journal does not leave an unbounded
+  // array. The cap uses `isArmCompletion()` which relies on replayed `arm_state`
+  // (including `recoveryConsumed`) so protected terminal evidence survives.
+  while (observations.length > MAX_OBSERVATIONS) {
+    const evictableIndex = observations.findIndex((observation) => !isArmCompletion(observation));
+    if (evictableIndex === -1) break;
+    observations.splice(evictableIndex, 1);
+  }
+
   // A killed append can leave an invalid fragment without its newline. Always close
   // the final physical record before accepting new writes so the next valid arm is
   // independently parseable on another restart.
@@ -346,10 +356,17 @@ const server = http.createServer(async (req, res) => {
               // A delivered-but-unacknowledged arm with no working observation evidence:
               // the bridge/extension may have restarted before the observer could report
               // `working`. This is a genuine restart gap that needs operator attention.
-              const hasWorkingForArm = observations.some(
-                (o) => o.armId === a.armId && o.state === 'working'
+              // Only working observations that occurred AFTER this arm was delivered count
+              // as current active-observer evidence. A stale `working` record from before
+              // delivery (or from a previous observer process) must NOT mask a restart gap.
+              const deliveredAtMs = a.deliveredAt ? new Date(a.deliveredAt).getTime() : 0;
+              const hasCurrentWorkingForArm = observations.some(
+                (o) => {
+                  const obsTime = o.receivedAt ? new Date(o.receivedAt).getTime() : 0;
+                  return o.armId === a.armId && o.state === 'working' && obsTime > deliveredAtMs;
+                }
               );
-              return !hasWorkingForArm;
+              return !hasCurrentWorkingForArm;
             })(a),
             recoveryReason: a.consumed === true && a.completed !== true
               ? 'bootstrap arm consumed but never completed; bridge restart detected before observer finished — manual reconciliation required'
