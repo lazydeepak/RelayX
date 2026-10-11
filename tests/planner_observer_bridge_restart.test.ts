@@ -29,9 +29,9 @@ describe('Planner observer bridge restart durability', () => {
     const first=await start(port,log);
     const armed=await fetch(`http://127.0.0.1:${port}/arm`,{method:'POST',headers:{'content-type':'application/json'},
       body:JSON.stringify({conversationId:'conversation',ingressId:'ingress',note:'bootstrap ingress'})}).then(response=>response.json()) as {armId:string};
-    await fetch(`http://127.0.0.1:${port}/next?conversationId=conversation`);
+    await fetch(`http://127.0.0.1:${port}/next?conversationId=conversation&observerInstanceId=observer-1`);
     await fetch(`http://127.0.0.1:${port}/observation`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
-      state:'finished',conversationId:'conversation',armId:armed.armId,latestCompletedResponse:'done',completedTurnKey:'turn'})});
+      state:'finished',conversationId:'conversation',armId:armed.armId,latestCompletedResponse:'done',completedTurnKey:'turn',observerInstanceId:'observer-1'})});
     await stop(first);
     await start(port,log);
     const health=await fetch(`http://127.0.0.1:${port}/health`).then(response=>response.json()) as {allArms:Array<Record<string,unknown>>};
@@ -58,10 +58,10 @@ describe('Planner observer bridge restart durability', () => {
     const directory=mkdtempSync(join(tmpdir(),'relayx-observer-')); directories.push(directory);
     const log=join(directory,'observations.jsonl'); const port=18000+(process.pid%10000);
     const arm={armId:'arm_crash_window',conversationId:'conversation',deliveryId:null,ingressId:'ingress',
-      issuedAt:new Date().toISOString(),note:null,deliveredAt:new Date().toISOString(),consumed:true,completed:false};
+      issuedAt:new Date().toISOString(),note:null,deliveredAt:new Date().toISOString(),consumed:true,completed:false,observerInstanceId:'observer-1'};
     appendFileSync(log,`${JSON.stringify({ledgerType:'arm',arm})}\n${JSON.stringify({
       state:'finished',conversationId:'conversation',armId:arm.armId,latestCompletedResponse:'done',
-      completedTurnKey:'turn',seq:1,receivedAt:new Date().toISOString()})}\n`);
+      completedTurnKey:'turn',seq:1,receivedAt:new Date().toISOString(),observerInstanceId:'observer-1'})}\n`);
     await start(port,log);
     const health=await fetch(`http://127.0.0.1:${port}/health`).then(response=>response.json()) as {allArms:Array<{completed:boolean}>};
     assert.equal(health.allArms[0]!.completed,true);
@@ -72,10 +72,10 @@ describe('Planner observer bridge restart durability', () => {
     const directory=mkdtempSync(join(tmpdir(),'relayx-observer-')); directories.push(directory);
     const log=join(directory,'observations.jsonl'); const port=18000+(process.pid%10000);
     const arm={armId:'arm_old_completion',conversationId:'conversation',deliveryId:null,ingressId:'ingress',
-      issuedAt:new Date().toISOString(),note:null,deliveredAt:new Date().toISOString(),consumed:true,completed:false};
+      issuedAt:new Date().toISOString(),note:null,deliveredAt:new Date().toISOString(),consumed:true,completed:false,observerInstanceId:'observer-1'};
     appendFileSync(log,`${JSON.stringify({ledgerType:'arm',arm})}\n${JSON.stringify({
       state:'finished',conversationId:'conversation',armId:arm.armId,latestCompletedResponse:'done',
-      completedTurnKey:'turn',seq:1,receivedAt:new Date().toISOString()})}\n`);
+      completedTurnKey:'turn',seq:1,receivedAt:new Date().toISOString(),observerInstanceId:'observer-1'})}\n`);
     for(let seq=2;seq<=5002;seq++) appendFileSync(log,`${JSON.stringify({state:'working',conversationId:'other',seq})}\n`);
     await start(port,log);
     const all=await fetch(`http://127.0.0.1:${port}/all?conversationId=conversation`).then(response=>response.json()) as {observations:Array<{armId:string}>};
@@ -405,10 +405,10 @@ describe('A persisted bootstrap arm missing from a reachable ledger is surfaced,
     try {
       const client = clientFor(port);
       const arm = await client.ensureBootstrapArmed('conversation', 'ingress');
-      await fetch(`http://127.0.0.1:${port}/next?conversationId=conversation`);
+      await fetch(`http://127.0.0.1:${port}/next?conversationId=conversation&observerInstanceId=observer-1`);
       await fetch(`http://127.0.0.1:${port}/observation`,{method:'POST',headers:{'content-type':'application/json'},
         body:JSON.stringify({state:'finished',conversationId:'conversation',armId:arm.armId,
-          latestCompletedResponse:'the real answer',completedTurnKey:'turn-key'})});
+          latestCompletedResponse:'the real answer',completedTurnKey:'turn-key',observerInstanceId:'observer-1'})});
 
       const status = await client.bootstrapStatus('conversation', arm.armId);
       assert.equal(status.recoveryRequired, false, 'a completed arm is not a recovery gap');

@@ -148,7 +148,7 @@ export class PlannerObserverClient {
     const finished = matching.filter((o) => {
       if (o.state !== 'finished') return false;
       const observedInstance = typeof o.observerInstanceId === 'string' ? o.observerInstanceId.trim() : '';
-      if (!armInstance) return true;
+      if (!armInstance) return false;
       if (!observedInstance) return false;
       return observedInstance === armInstance;
     }).pop();
@@ -263,7 +263,7 @@ export class PlannerObserverClient {
   }
 
   private async armLedger(conversationId: string): Promise<
-    Array<{ armId: string; deliveryId: string | null; completed: boolean; issuedAt: string | null }>
+    Array<{ armId: string; deliveryId: string | null; completed: boolean; issuedAt: string | null; observerInstanceId: string | null }>
   > {
     const health = await this.request<{
       allArms?: Array<{
@@ -272,8 +272,9 @@ export class PlannerObserverClient {
         deliveryId: string | null;
         completed?: boolean;
         issuedAt?: string;
+        observerInstanceId?: string | null;
       }>;
-      arms?: Array<{ armId: string; conversationId: string; deliveryId?: string | null; completed?: boolean }>;
+      arms?: Array<{ armId: string; conversationId: string; deliveryId?: string | null; completed?: boolean; observerInstanceId?: string | null; issuedAt?: string }>;
     }>('GET', '/health');
     const rows = health.allArms ?? health.arms ?? [];
     return rows
@@ -283,6 +284,7 @@ export class PlannerObserverClient {
         deliveryId: a.deliveryId ?? null,
         completed: a.completed === true,
         issuedAt: (a as { issuedAt?: string }).issuedAt ?? null,
+        observerInstanceId: typeof a.observerInstanceId === 'string' ? a.observerInstanceId.trim() || null : null,
       }));
   }
 
@@ -348,6 +350,7 @@ export class PlannerObserverClient {
       deliveryId: string | null;
       completed: boolean;
       issuedAt: string | null;
+      observerInstanceId?: string | null;
     }>;
     try {
       const all = await this.request<{ observations: RawObservation[] }>(
@@ -364,7 +367,7 @@ export class PlannerObserverClient {
     // Check /health for recoveryRequired (consumed-but-uncompleted arm after restart).
     // This is a READ-ONLY endpoint — it does not mutate arm state or deliver arms.
     // Only applies to bootstrap arms where deliveryId is the ingressId.
-    const health = await this.request<{ arms?: Array<{ armId: string; conversationId: string; consumed: boolean; completed: boolean; recoveryRequired?: boolean; recoveryReason?: string }> }>('GET', '/health');
+    const health = await this.request<{ arms?: Array<{ armId: string; conversationId: string; consumed: boolean; completed: boolean; recoveryRequired?: boolean; recoveryReason?: string; observerInstanceId?: string | null }>; allArms?: Array<{ armId: string; conversationId: string; observerInstanceId?: string | null }> }>('GET', '/health');
     const armInfo = health.arms?.find(a => a.conversationId === conversationId && a.recoveryRequired);
     if (armInfo?.recoveryRequired) {
       return {
@@ -384,24 +387,39 @@ export class PlannerObserverClient {
     const armIdsForThisDelivery = new Set(
       ledger.filter((a) => a.deliveryId === deliveryId).map((a) => a.armId),
     );
+    const armIdentityById = new Map(
+      [...(health.allArms ?? []), ...(health.arms ?? [])]
+        .filter((a) => typeof a.armId === 'string')
+        .map((a) => [a.armId, (a as { observerInstanceId?: string | null }).observerInstanceId ?? null]),
+    );
     const attributed = observations
-      .filter((o) => o.state === 'finished' && o.armId && armIdsForThisDelivery.has(String(o.armId)))
+      .filter((o) => {
+        if (o.state !== 'finished' || !o.armId || !armIdsForThisDelivery.has(String(o.armId))) return false;
+        const armInstance = armIdentityById.get(String(o.armId));
+        if (!armInstance) return false;
+        const observedInstance = typeof o.observerInstanceId === 'string' ? o.observerInstanceId.trim() : '';
+        if (!observedInstance) return false;
+        return observedInstance === armInstance;
+      })
       .pop();
 
     // A completion whose arm the ledger cannot resolve happens when the observer was armed
     // against an EARLIER bridge process and outlived it. The turn really did complete, so it is
-    // adopted — but only if it was observed AFTER this Delivery's arm was issued. That bound is
-    // what makes adoption safe: a stale completion necessarily predates any later arm, so it can
-    // never be stolen by the NEXT baton.
+    // adopted — but only if it was observed AFTER this Delivery's arm was issued and from the
+    // same authoritative observer instance that was delivered the arm. If the arm never bound an
+    // observer identity, no completion is trusted from that boundary.
     const currentArm = ledger.filter((a) => a.deliveryId === deliveryId).pop() ?? null;
+    const currentArmInstance = currentArm?.observerInstanceId ?? armIdentityById.get(currentArm?.armId ?? '') ?? null;
     const issuedAtMs = currentArm?.issuedAt ? Date.parse(currentArm.issuedAt) : Number.NaN;
     const unattributed =
-      attributed || !Number.isFinite(issuedAtMs)
+      attributed || !Number.isFinite(issuedAtMs) || !currentArmInstance
         ? null
         : (observations
             .filter((o) => {
               if (o.state !== 'finished' || !o.armId) return false;
               if (armIdsForThisDelivery.has(String(o.armId))) return false;
+              const thisInstance = typeof o.observerInstanceId === 'string' ? o.observerInstanceId.trim() : '';
+              if (!thisInstance || thisInstance !== currentArmInstance) return false;
               const at = Date.parse(String(o.observedAt ?? ''));
               return Number.isFinite(at) && at > issuedAtMs;
             })

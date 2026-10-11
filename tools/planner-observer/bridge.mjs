@@ -87,7 +87,7 @@ function isArmCompletion(record) {
   if (!(record.state === 'finished' && arm?.ingressId && !arm.recoveryConsumed)) return false;
   const armInstance = typeof arm.observerInstanceId === 'string' ? arm.observerInstanceId.trim() || null : null;
   const finishingInstance = typeof record.observerInstanceId === 'string' ? record.observerInstanceId.trim() || null : null;
-  if (!armInstance) return true;
+  if (!armInstance) return false;
   if (!finishingInstance) return false;
   return finishingInstance === armInstance;
 }
@@ -99,7 +99,7 @@ function rejectUnauthorizedFinishedObservation(record) {
   const armInstance = typeof arm.observerInstanceId === 'string'
     ? arm.observerInstanceId.trim() || null
     : null;
-  if (!armInstance) return null;
+  if (!armInstance) return 'missing authoritative observerInstanceId';
   const finishingInstance = typeof record.observerInstanceId === 'string'
     ? record.observerInstanceId.trim() || null
     : null;

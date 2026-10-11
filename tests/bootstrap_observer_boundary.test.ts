@@ -13,7 +13,7 @@ it('bootstrap observation scopes exact arms and retains retired boundaries witho
     res.setHeader('Content-Type', 'application/json');
     if (req.url === '/arm') {
       posted = JSON.parse(Buffer.concat(chunks).toString());
-      arms.push({ ...posted, armId: 'bootstrap-arm', completed: false });
+      arms.push({ ...posted, armId: 'bootstrap-arm', completed: false, observerInstanceId: 'observer-1' });
       res.end(JSON.stringify({ ok: true, armId: 'bootstrap-arm' }));
     } else if (req.url === '/health') {
       res.end(JSON.stringify({ allArms: arms }));
@@ -38,11 +38,43 @@ it('bootstrap observation scopes exact arms and retains retired boundaries witho
     assert.strictEqual(reused.armId, arm.armId);
     assert.strictEqual(reused.reused, true, 'retirement must not replace the boundary');
     observations.push({ state: 'finished', conversationId: 'conversation', armId: arm.armId,
-      latestCompletedResponse: 'new work', completedTurnKey: 'new-turn', responseHash: 'hash', responseLength: 8 });
-    arms = []; // bridge ledger loss cannot change the persisted arm match
+      latestCompletedResponse: 'new work', completedTurnKey: 'new-turn', responseHash: 'hash', responseLength: 8,
+      observerInstanceId: 'observer-1' });
+    arms[0].observerInstanceId = 'observer-1';
     const completion = (await client.bootstrapStatus('conversation', arm.armId)).completion;
     assert.strictEqual(completion?.responseText, 'new work');
     assert.strictEqual(completion?.completedTurnKey, 'new-turn');
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve()));
+  }
+});
+
+it('bootstrap completion is rejected when the delivered arm has no authoritative observer instance', async () => {
+  let arms: any[] = [{ armId: 'bootstrap-arm', conversationId: 'conversation', completed: false, ingressId: 'ingress' }];
+  const observations = [{
+    state: 'finished',
+    conversationId: 'conversation',
+    armId: 'bootstrap-arm',
+    observerInstanceId: 'unknown-instance',
+    latestCompletedResponse: 'not authoritative',
+    responseHash: 'hash',
+    responseLength: 8,
+    observedAt: '2025-01-01T00:00:00.000Z',
+  }];
+  const server = createServer(async (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/health') {
+      res.end(JSON.stringify({ allArms: arms, arms }));
+    } else {
+      res.end(JSON.stringify({ observations }));
+    }
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address() as { port: number };
+    const client = new PlannerObserverClient({ baseUrl: `http://127.0.0.1:${address.port}` });
+    assert.strictEqual((await client.bootstrapStatus('conversation', 'bootstrap-arm')).completion, null);
+    assert.strictEqual((await client.status('conversation', 'delivery-1')).completion, null);
   } finally {
     await new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve()));
   }
