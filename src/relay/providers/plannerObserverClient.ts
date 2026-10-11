@@ -74,6 +74,7 @@ interface RawObservation {
   reason?: string;
   generatingControlCount?: number;
   finishedControlCount?: number;
+  observerInstanceId?: string | null;
 }
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8791';
@@ -113,7 +114,7 @@ export class PlannerObserverClient {
   async bootstrapStatus(conversationId: string, armId: string): Promise<PlannerObserverStatus> {
     // Read-only ledger inspection. `/health` and `/all` never deliver an arm and never persist state.
     let ledger: {
-      arms?: Array<{ armId: string; conversationId: string; consumed?: boolean; completed?: boolean; recoveryRequired?: boolean; recoveryReason?: string }>;
+      arms?: Array<{ armId: string; conversationId: string; consumed?: boolean; completed?: boolean; recoveryRequired?: boolean; recoveryReason?: string; observerInstanceId?: string | null; observerInstanceRestarted?: boolean; observerUnconfirmedAt?: string | null; observerUnconfirmedReason?: string | null }>;
       allArms?: Array<{ armId: string; conversationId: string; completed?: boolean }>;
     };
     try {
@@ -140,8 +141,8 @@ export class PlannerObserverClient {
     // A finished observation must come from the same observer instance that was
     // delivered the arm. A different instance's finished record is rejected evidence
     // and must not count as a valid completion (fix #4240058688).
-    const armInstance = (ledger.arms ?? health.arms ?? []).find(a => a.armId === armId)?.observerInstanceId ?? null;
-    const finished = matching.filter(o => o.state === 'finished' && (!o.observerInstanceId || !armInstance || o.observerInstanceId === armInstance)).pop();
+    const armInstance = (ledger.arms ?? []).find(a => a.armId === armId)?.observerInstanceId ?? null;
+    const finished = matching.filter(o => o.state === 'finished' && (o.observerInstanceId === armInstance)).pop();
     const latest = matching[matching.length - 1];
     if (finished) {
       return {
