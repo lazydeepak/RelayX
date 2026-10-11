@@ -6026,6 +6026,72 @@ private isRuntimeSuspensionItemFor(
       );
     }
 
+    if (status.recoveryRequired) {
+      const reason = status.recoveryReason ?? 'Planner observer arm was consumed and never finished; manual reconciliation required';
+      const delivery = batonDeliveryId ? await this.repos.deliveries.findById(batonDeliveryId) : null;
+      const assignmentId = delivery?.assignmentId ?? null;
+      const pairId = assignmentId ? (await this.repos.assignments.findById(assignmentId))?.pairId ?? null : null;
+      const suggestedAction =
+        `Reconcile Delivery ${batonDeliveryId ?? 'unknown'} arm ${status.armId ?? arm.armId}; recovery restarts from the Planner and does not re-arm or resend. ` +
+        `The arm belongs to Pair ${pairId ?? 'unknown'} and must be reconciled before any new Planner response is treated as current.`;
+      const existing = pairId && assignmentId
+        ? (await this.repos.attention.findOpen()).find((item) =>
+            item.type === 'handoff_transfer_blocked' &&
+            item.assignmentId === assignmentId &&
+            item.pairId === pairId &&
+            item.suggestedAction === suggestedAction,
+          )
+        : null;
+      if (!existing && pairId && assignmentId) {
+        await this.repos.attention.save(AttentionItem.create(
+          'critical',
+          'handoff_transfer_blocked',
+          `Planner delivery arm unrecoverable for ${batonDeliveryId ?? 'delivery'}`,
+          reason + ' Recovery restarts from the Planner; do not re-arm, rebaseline, resend, or fabricate a completed response.',
+          {
+            pairId,
+            assignmentId,
+            suggestedAction,
+            suggestedTier: 'tier_2_planner_assisted',
+          },
+        ));
+      }
+      return {
+        report: {
+          ...base,
+          transcriptReadable: true,
+          boundaryAnchorMessageId: arm.armId,
+          inFlight: false,
+          providerReportedWorking: false,
+          hasCompletedResponse: false,
+          capturedResponseIsNewest: false,
+          completedTurnMessageId: null,
+          completedTurnFinish: null,
+          completedTurnTextLength: null,
+          terminalErrorType: null,
+        },
+        completion: {
+          boundary: {
+            source: 'observer_arm_baseline',
+            recordedAnchorMessageId: arm.armId,
+            instructionTurnId: null,
+            instructionTurnCreatedAt: null,
+            instructionMatchKind: 'none',
+            callerAfterCreatedAt: null,
+          },
+          assistantTurnCount: 0,
+          hasCompletedResponse: false,
+          inFlight: false,
+          newestAssistantMessageId: null,
+          response: null,
+          capturedResponseIsNewest: false,
+          terminalError: null,
+          unreadableMiddle: false,
+          chronologicalOrderDerived: false,
+        },
+      };
+    }
+
     // Armed, no completion yet: the instruction was delivered and the Planner has not answered.
     //
     // This is returned as a real in-flight completion rather than `null`, because the existing

@@ -619,9 +619,9 @@
       return;
     }
 
-    // Not generating. Only a stop AFTER we actually saw it generating produces a completion;
-    // otherwise this is an idle tick and says nothing about any delivery.
-    stopHeartbeat();
+    // Not generating. Ordinary idle DOM churn is not a completion signal, and it must not
+    // cancel the active heartbeat while the arm remains valid. A heartbeat only stops on an
+    // actual completion, disarm, or authoritative observer-state loss.
     if (S.sawGenerating && S.reportedWorking) {
       if (!newAssistantTurns.length) {
         void report('unreadable', {
