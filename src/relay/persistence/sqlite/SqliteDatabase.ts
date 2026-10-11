@@ -42,6 +42,7 @@ import {
 import { SqliteProviderSettingsRepository } from './SqliteProviderSettingsRepository.ts';
 import { SqliteHealthObservationRepository, SqliteHealthIncidentRepository } from './SqliteHealthRepository.ts';
 import { SqliteRelayIngressRepository } from './SqliteRelayIngressRepository.ts';
+import { SqliteModelCatalogRepository } from './SqliteModelCatalogRepository.ts';
 
 function tableExists(db: DatabaseSync, tableName: string): boolean {
   const rows = db
@@ -91,6 +92,7 @@ export class SqliteRelayDatabase implements IRelayRepositories {
   public readonly healthObservations: SqliteHealthObservationRepository;
   public readonly healthIncidents: SqliteHealthIncidentRepository;
   public readonly relayIngresses: SqliteRelayIngressRepository;
+  public readonly modelCatalogs: SqliteModelCatalogRepository;
 
   constructor(filePath = ':memory:') {
     this.db = new DatabaseSync(filePath);
@@ -118,10 +120,12 @@ export class SqliteRelayDatabase implements IRelayRepositories {
     this.healthObservations = new SqliteHealthObservationRepository(this.db);
     this.healthIncidents = new SqliteHealthIncidentRepository(this.db);
     this.relayIngresses = new SqliteRelayIngressRepository(this.db);
+    this.modelCatalogs = new SqliteModelCatalogRepository(this.db);
   }
 
   private initSchema(): void {
     this.db.exec('PRAGMA foreign_keys = ON;');
+    SqliteModelCatalogRepository.initSchema(this.db);
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS projects (
