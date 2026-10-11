@@ -71,6 +71,12 @@ const armsById = new Map();
 const observations = [];
 const MAX_OBSERVATIONS = 5000;
 let nextObservationSeq = 1;
+/** Durable observer-process epoch: distinguishes observations from this bridge process
+ * from historical/stale observations replayed after a restart. Used by both the
+ * replay cap and the restart-gap detection (Batch C + Batch D). */
+const observerEpoch = process.env.RELAYX_PLANNER_OBSERVER_EPOCH
+  ? String(process.env.RELAYX_PLANNER_OBSERVER_EPOCH)
+  : `${Date.now().toString(36)}_${process.pid}_${crypto.randomBytes(2).toString('hex')}`;
 
 function isArmCompletion(record) {
   const arm = record.armId ? findArm(record.armId) : null;
@@ -256,8 +262,9 @@ const server = http.createServer(async (req, res) => {
         if (!arm.consumed) {
           arm.consumed = true;
           arm.deliveredAt = new Date().toISOString();
+          arm.observerEpoch = observerEpoch;
           appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
-            changes: { consumed: true, deliveredAt: arm.deliveredAt } });
+            changes: { consumed: true, deliveredAt: arm.deliveredAt, observerEpoch: observerEpoch } });
           console.log(`[bridge] arm ${arm.armId} delivered to the observer`);
         }
         return json(res, 200, {
@@ -272,7 +279,7 @@ const server = http.createServer(async (req, res) => {
 
       case 'POST /observation': {
         const body = await readBody(req);
-        const record = { ...body, seq: nextObservationSeq++, receivedAt: new Date().toISOString() };
+        const record = { ...body, seq: nextObservationSeq++, receivedAt: new Date().toISOString(), observerEpoch: observerEpoch };
         appendLedger(record);
         retainObservation(record);
 
@@ -359,11 +366,19 @@ const server = http.createServer(async (req, res) => {
               // Only working observations that occurred AFTER this arm was delivered count
               // as current active-observer evidence. A stale `working` record from before
               // delivery (or from a previous observer process) must NOT mask a restart gap.
+              const deliveredEpoch = a.observerEpoch ?? null;
               const deliveredAtMs = a.deliveredAt ? new Date(a.deliveredAt).getTime() : 0;
               const hasCurrentWorkingForArm = observations.some(
                 (o) => {
+                  const obsEpoch = o.observerEpoch ?? null;
                   const obsTime = o.receivedAt ? new Date(o.receivedAt).getTime() : 0;
-                  return o.armId === a.armId && o.state === 'working' && obsTime > deliveredAtMs;
+                  // A current active-observer working observation must share the same
+                  // observer epoch as the delivered arm (current lifecycle) and occur after
+                  // delivery. A stale working record from a previous process (different epoch)
+                  // or before delivery (older time) must NOT mask a genuine restart gap.
+                  return o.armId === a.armId && o.state === 'working'
+                    && obsEpoch === deliveredEpoch
+                    && obsTime > deliveredAtMs;
                 }
               );
               return !hasCurrentWorkingForArm;
