@@ -84,7 +84,28 @@ const heartbeatTimers = new Map();
 
 function isArmCompletion(record) {
   const arm = record.armId ? findArm(record.armId) : null;
-  return Boolean(record.state === 'finished' && arm?.ingressId && !arm.recoveryConsumed);
+  if (!(record.state === 'finished' && arm?.ingressId && !arm.recoveryConsumed)) return false;
+  const armInstance = typeof arm.observerInstanceId === 'string' ? arm.observerInstanceId.trim() || null : null;
+  const finishingInstance = typeof record.observerInstanceId === 'string' ? record.observerInstanceId.trim() || null : null;
+  if (!armInstance) return true;
+  if (!finishingInstance) return false;
+  return finishingInstance === armInstance;
+}
+
+function rejectUnauthorizedFinishedObservation(record) {
+  if (record.state !== 'finished' || !record.armId) return null;
+  const arm = findArm(record.armId);
+  if (!arm) return 'unknown arm';
+  const armInstance = typeof arm.observerInstanceId === 'string'
+    ? arm.observerInstanceId.trim() || null
+    : null;
+  if (!armInstance) return null;
+  const finishingInstance = typeof record.observerInstanceId === 'string'
+    ? record.observerInstanceId.trim() || null
+    : null;
+  if (!finishingInstance) return 'missing observerInstanceId';
+  if (finishingInstance !== armInstance) return 'observer instance mismatch';
+  return null;
 }
 
 /** Keep the rolling diagnostic window bounded without evicting the terminal evidence
@@ -321,6 +342,24 @@ const server = http.createServer(async (req, res) => {
       case 'POST /observation': {
         const body = await readBody(req);
         const record = { ...body, seq: nextObservationSeq++, receivedAt: new Date().toISOString(), observerEpoch: observerEpoch };
+
+        // Authoritative completion admission is fail-closed: a finished observation must
+        // come from the same observer instance that was delivered the arm. A different or
+        // missing instance is invalid evidence and must be rejected before it is added to
+        // the accepted observation ledger.
+        const rejectedReason = rejectUnauthorizedFinishedObservation(record);
+        if (rejectedReason) {
+          const rejection = {
+            ...record,
+            rejected: true,
+            rejectionReason: rejectedReason,
+            rejectedAt: new Date().toISOString(),
+          };
+          appendLedger({ ledgerType: 'rejected_observation', record: rejection });
+          console.log(`[bridge] reject finished observation for arm ${record.armId ?? 'unknown'}: ${rejectedReason}`);
+          return json(res, 200, { ok: true, seq: record.seq, rejected: true, reason: rejectedReason });
+        }
+
         appendLedger(record);
         retainObservation(record);
 
@@ -334,30 +373,19 @@ const server = http.createServer(async (req, res) => {
           if (arm) {
             const previousInstance = arm.observerInstanceId ?? null;
             if (previousInstance && previousInstance !== record.observerInstanceId) {
-              // Independent content-script restart detected: the observer instance has
-              // changed, so historical working observations from the previous instance
-              // must not count as current liveness proof.
               console.log(`[bridge] observer instance changed for arm ${arm.armId}: ${previousInstance} -> ${record.observerInstanceId}`);
             }
-            // The observer instance identity is set once when the first observation
-            // arrives for this arm. If a different instance later reports, we do NOT
-            // update the identity — historical evidence from the previous instance must
-            // not be overwritten by a new instance's observations.
             if (!arm.observerInstanceId) {
               arm.observerInstanceId = record.observerInstanceId;
               appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
                 changes: { observerInstanceId: record.observerInstanceId } });
             } else if (arm.observerInstanceId !== record.observerInstanceId) {
-              // Independent content-script restart detected. Once a different observer
-              // instance has reported for this arm, the previous instance's evidence
-              // must no longer count as current liveness proof.
               console.log(`[bridge] observer instance changed for arm ${arm.armId}: ${arm.observerInstanceId} -> ${record.observerInstanceId}`);
               arm.observerInstanceRestarted = true;
               appendLedger({ ledgerType: 'arm_state', armId: arm.armId,
                 changes: { observerInstanceRestarted: true } });
             }
           }
-          // Reset bounded heartbeat timer for observations from the current observer instance.
           if (arm && arm.observerInstanceId && arm.observerInstanceId === record.observerInstanceId) {
             resetHeartbeatTimer(arm.armId);
           }

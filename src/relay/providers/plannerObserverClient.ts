@@ -115,7 +115,7 @@ export class PlannerObserverClient {
     // Read-only ledger inspection. `/health` and `/all` never deliver an arm and never persist state.
     let ledger: {
       arms?: Array<{ armId: string; conversationId: string; consumed?: boolean; completed?: boolean; recoveryRequired?: boolean; recoveryReason?: string; observerInstanceId?: string | null; observerInstanceRestarted?: boolean; observerUnconfirmedAt?: string | null; observerUnconfirmedReason?: string | null }>;
-      allArms?: Array<{ armId: string; conversationId: string; completed?: boolean }>;
+      allArms?: Array<{ armId: string; conversationId: string; completed?: boolean; observerInstanceId?: string | null }>;
     };
     try {
       ledger = await this.request('GET', '/health');
@@ -140,9 +140,18 @@ export class PlannerObserverClient {
     const matching = (observations ?? []).filter(o => o.conversationId === conversationId && o.armId === armId);
     // A finished observation must come from the same observer instance that was
     // delivered the arm. A different instance's finished record is rejected evidence
-    // and must not count as a valid completion (fix #4240058688).
-    const armInstance = (ledger.arms ?? []).find(a => a.armId === armId)?.observerInstanceId ?? null;
-    const finished = matching.filter(o => o.state === 'finished' && (o.observerInstanceId === armInstance)).pop();
+    // and must not count as a valid completion (fix #4240058688). If the arm row is
+    // no longer active but the durable ledger still retains its identity, prefer that
+    // authoritative record over accepting an arbitrary finished report.
+    const armRows = [...(ledger.arms ?? []), ...(ledger.allArms ?? [])];
+    const armInstance = armRows.find(a => a.armId === armId)?.observerInstanceId ?? null;
+    const finished = matching.filter((o) => {
+      if (o.state !== 'finished') return false;
+      const observedInstance = typeof o.observerInstanceId === 'string' ? o.observerInstanceId.trim() : '';
+      if (!armInstance) return true;
+      if (!observedInstance) return false;
+      return observedInstance === armInstance;
+    }).pop();
     const latest = matching[matching.length - 1];
     if (finished) {
       return {
